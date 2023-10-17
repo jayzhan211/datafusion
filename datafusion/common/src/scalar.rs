@@ -99,6 +99,8 @@ pub enum ScalarValue {
     Fixedsizelist(Option<Vec<ScalarValue>>, FieldRef, i32),
     /// Represents a single element of a [`ListArray`] as an [`ArrayRef`]
     List(ArrayRef),
+    /// Represents a single element of a [`StructArray`] as an [`ArrayRef`]
+    StructArr(ArrayRef),
     /// Date stored as a signed 32bit int days since UNIX epoch 1970-01-01
     Date32(Option<i32>),
     /// Date stored as a signed 64bit int milliseconds since UNIX epoch 1970-01-01
@@ -202,6 +204,8 @@ impl PartialEq for ScalarValue {
             (Fixedsizelist(_, _, _), _) => false,
             (List(v1), List(v2)) => v1.eq(v2),
             (List(_), _) => false,
+            (StructArr(arr1), StructArr(arr2)) => arr1.eq(arr2),
+            (StructArr(_), _) => false,
             (Date32(v1), Date32(v2)) => v1.eq(v2),
             (Date32(_), _) => false,
             (Date64(v1), Date64(v2)) => v1.eq(v2),
@@ -348,6 +352,10 @@ impl PartialOrd for ScalarValue {
                     None
                 }
             }
+            (StructArr(_), StructArr(_)) => {
+                todo!("StructArr partial_cmp")
+            }
+            (StructArr(_), _) => None,
             (List(_), _) => None,
             (Date32(v1), Date32(v2)) => v1.partial_cmp(v2),
             (Date32(_), _) => None,
@@ -466,7 +474,7 @@ impl std::hash::Hash for ScalarValue {
                 t.hash(state);
                 l.hash(state);
             }
-            List(arr) => {
+            List(arr) | StructArr(arr) => {
                 let arrays = vec![arr.to_owned()];
                 let hashes_buffer = &mut vec![0; arr.len()];
                 let random_state = ahash::RandomState::with_seeds(0, 0, 0, 0);
@@ -956,7 +964,9 @@ impl ScalarValue {
                 Arc::new(Field::new("item", field.data_type().clone(), true)),
                 *length,
             ),
-            ScalarValue::List(arr) => arr.data_type().to_owned(),
+            ScalarValue::List(arr) | ScalarValue::StructArr(arr) => {
+                arr.data_type().to_owned()
+            }
             ScalarValue::Date32(_) => DataType::Date32,
             ScalarValue::Date64(_) => DataType::Date64,
             ScalarValue::Time32Second(_) => DataType::Time32(TimeUnit::Second),
@@ -1104,7 +1114,9 @@ impl ScalarValue {
             ScalarValue::FixedSizeBinary(_, v) => v.is_none(),
             ScalarValue::LargeBinary(v) => v.is_none(),
             ScalarValue::Fixedsizelist(v, ..) => v.is_none(),
-            ScalarValue::List(arr) => arr.len() == arr.null_count(),
+            ScalarValue::List(arr) | ScalarValue::StructArr(arr) => {
+                arr.len() == arr.null_count()
+            }
             ScalarValue::Date32(v) => v.is_none(),
             ScalarValue::Date64(v) => v.is_none(),
             ScalarValue::Time32Second(v) => v.is_none(),
@@ -1973,6 +1985,7 @@ impl ScalarValue {
                     .collect::<Vec<_>>();
                 arrow::compute::concat(arrays.as_slice()).unwrap()
             }
+            ScalarValue::StructArr(_) => todo!("StructArray is not supported yet"),
             ScalarValue::Date32(e) => {
                 build_array_from_option!(Date32, Date32Array, e, size)
             }
@@ -2516,7 +2529,7 @@ impl ScalarValue {
                 eq_array_primitive!(array, index, LargeBinaryArray, val)
             }
             ScalarValue::Fixedsizelist(..) => unimplemented!(),
-            ScalarValue::List(_) => unimplemented!("ListArr"),
+            ScalarValue::List(_) | ScalarValue::StructArr(_) => unimplemented!("ListArr"),
             ScalarValue::Date32(val) => {
                 eq_array_primitive!(array, index, Date32Array, val)
             }
@@ -2644,7 +2657,9 @@ impl ScalarValue {
                         // `field` is boxed, so it is NOT already included in `self`
                         + field.size()
                 }
-                ScalarValue::List(arr) => arr.get_array_memory_size(),
+                ScalarValue::List(arr) | ScalarValue::StructArr(arr) => {
+                    arr.get_array_memory_size()
+                }
                 ScalarValue::Struct(vals, fields) => {
                     vals.as_ref()
                         .map(|vals| {
@@ -3011,7 +3026,7 @@ impl fmt::Display for ScalarValue {
                 )?,
                 None => write!(f, "NULL")?,
             },
-            ScalarValue::List(arr) => write!(
+            ScalarValue::List(arr) | ScalarValue::StructArr(arr) => write!(
                 f,
                 "{}",
                 arrow::util::pretty::pretty_format_columns("col", &[arr.to_owned()])
@@ -3093,6 +3108,7 @@ impl fmt::Debug for ScalarValue {
             ScalarValue::LargeBinary(Some(_)) => write!(f, "LargeBinary(\"{self}\")"),
             ScalarValue::Fixedsizelist(..) => write!(f, "FixedSizeList([{self}])"),
             ScalarValue::List(arr) => write!(f, "List([{arr:?}])"),
+            ScalarValue::StructArr(arr) => write!(f, "Struct([{arr:?}])"),
             ScalarValue::Date32(_) => write!(f, "Date32(\"{self}\")"),
             ScalarValue::Date64(_) => write!(f, "Date64(\"{self}\")"),
             ScalarValue::Time32Second(_) => write!(f, "Time32Second(\"{self}\")"),
