@@ -98,6 +98,7 @@ pub fn compare_rows(
     y: &[ScalarValue],
     sort_options: &[SortOptions],
 ) -> Result<Ordering> {
+    // println!("x: {:?}, y: {:?}, sort_options: {:?}", x, y, sort_options);
     let zip_it = x.iter().zip(y.iter()).zip(sort_options.iter());
     // Preserving lexical ordering.
     for ((lhs, rhs), sort_options) in zip_it {

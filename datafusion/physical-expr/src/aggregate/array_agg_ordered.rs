@@ -30,10 +30,10 @@ use crate::{AggregateExpr, LexOrdering, PhysicalExpr, PhysicalSortExpr};
 
 use arrow::array::ArrayRef;
 use arrow::datatypes::{DataType, Field};
-use arrow_array::Array;
+use arrow_array::{Array, StructArray, new_empty_array};
 use arrow_schema::{Fields, SortOptions};
 use datafusion_common::cast::as_list_array;
-use datafusion_common::utils::{compare_rows, get_row_at_idx};
+use datafusion_common::utils::{compare_rows, get_row_at_idx, wrap_into_list_array};
 use datafusion_common::{exec_err, DataFusionError, Result, ScalarValue};
 use datafusion_expr::Accumulator;
 
@@ -309,18 +309,28 @@ impl OrderSensitiveArrayAggAccumulator {
 
     fn evaluate_orderings(&self) -> Result<ScalarValue> {
         let fields = ordering_fields(&self.ordering_req, &self.datatypes[1..]);
+        assert_eq!(fields.len(), 1);
         let struct_field = Fields::from(fields.clone());
-        let orderings: Vec<ScalarValue> = self
-            .ordering_values
-            .iter()
-            .map(|ordering| {
-                ScalarValue::Struct(Some(ordering.clone()), struct_field.clone())
-            })
-            .collect();
-        let struct_type = DataType::Struct(Fields::from(fields));
+        let mut arr_vec = vec![];
+        for ordering in self.ordering_values.iter() {
+            assert_eq!(ordering.len(), 1);
+            let arr = ordering[0].to_array();
+            arr_vec.push(arr);
+        }
 
-        let arr = ScalarValue::new_list(&orderings, &struct_type);
-        Ok(ScalarValue::List(arr))
+        let elements = arr_vec.iter().map(|x| x.as_ref()).collect::<Vec<_>>();
+        let struct_arr = if elements.is_empty() {
+            let struct_type = DataType::Struct(struct_field.clone());
+            let struct_arr = new_empty_array(&struct_type);
+            struct_arr
+        } else {
+            let values = arrow::compute::concat(elements.as_slice())?;
+            let struct_arr =
+                StructArray::try_new(struct_field.clone(), vec![values], None)?;
+            Arc::new(struct_arr)
+        };
+        let list_arr = wrap_into_list_array(struct_arr);
+        Ok(ScalarValue::List(Arc::new(list_arr)))
     }
 }
 
@@ -502,11 +512,28 @@ fn merge_ordered_arrays(
 #[cfg(test)]
 mod tests {
     use crate::aggregate::array_agg_ordered::merge_ordered_arrays;
-    use arrow_array::{Array, ArrayRef, Int64Array};
+    use arrow_array::{Array, ArrayRef, Int64Array, StructArray};
     use arrow_schema::SortOptions;
     use datafusion_common::utils::get_row_at_idx;
     use datafusion_common::{Result, ScalarValue};
     use std::sync::Arc;
+
+    #[test]
+    fn test_structarr() {
+        // let boolean = Arc::new(BooleanArray::from(vec![false, false, true, true]));
+        // let int = Arc::new(Int32Array::from(vec![42, 28, 19, 31]));
+
+        // let struct_array = StructArray::from(vec![
+        //     (
+        //         Arc::new(Field::new("b", DataType::Boolean, false)),
+        //         boolean.clone() as ArrayRef,
+        //     ),
+        //     (
+        //         Arc::new(Field::new("c", DataType::Int32, false)),
+        //         int.clone() as ArrayRef,
+        //     ),
+        // ]);
+    }
 
     #[test]
     fn test_merge_asc() -> Result<()> {
