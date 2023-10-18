@@ -226,8 +226,7 @@ impl Accumulator for OrderSensitiveArrayAggAccumulator {
             // Ordering requirement expression values for each entry in the ARRAY_AGG list
             let other_ordering_values = self.convert_array_agg_to_orderings(orderings)?;
             for v in other_ordering_values.into_iter() {
-                let val = v.iter().map(|x|x[0].clone()).collect::<Vec<_>>();
-                partition_ordering_values.push(val);
+                partition_ordering_values.push(v);
             }
 
             let sort_options = self
@@ -291,14 +290,14 @@ impl OrderSensitiveArrayAggAccumulator {
     fn convert_array_agg_to_orderings(
         &self,
         array_agg: Vec<Vec<ScalarValue>>,
-    ) -> Result<Vec<Vec<Vec<ScalarValue>>>> {
+    ) -> Result<Vec<Vec<ScalarValue>>> {
         let mut orderings = vec![];
         // in_data is Vec<ScalarValue> where ScalarValue does not include ScalarValue::List
         for in_data in array_agg.into_iter() {
             let ordering = in_data.into_iter().map(|struct_vals| {
                     if let ScalarValue::Struct(Some(orderings), _) = struct_vals {
                         assert_eq!(orderings.len(), 1);
-                        Ok(orderings)
+                        Ok(orderings[0].clone())
                     } else {
                         exec_err!(
                             "Expects to receive ScalarValue::Struct(Some(..), _) but got:{:?}",
