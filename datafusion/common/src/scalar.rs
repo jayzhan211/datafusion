@@ -2353,6 +2353,16 @@ impl ScalarValue {
                     field_values.push(col_scalar);
                 }
                 Self::Struct(Some(field_values), fields.clone())
+                // println!("array: {:?}", array.clone());
+                // // let mut field_values: Vec<ScalarValue> = Vec::new();
+                // // for col_index in 0..array.num_columns() {
+                // //     let col_array = array.column(col_index);
+                // //     let col_scalar = ScalarValue::try_from_array(col_array, index)?;
+                // //     field_values.push(col_scalar);
+                // // }
+                // // Self::Struct(Some(field_values), fields.clone())
+                // let array = Arc::new(array.to_owned());
+                // Self::StructArr(array)
             }
             DataType::FixedSizeBinary(_) => {
                 let array = as_fixed_size_binary_array(array)?;
