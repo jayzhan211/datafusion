@@ -233,13 +233,8 @@ impl Accumulator for OrderSensitiveArrayAggAccumulator {
                 assert_eq!(col_num, 1);
                 for col_index in 0..col_num {
                     let col_array = struct_arr.column(col_index);
-                    println!("col_array: {:?}", col_array);
-                    let list_col_array = wrap_into_list_array(col_array.to_owned());
-                    let col_scalar =
-                        ScalarValue::convert_list_array_to_scalar_vec(&list_col_array)?;
-                    println!("col_scalar: {:?}", col_scalar);
-                    assert_eq!(col_scalar.len(), 1);
-                    field_values.push(col_scalar[0].clone());
+                    let col_scalar = ScalarValue::convert_non_list_array_to_scalars(&col_array)?;
+                    field_values.push(col_scalar);
                 }
             }
 
