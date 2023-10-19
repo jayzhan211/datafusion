@@ -16,6 +16,7 @@
 // under the License.
 
 use arrow::datatypes::{DataType, Field};
+use datafusion_common::cast::as_list_array;
 
 use std::any::Any;
 use std::fmt::Debug;
@@ -167,7 +168,8 @@ impl Accumulator for DistinctCountAccumulator {
             return Ok(());
         }
         assert_eq!(states.len(), 1, "array_agg states must be singleton!");
-        let scalar_vec = ScalarValue::convert_array_to_scalar_vec(&states[0])?;
+        assert!(as_list_array(&states[0]).is_ok());
+        let scalar_vec = ScalarValue::convert_list_array_to_scalar_vec(&states[0])?;
         for scalars in scalar_vec.into_iter() {
             self.values.extend(scalars)
         }

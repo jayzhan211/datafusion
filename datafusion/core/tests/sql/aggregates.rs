@@ -19,6 +19,7 @@ use super::*;
 use datafusion::scalar::ScalarValue;
 use datafusion::test_util::scan_empty;
 use datafusion_common::cast::as_float64_array;
+use datafusion_common::cast::as_list_array;
 
 #[tokio::test]
 async fn csv_query_array_agg_distinct() -> Result<()> {
@@ -47,7 +48,8 @@ async fn csv_query_array_agg_distinct() -> Result<()> {
     let column = actual[0].column(0);
     assert_eq!(column.len(), 1);
 
-    let scalar_vec = ScalarValue::convert_array_to_scalar_vec(&column)?;
+    assert!(as_list_array(column).is_ok());
+    let scalar_vec = ScalarValue::convert_list_array_to_scalar_vec(&column)?;
     let mut scalars = scalar_vec[0].clone();
     // workaround lack of Ord of ScalarValue
     let cmp = |a: &ScalarValue, b: &ScalarValue| {

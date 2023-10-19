@@ -218,12 +218,11 @@ impl Accumulator for OrderSensitiveArrayAggAccumulator {
             partition_values.push(self.values.clone());
             partition_ordering_values.push(self.ordering_values.clone());
 
+            assert!(as_list_array(array_agg_values).is_ok());
+            // Convert array to Scalars to sort them easily. Convert back to array at evaluation.
             let array_agg_res =
-                ScalarValue::convert_array_to_scalar_vec(array_agg_values)?;
-
-            for v in array_agg_res.into_iter() {
-                partition_values.push(v);
-            }
+                ScalarValue::convert_list_array_to_scalar_vec(array_agg_values)?;
+            partition_values.extend(array_agg_res);
 
             let list_arr = as_list_array(agg_orderings)?;
             let mut field_values: Vec<Vec<ScalarValue>> = Vec::new();
@@ -234,17 +233,17 @@ impl Accumulator for OrderSensitiveArrayAggAccumulator {
                 assert_eq!(col_num, 1);
                 for col_index in 0..col_num {
                     let col_array = struct_arr.column(col_index);
+                    println!("col_array: {:?}", col_array);
                     let list_col_array = wrap_into_list_array(col_array.to_owned());
                     let col_scalar =
-                        ScalarValue::convert_array_to_scalar_vec(&list_col_array)?;
+                        ScalarValue::convert_list_array_to_scalar_vec(&list_col_array)?;
+                    println!("col_scalar: {:?}", col_scalar);
                     assert_eq!(col_scalar.len(), 1);
                     field_values.push(col_scalar[0].clone());
                 }
             }
 
-            for v in field_values.into_iter() {
-                partition_ordering_values.push(v);
-            }
+            partition_ordering_values.extend(field_values);
 
             let sort_options = self
                 .ordering_req
@@ -310,12 +309,11 @@ impl OrderSensitiveArrayAggAccumulator {
         let fields = ordering_fields(&self.ordering_req, &self.datatypes[1..]);
         assert_eq!(fields.len(), 1);
         let struct_field = Fields::from(fields.clone());
-        let mut arr_vec = vec![];
-        for ordering in self.ordering_values.iter() {
-            // assert_eq!(ordering.len(), 1);
-            let arr = ordering.to_array();
-            arr_vec.push(arr);
-        }
+        let arr_vec = self
+            .ordering_values
+            .iter()
+            .map(|x| x.to_array())
+            .collect::<Vec<_>>();
 
         let elements = arr_vec.iter().map(|x| x.as_ref()).collect::<Vec<_>>();
         let struct_arr = if elements.is_empty() {
@@ -466,7 +464,6 @@ fn merge_ordered_arrays(
                     continue;
                 }
                 let ordering_v = ordering[*idx].clone() as ScalarValue;
-                // assert_eq!(ordering_v.len(), 1);
 
                 // Push the next element to the heap.
                 let elem = CustomElement::new(

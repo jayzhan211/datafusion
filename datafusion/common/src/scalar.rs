@@ -26,11 +26,12 @@ use std::{convert::TryFrom, fmt, iter::repeat, sync::Arc};
 
 use crate::cast::{
     as_decimal128_array, as_decimal256_array, as_dictionary_array,
-    as_fixed_size_binary_array, as_fixed_size_list_array, as_struct_array,
+    as_fixed_size_binary_array, as_fixed_size_list_array, as_list_array, as_struct_array,
 };
 use crate::error::{DataFusionError, Result, _internal_err, _not_impl_err};
 use crate::hash_utils::create_hashes;
 use crate::utils::wrap_into_list_array;
+
 use arrow::buffer::{NullBuffer, OffsetBuffer};
 use arrow::compute::kernels::numeric::*;
 use arrow::datatypes::{i256, FieldRef, Fields, SchemaBuilder};
@@ -46,7 +47,6 @@ use arrow::{
         DECIMAL128_MAX_PRECISION,
     },
 };
-use arrow_array::cast::as_list_array;
 use arrow_array::{ArrowNativeTypeOp, Scalar};
 
 /// Represents a dynamically typed, nullable single value.
@@ -324,8 +324,8 @@ impl PartialOrd for ScalarValue {
             (Fixedsizelist(_, _, _), _) => None,
             (List(arr1), List(arr2)) => {
                 if arr1.data_type() == arr2.data_type() {
-                    let list_arr1 = as_list_array(arr1);
-                    let list_arr2 = as_list_array(arr2);
+                    let list_arr1 = as_list_array(arr1).unwrap();
+                    let list_arr2 = as_list_array(arr2).unwrap();
                     if list_arr1.len() != list_arr2.len() {
                         return None;
                     }
@@ -1322,7 +1322,7 @@ impl ScalarValue {
                             if arr.as_any().downcast_ref::<NullArray>().is_some() {
                                 None
                             } else {
-                                let list_arr = as_list_array(&arr);
+                                let list_arr = as_list_array(&arr).unwrap();
                                 let primitive_arr =
                                     list_arr.values().as_primitive::<$ARRAY_TY>();
                                 Some(
@@ -1351,7 +1351,7 @@ impl ScalarValue {
                                 continue;
                             }
 
-                            let list_arr = as_list_array(&arr);
+                            let list_arr = as_list_array(&arr).unwrap();
                             let string_arr = $STRING_ARRAY(list_arr.values());
 
                             for v in string_arr.iter() {
@@ -1714,7 +1714,7 @@ impl ScalarValue {
                     // Element is null
                     valid.append(false);
                 } else {
-                    let list_arr = as_list_array(&arr);
+                    let list_arr = as_list_array(&arr)?;
                     let arr = list_arr.values().to_owned();
                     offsets.push(arr.len());
                     elements.push(arr);
@@ -2169,30 +2169,36 @@ impl ScalarValue {
     ///
     /// assert_eq!(scalar_vec, expected);
     /// ```
-    pub fn convert_array_to_scalar_vec(array: &dyn Array) -> Result<Vec<Vec<Self>>> {
-        let mut scalars = Vec::with_capacity(array.len());
+    pub fn convert_list_array_to_scalar_vec(array: &dyn Array) -> Result<Vec<Vec<Self>>> {
+        let mut scalars_vec = Vec::with_capacity(array.len());
 
-        for index in 0..array.len() {
-            let scalar_values = match array.data_type() {
-                DataType::List(_) => {
-                    let list_array = as_list_array(array);
-                    match list_array.is_null(index) {
-                        true => Vec::new(),
-                        false => {
-                            let nested_array = list_array.value(index);
-                            ScalarValue::convert_array_to_scalar_vec(&nested_array)?
-                                .into_iter()
-                                .flatten()
-                                .collect()
-                        }
+        if as_list_array(array).is_ok() {
+            let list_arr = as_list_array(array)?;
+            for index in 0..list_arr.len() {
+                let scalars = match list_arr.is_null(index) {
+                    true => Vec::new(),
+                    false => {
+                        let nested_array = list_arr.value(index);
+                        ScalarValue::convert_list_array_to_scalar_vec(&nested_array)?
+                            .into_iter()
+                            .flatten()
+                            .collect()
                     }
-                }
-                _ => {
-                    let scalar = ScalarValue::try_from_array(array, index)?;
-                    vec![scalar]
-                }
-            };
-            scalars.push(scalar_values);
+                };
+                scalars_vec.push(scalars);
+            }
+        } else {
+            let scalars = ScalarValue::convert_non_list_array_to_scalars(array)?;
+            scalars_vec.push(scalars);
+        }
+        Ok(scalars_vec)
+    }
+
+    pub fn convert_non_list_array_to_scalars(array: &dyn Array) -> Result<Vec<Self>> {
+        let mut scalars = Vec::with_capacity(array.len());
+        for index in 0..array.len() {
+            let scalar = ScalarValue::try_from_array(array, index)?;
+            scalars.push(scalar);
         }
         Ok(scalars)
     }
@@ -2243,7 +2249,7 @@ impl ScalarValue {
             DataType::Utf8 => typed_cast!(array, index, StringArray, Utf8),
             DataType::LargeUtf8 => typed_cast!(array, index, LargeStringArray, LargeUtf8),
             DataType::List(nested_type) => {
-                let list_array = as_list_array(array);
+                let list_array = as_list_array(array)?;
                 let arr = match list_array.is_null(index) {
                     true => new_null_array(nested_type.data_type(), 0),
                     false => {
@@ -3225,6 +3231,13 @@ mod tests {
     use super::*;
 
     #[test]
+    fn test_convert_array() {
+        let array = Int32Array::from(vec![Some(1), None, Some(2)]);
+        let scalar = ScalarValue::convert_list_array_to_scalar_vec(&array);
+        println!("{:?}", scalar);
+    }
+
+    #[test]
     fn test_to_array_of_size_for_list() {
         let arr = ListArray::from_iter_primitive::<Int32Type, _, _>(vec![Some(vec![
             Some(1),
@@ -3234,7 +3247,7 @@ mod tests {
 
         let sv = ScalarValue::List(Arc::new(arr));
         let actual_arr = sv.to_array_of_size(2);
-        let actual_list_arr = as_list_array(&actual_arr);
+        let actual_list_arr = as_list_array(&actual_arr).unwrap();
 
         let arr = ListArray::from_iter_primitive::<Int32Type, _, _>(vec![
             Some(vec![Some(1), None, Some(2)]),
@@ -3259,7 +3272,7 @@ mod tests {
             "arrow",
             "data-fusion",
         ])));
-        let result = as_list_array(&array);
+        let result = as_list_array(&array).unwrap();
         assert_eq!(result, &expected);
     }
 
@@ -3282,7 +3295,7 @@ mod tests {
         ];
 
         let array = ScalarValue::iter_to_array(scalars).unwrap();
-        let list_array = as_list_array(&array);
+        let list_array = as_list_array(&array).unwrap();
         let expected = ListArray::from_iter_primitive::<Int64Type, _, _>(vec![
             Some(vec![Some(1), Some(2), Some(3)]),
             Some(vec![Some(4), Some(5)]),
@@ -3303,7 +3316,7 @@ mod tests {
         ];
 
         let array = ScalarValue::iter_to_array(scalars).unwrap();
-        let result = as_list_array(&array);
+        let result = as_list_array(&array).unwrap();
 
         // build expected array
         let string_builder = StringBuilder::with_capacity(5, 25);
@@ -3678,7 +3691,7 @@ mod tests {
     #[test]
     fn scalar_list_null_to_array() {
         let list_array_ref = ScalarValue::new_list(&[], &DataType::UInt64);
-        let list_array = as_list_array(&list_array_ref);
+        let list_array = as_list_array(&list_array_ref).unwrap();
 
         assert_eq!(list_array.len(), 1);
         assert_eq!(list_array.values().len(), 0);
@@ -3692,7 +3705,7 @@ mod tests {
             ScalarValue::UInt64(Some(101)),
         ];
         let list_array_ref = ScalarValue::new_list(&values, &DataType::UInt64);
-        let list_array = as_list_array(&list_array_ref);
+        let list_array = as_list_array(&list_array_ref).unwrap();
         assert_eq!(list_array.len(), 1);
         assert_eq!(list_array.values().len(), 3);
 
@@ -4475,7 +4488,7 @@ mod tests {
 
         // iter_to_array for list-of-struct
         let array = ScalarValue::iter_to_array(vec![nl0, nl1, nl2]).unwrap();
-        let array = as_list_array(&array);
+        let array = as_list_array(&array).unwrap();
 
         // Construct expected array with array builders
         let field_a_builder = StringBuilder::with_capacity(4, 1024);
@@ -4654,7 +4667,7 @@ mod tests {
             ScalarValue::List(Arc::new(l3)),
         ])
         .unwrap();
-        let array = as_list_array(&array);
+        let array = as_list_array(&array).unwrap();
 
         // Construct expected array with array builders
         let inner_builder = Int32Array::builder(8);

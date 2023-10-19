@@ -18,6 +18,7 @@
 //! Implementations for DISTINCT expressions, e.g. `COUNT(DISTINCT c)`
 
 use arrow::datatypes::{DataType, Field};
+use datafusion_common::cast::as_list_array;
 use std::any::Any;
 use std::fmt::Debug;
 use std::sync::Arc;
@@ -132,10 +133,8 @@ impl Accumulator for DistinctArrayAggAccumulator {
         assert_eq!(values.len(), 1, "batch input should only include 1 column!");
 
         let array = &values[0];
-        let scalars = ScalarValue::convert_array_to_scalar_vec(array)?;
-        for scalar in scalars {
-            self.values.extend(scalar)
-        }
+        let scalars = ScalarValue::convert_non_list_array_to_scalars(array)?;
+        self.values.extend(scalars);
         Ok(())
     }
 
@@ -150,7 +149,8 @@ impl Accumulator for DistinctArrayAggAccumulator {
             "array_agg_distinct states must contain single array"
         );
 
-        let scalar_vec = ScalarValue::convert_array_to_scalar_vec(&states[0])?;
+        assert!(as_list_array(&states[0]).is_ok());
+        let scalar_vec = ScalarValue::convert_list_array_to_scalar_vec(&states[0])?;
         for scalars in scalar_vec {
             self.values.extend(scalars)
         }
