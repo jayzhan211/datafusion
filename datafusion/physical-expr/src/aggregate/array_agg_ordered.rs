@@ -30,11 +30,11 @@ use crate::{AggregateExpr, LexOrdering, PhysicalExpr, PhysicalSortExpr};
 
 use arrow::array::ArrayRef;
 use arrow::datatypes::{DataType, Field};
-use arrow_array::{Array, StructArray, new_empty_array};
+use arrow_array::{new_empty_array, Array, StructArray};
 use arrow_schema::{Fields, SortOptions};
 use datafusion_common::cast::{as_list_array, as_struct_array};
 use datafusion_common::utils::{compare_rows, get_row_at_idx, wrap_into_list_array};
-use datafusion_common::{exec_err, DataFusionError, Result, ScalarValue};
+use datafusion_common::{exec_err, internal_err, DataFusionError, Result, ScalarValue};
 use datafusion_expr::Accumulator;
 
 use itertools::izip;
@@ -151,7 +151,8 @@ pub(crate) struct OrderSensitiveArrayAggAccumulator {
     // `Vec<ScalarValue>` inside `ordering_values` which stores it ordering.
     // This information is used during merging results of the different partitions.
     // For detailed information how merging is done see [`merge_ordered_arrays`]
-    ordering_values: Vec<Vec<ScalarValue>>,
+    ordering_values: Vec<ScalarValue>,
+
     // `datatypes` stores, datatype of expression inside ARRAY_AGG and ordering requirement expressions.
     datatypes: Vec<DataType>,
     // Stores ordering requirement of the Accumulator
@@ -187,7 +188,10 @@ impl Accumulator for OrderSensitiveArrayAggAccumulator {
         for index in 0..n_row {
             let row = get_row_at_idx(values, index)?;
             self.values.push(row[0].clone());
-            self.ordering_values.push(row[1..].to_vec());
+            if let Some(second_value) = row.get(1) {
+                self.ordering_values.push(second_value.clone());
+            }
+            assert!(row.len() <= 2);
         }
 
         Ok(())
@@ -212,8 +216,7 @@ impl Accumulator for OrderSensitiveArrayAggAccumulator {
 
             // Existing values should be merged also.
             partition_values.push(self.values.clone());
-            let ordering_vals = self.ordering_values.iter().map(|x|x[0].clone()).collect::<Vec<_>>();
-            partition_ordering_values.push(ordering_vals);
+            partition_ordering_values.push(self.ordering_values.clone());
 
             let array_agg_res =
                 ScalarValue::convert_array_to_scalar_vec(array_agg_values)?;
@@ -221,8 +224,6 @@ impl Accumulator for OrderSensitiveArrayAggAccumulator {
             for v in array_agg_res.into_iter() {
                 partition_values.push(v);
             }
-
-            println!("agg_orderings: {:?}", agg_orderings);
 
             let list_arr = as_list_array(agg_orderings)?;
             let mut field_values: Vec<Vec<ScalarValue>> = Vec::new();
@@ -234,7 +235,8 @@ impl Accumulator for OrderSensitiveArrayAggAccumulator {
                 for col_index in 0..col_num {
                     let col_array = struct_arr.column(col_index);
                     let list_col_array = wrap_into_list_array(col_array.to_owned());
-                    let col_scalar = ScalarValue::convert_array_to_scalar_vec(&list_col_array)?;
+                    let col_scalar =
+                        ScalarValue::convert_array_to_scalar_vec(&list_col_array)?;
                     assert_eq!(col_scalar.len(), 1);
                     field_values.push(col_scalar[0].clone());
                 }
@@ -249,15 +251,19 @@ impl Accumulator for OrderSensitiveArrayAggAccumulator {
                 .iter()
                 .map(|sort_expr| sort_expr.options)
                 .collect::<Vec<_>>();
+            // println!("partition_values: {:?}", partition_values);
+            // println!("partition_ordering_values: {:?}", partition_ordering_values);
             let (new_values, new_orderings) = merge_ordered_arrays(
                 &partition_values,
                 &partition_ordering_values,
                 &sort_options,
             )?;
+            // println!("new_values: {:?}", new_values);
+            // println!("new_orderings: {:?}", new_orderings);
             self.values = new_values;
             self.ordering_values = new_orderings;
         } else {
-            return exec_err!("Expects to receive a list array");
+            return internal_err!("Expects to receive a list array");
         }
         Ok(())
     }
@@ -282,7 +288,8 @@ impl Accumulator for OrderSensitiveArrayAggAccumulator {
         total +=
             std::mem::size_of::<Vec<ScalarValue>>() * self.ordering_values.capacity();
         for row in &self.ordering_values {
-            total += ScalarValue::size_of_vec(row) - std::mem::size_of_val(row);
+            // total += ScalarValue::size_of_vec(row) - std::mem::size_of_val(row);
+            total += ScalarValue::size(row)
         }
 
         // Add size of the `self.datatypes`
@@ -299,54 +306,14 @@ impl Accumulator for OrderSensitiveArrayAggAccumulator {
 }
 
 impl OrderSensitiveArrayAggAccumulator {
-    /// Inner Vec\<ScalarValue> in the ordering_values can be thought as ordering information for the each ScalarValue in the values array.
-    /// See [`merge_ordered_arrays`] for more information.
-    fn convert_array_agg_to_orderings(
-        &self,
-        array_agg: Vec<Vec<ScalarValue>>,
-    ) -> Result<Vec<Vec<ScalarValue>>> {
-        let mut orderings = vec![];
-        // in_data is Vec<ScalarValue> where ScalarValue does not include ScalarValue::List
-        for in_data in array_agg.into_iter() {
-            let ordering = in_data.into_iter().map(|struct_vals| {
-                    if let ScalarValue::Struct(Some(orderings), _) = struct_vals {
-                        assert_eq!(orderings.len(), 1);
-                    // if let ScalarValue::StructArr(arr) = struct_vals {
-                    //     // assert_eq!(orderings.len(), 1);
-                    //     let array = as_struct_array(&arr)?;
-                    //     let mut field_values: Vec<ScalarValue> = Vec::new();
-                    //     let row_number = array.len();
-                    //     assert_eq!(row_number, 1);
-                    //     for index in 0..array.len() {
-                    //         for col_index in 0..array.num_columns() {
-                    //             let col_array = array.column(col_index);
-                    //             let col_scalar = ScalarValue::try_from_array(col_array, index)?;
-                    //             field_values.push(col_scalar);
-                    //         }
-                    //     }
-                    //     assert_eq!(field_values.len(), 1);
-                    //     Ok(field_values[0].clone())
-                        Ok(orderings[0].clone())
-                    } else {
-                        exec_err!(
-                            "Expects to receive ScalarValue::Struct(Some(..), _) but got:{:?}",
-                            struct_vals.data_type()
-                        )
-                    }
-                }).collect::<Result<Vec<_>>>()?;
-            orderings.push(ordering);
-        }
-        Ok(orderings)
-    }
-
     fn evaluate_orderings(&self) -> Result<ScalarValue> {
         let fields = ordering_fields(&self.ordering_req, &self.datatypes[1..]);
         assert_eq!(fields.len(), 1);
         let struct_field = Fields::from(fields.clone());
         let mut arr_vec = vec![];
         for ordering in self.ordering_values.iter() {
-            assert_eq!(ordering.len(), 1);
-            let arr = ordering[0].to_array();
+            // assert_eq!(ordering.len(), 1);
+            let arr = ordering.to_array();
             arr_vec.push(arr);
         }
 
@@ -398,11 +365,7 @@ impl<'a> CustomElement<'a> {
         }
     }
 
-    fn ordering(
-        &self,
-        current: ScalarValue,
-        target: ScalarValue,
-    ) -> Result<Ordering> {
+    fn ordering(&self, current: ScalarValue, target: ScalarValue) -> Result<Ordering> {
         // Calculate ordering according to `sort_options`
         compare_rows(&[current], &[target], self.sort_options)
     }
@@ -463,7 +426,7 @@ fn merge_ordered_arrays(
     ordering_values: &[Vec<ScalarValue>],
     // Defines according to which ordering comparisons should be done.
     sort_options: &[SortOptions],
-) -> Result<(Vec<ScalarValue>, Vec<Vec<ScalarValue>>)> {
+) -> Result<(Vec<ScalarValue>, Vec<ScalarValue>)> {
     // Keep track the most recent data of each branch, in binary heap data structure.
     let mut heap: BinaryHeap<CustomElement> = BinaryHeap::new();
 
@@ -529,12 +492,13 @@ fn merge_ordered_arrays(
         indices[branch_idx] += 1;
         let row_idx = indices[branch_idx];
         merged_values.push(min_elem.value.clone());
-        merged_orderings.push(vec![min_elem.ordering.clone()]);
+        merged_orderings.push(min_elem.ordering.clone());
         if row_idx < end_indices[branch_idx] {
             // Push next entry in the most recently consumed branch to the heap
             // If there is an available entry
             let value = values[branch_idx][row_idx].clone();
-            let ordering_row = ordering_values[branch_idx][row_idx].clone() as ScalarValue;
+            let ordering_row =
+                ordering_values[branch_idx][row_idx].clone() as ScalarValue;
             // assert_eq!(ordering_row.len(), 1);
             // let ordering_row_val = ordering_row[0].clone();
             let elem = CustomElement::new(branch_idx, value, ordering_row, sort_options);
