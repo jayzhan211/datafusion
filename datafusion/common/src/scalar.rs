@@ -1979,13 +1979,12 @@ impl ScalarValue {
             ScalarValue::Fixedsizelist(..) => {
                 unimplemented!("FixedSizeList is not supported yet")
             }
-            ScalarValue::List(arr) => {
+            ScalarValue::List(arr) | ScalarValue::StructArr(arr) => {
                 let arrays = std::iter::repeat(arr.as_ref())
                     .take(size)
                     .collect::<Vec<_>>();
                 arrow::compute::concat(arrays.as_slice()).unwrap()
             }
-            ScalarValue::StructArr(_) => todo!("StructArray is not supported yet"),
             ScalarValue::Date32(e) => {
                 build_array_from_option!(Date32, Date32Array, e, size)
             }
@@ -3238,7 +3237,42 @@ mod tests {
     }
 
     #[test]
-    fn test_to_array_of_size_for_list() {
+    fn test_to_array_of_size_for_nested() {
+        // Struct
+        let boolean = Arc::new(BooleanArray::from(vec![false, false, true, true]));
+        let int = Arc::new(Int32Array::from(vec![42, 28, 19, 31]));
+
+        let struct_array = StructArray::from(vec![
+            (
+                Arc::new(Field::new("b", DataType::Boolean, false)),
+                boolean.clone() as ArrayRef,
+            ),
+            (
+                Arc::new(Field::new("c", DataType::Int32, false)),
+                int.clone() as ArrayRef,
+            ),
+        ]);
+        let sv = ScalarValue::StructArr(Arc::new(struct_array));
+        let actual_arr = sv.to_array_of_size(2);
+
+        let boolean = Arc::new(BooleanArray::from(vec![false, false, true, true, false, false, true, true]));
+        let int = Arc::new(Int32Array::from(vec![42, 28, 19, 31, 42, 28, 19, 31]));
+
+        let struct_array = StructArray::from(vec![
+            (
+                Arc::new(Field::new("b", DataType::Boolean, false)),
+                boolean.clone() as ArrayRef,
+            ),
+            (
+                Arc::new(Field::new("c", DataType::Int32, false)),
+                int.clone() as ArrayRef,
+            ),
+        ]);
+
+        let actual = as_struct_array(&actual_arr).unwrap();
+        assert_eq!(actual, &struct_array);
+
+        // List
         let arr = ListArray::from_iter_primitive::<Int32Type, _, _>(vec![Some(vec![
             Some(1),
             None,
