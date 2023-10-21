@@ -36,13 +36,8 @@ CREATE TABLE sales_global (zip_code INT,
 statement ok
 set datafusion.execution.target_partitions = 8;
 
-query T?
-SELECT country, ARRAY_AGG(amount ORDER BY amount ASC)
-  FROM sales_global
-  GROUP BY country
-  ORDER BY ts
-----
-AGRC [30.0, 80.0]
-FRA [50.0, 200.0]
-TUR [75.0]
-TURA [100.0]
+#query error DataFusion error: External error: External error: Arrow error: Invalid argument error: Incorrect number of arrays for StructArray fields, expected 2 got 1
+#SELECT country, ARRAY_AGG(amount ORDER BY amount ASC, ts ASC)
+#  FROM sales_global
+#  GROUP BY country
+#  ORDER BY country

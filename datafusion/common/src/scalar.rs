@@ -3255,7 +3255,9 @@ mod tests {
         let sv = ScalarValue::StructArr(Arc::new(struct_array));
         let actual_arr = sv.to_array_of_size(2);
 
-        let boolean = Arc::new(BooleanArray::from(vec![false, false, true, true, false, false, true, true]));
+        let boolean = Arc::new(BooleanArray::from(vec![
+            false, false, true, true, false, false, true, true,
+        ]));
         let int = Arc::new(Int32Array::from(vec![42, 28, 19, 31, 42, 28, 19, 31]));
 
         let struct_array = StructArray::from(vec![

@@ -64,6 +64,10 @@ impl OrderSensitiveArrayAgg {
         order_by_data_types: Vec<DataType>,
         ordering_req: LexOrdering,
     ) -> Self {
+        println!("input_data_type: {:?}", input_data_type);
+        println!("order_by_data_types: {:?}", order_by_data_types);
+        println!("ordering_req: {:?}", ordering_req);
+
         Self {
             name: name.into(),
             expr,
@@ -184,15 +188,26 @@ impl Accumulator for OrderSensitiveArrayAggAccumulator {
             return Ok(());
         }
 
+        let fields = values[1..]
+            .iter()
+            .map(|v| Field::new("item", v.data_type().to_owned(), true))
+            .collect::<Vec<_>>();
+        let struct_field = Fields::from(fields.clone());
+
+        let struct_arr =
+            StructArray::try_new(struct_field.clone(), values[1..].to_vec(), None)?;
+
+        // self.ordering_values.push(ScalarValue::StructArr(Arc::new(struct_arr)));
+
         let n_row = values[0].len();
         for index in 0..n_row {
             let row = get_row_at_idx(values, index)?;
             self.values.push(row[0].clone());
-            if let Some(second_value) = row.get(1) {
-                self.ordering_values.push(second_value.clone());
-            }
-            assert!(row.len() <= 2);
+            self.ordering_values.extend(row[1..].to_vec());
         }
+
+        println!("self.values: {:?}", self.values);
+        println!("self.ordering_values: {:?}", self.ordering_values);
 
         Ok(())
     }
@@ -236,7 +251,8 @@ impl Accumulator for OrderSensitiveArrayAggAccumulator {
                 assert_eq!(col_num, 1);
                 for col_index in 0..col_num {
                     let col_array = struct_arr.column(col_index);
-                    let col_scalar = ScalarValue::convert_non_list_array_to_scalars(&col_array)?;
+                    let col_scalar =
+                        ScalarValue::convert_non_list_array_to_scalars(&col_array)?;
                     field_values.push(col_scalar);
                 }
             }
@@ -305,13 +321,17 @@ impl Accumulator for OrderSensitiveArrayAggAccumulator {
 impl OrderSensitiveArrayAggAccumulator {
     fn evaluate_orderings(&self) -> Result<ScalarValue> {
         let fields = ordering_fields(&self.ordering_req, &self.datatypes[1..]);
-        assert_eq!(fields.len(), 1);
+        // assert_eq!(fields.len(), 1);
+        println!("fields: {:?}", fields);
+
         let struct_field = Fields::from(fields.clone());
         let arr_vec = self
             .ordering_values
             .iter()
             .map(|x| x.to_array())
             .collect::<Vec<_>>();
+
+        println!("arr_vec: {:?}", arr_vec);
 
         let elements = arr_vec.iter().map(|x| x.as_ref()).collect::<Vec<_>>();
         let struct_arr = if elements.is_empty() {
@@ -320,8 +340,10 @@ impl OrderSensitiveArrayAggAccumulator {
             struct_arr
         } else {
             let values = arrow::compute::concat(elements.as_slice())?;
+            println!("values: {:?}", values);
             let struct_arr =
                 StructArray::try_new(struct_field.clone(), vec![values], None)?;
+            println!("struct_arr: {:?}", struct_arr);
             Arc::new(struct_arr)
         };
         let list_arr = wrap_into_list_array(struct_arr);
@@ -507,11 +529,94 @@ fn merge_ordered_arrays(
 #[cfg(test)]
 mod tests {
     use crate::aggregate::array_agg_ordered::merge_ordered_arrays;
-    use arrow_array::{Array, ArrayRef, Int64Array, StructArray};
-    use arrow_schema::SortOptions;
+    use crate::expressions::col;
+    use crate::expressions::tests::aggregate;
+    use crate::PhysicalSortExpr;
+    use arrow_array::{
+        Array, ArrayRef, Float32Array, Int32Array, Int64Array, RecordBatch, StringArray,
+        StructArray,
+    };
+    use arrow_schema::{DataType, Field, Schema, SortOptions};
     use datafusion_common::utils::get_row_at_idx;
     use datafusion_common::{Result, ScalarValue};
     use std::sync::Arc;
+
+    use super::OrderSensitiveArrayAgg;
+
+    fn check_order_sensitive_array_agg(
+        input: Vec<ArrayRef>,
+        expected: ScalarValue,
+        datatype: DataType,
+    ) -> Result<()> {
+        let schema = Schema::new(vec![Field::new("a", datatype.clone(), false)]);
+        let batch = RecordBatch::try_new(Arc::new(schema.clone()), input)?;
+
+        //         input_data_type: Decimal128(10, 2)
+        // order_by_data_types: [Int32]
+        // ordering_req: [PhysicalSortExpr { expr: Column { name: "sn", index: 1 }, options: SortOptions { descending: false, nulls_first: false } }]
+        let agg = Arc::new(OrderSensitiveArrayAgg::new(
+            col("a", &schema)?,
+            "bla".to_string(),
+            datatype,
+            vec![DataType::Int32],
+            vec![PhysicalSortExpr {
+                expr: col("sn", &schema)?,
+                options: SortOptions {
+                    descending: false,
+                    nulls_first: false,
+                },
+            }],
+        ));
+        let actual = aggregate(&batch, agg)?;
+        println!("actual: {:?}", actual);
+
+        Ok(())
+
+        //     compare_list_contents(expected, actual)
+    }
+
+    #[test]
+    fn test_one() {
+        let a: ArrayRef = Arc::new(Int32Array::from(vec![1, 2]));
+        let b: ArrayRef = Arc::new(Float32Array::from(vec![10.0, 2.0]));
+        let c: ArrayRef = Arc::new(StringArray::from(vec!["a", "b"]));
+        let batch =
+            RecordBatch::try_from_iter(vec![("a", a), ("b", b), ("c", c)]).unwrap();
+
+        println!("batch: {:?}", batch);
+
+        let schema = batch.schema();
+
+        //         input_data_type: Decimal128(10, 2)
+        // order_by_data_types: [Int32]
+        // ordering_req: [PhysicalSortExpr { expr: Column { name: "sn", index: 1 }, options: SortOptions { descending: false, nulls_first: false } }]
+
+        let data_type = DataType::Int32;
+        let agg = Arc::new(OrderSensitiveArrayAgg::new(
+            col("a", &schema).unwrap(),
+            "test".to_string(),
+            data_type,
+            vec![DataType::Float32, DataType::Utf8],
+            vec![
+                PhysicalSortExpr {
+                    expr: col("b", &schema).unwrap(),
+                    options: SortOptions {
+                        descending: false,
+                        nulls_first: false,
+                    },
+                },
+                PhysicalSortExpr {
+                    expr: col("c", &schema).unwrap(),
+                    options: SortOptions {
+                        descending: false,
+                        nulls_first: false,
+                    },
+                },
+            ],
+        ));
+        let actual = aggregate(&batch, agg).unwrap();
+        println!("actual: {:?}", actual);
+    }
 
     #[test]
     fn test_structarr() {

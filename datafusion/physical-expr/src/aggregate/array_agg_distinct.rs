@@ -132,6 +132,8 @@ impl Accumulator for DistinctArrayAggAccumulator {
     fn update_batch(&mut self, values: &[ArrayRef]) -> Result<()> {
         assert_eq!(values.len(), 1, "batch input should only include 1 column!");
 
+        println!("distinct_array_agg update_batch: {:?}", values);
+
         let array = &values[0];
         let scalars = ScalarValue::convert_non_list_array_to_scalars(array)?;
         self.values.extend(scalars);
