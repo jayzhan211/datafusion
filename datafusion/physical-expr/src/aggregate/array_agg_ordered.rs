@@ -214,6 +214,7 @@ impl Accumulator for OrderSensitiveArrayAggAccumulator {
         // values received from its ordering requirement expression. (This information is necessary for during merging).
         let agg_orderings = &states[1];
 
+
         if as_list_array(agg_orderings).is_ok() {
             // Stores ARRAY_AGG results coming from each partition
             let mut partition_values = vec![];

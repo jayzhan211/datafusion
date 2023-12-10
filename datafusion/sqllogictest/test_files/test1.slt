@@ -1,0 +1,22 @@
+
+statement ok
+create table cpu (host string, usage float) as select * from (values
+  ('host0', 90.2),
+  ('host1', 90.1),
+  ('host1', 90.5),
+  ('host0', 90.5),
+  ('host1', 90.0),
+  ('host1', 90.3),
+  ('host0', 87.9),
+  ('host1', 89.3)
+);
+
+query TR rowsort
+select host, median(usage) from cpu group by host;
+----
+host0 90.2
+host1 90.1
+
+
+statement ok
+drop table cpu;
