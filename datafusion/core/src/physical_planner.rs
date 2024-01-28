@@ -236,6 +236,7 @@ fn create_physical_name(e: &Expr, is_first_expr: bool) -> Result<String> {
             order_by,
         }) => match func_def {
             AggregateFunctionDefinition::BuiltIn(..) => {
+                // println!("order_by buit: {:?}", order_by);
                 create_function_physical_name(func_def.name(), *distinct, args)
             }
             AggregateFunctionDefinition::UDF(fun) => {
@@ -245,11 +246,12 @@ fn create_physical_name(e: &Expr, is_first_expr: bool) -> Result<String> {
                         "aggregate expression with filter is not supported"
                     );
                 }
-                if order_by.is_some() {
-                    return exec_err!(
-                        "aggregate expression with order_by is not supported"
-                    );
-                }
+                // println!("order_by udf: {:?}", order_by);
+                // if order_by.is_some() {
+                //     return exec_err!(
+                //         "aggregate expression with order_by is not supported"
+                //     );
+                // }
                 let names = args
                     .iter()
                     .map(|e| create_physical_name(e, false))
@@ -760,6 +762,8 @@ impl DefaultPhysicalPlanner {
                     let input_exec = self.create_initial_plan(input, session_state).await?;
                     let physical_input_schema = input_exec.schema();
                     let logical_input_schema = input.as_ref().schema();
+                    // println!("logical_input_schema: {:?}", logical_input_schema);
+                    println!("session_state.execution_props(),: {:?}", session_state.execution_props());
 
                     let groups = self.create_grouping_physical_expr(
                         group_expr,
@@ -1646,6 +1650,7 @@ pub fn create_aggregate_expr_with_name_and_maybe_filter(
                 )?),
                 None => None,
             };
+            println!("order_by: {:?}", order_by);
             let order_by = match order_by {
                 Some(e) => Some(
                     e.iter()
@@ -1660,6 +1665,7 @@ pub fn create_aggregate_expr_with_name_and_maybe_filter(
                 ),
                 None => None,
             };
+            println!("physical_input_schema: {:?}", physical_input_schema);
             let (agg_expr, filter, order_by) = match func_def {
                 AggregateFunctionDefinition::BuiltIn(fun) => {
                     let ordering_reqs = order_by.clone().unwrap_or(vec![]);
@@ -1674,9 +1680,11 @@ pub fn create_aggregate_expr_with_name_and_maybe_filter(
                     (agg_expr, filter, order_by)
                 }
                 AggregateFunctionDefinition::UDF(fun) => {
+                    let ordering_reqs = order_by.clone().unwrap_or(vec![]);
                     let agg_expr = udaf::create_aggregate_expr(
                         fun,
                         &args,
+                        ordering_reqs.as_slice(),
                         physical_input_schema,
                         name,
                     );

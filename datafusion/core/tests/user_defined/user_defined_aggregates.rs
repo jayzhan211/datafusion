@@ -20,13 +20,12 @@
 
 use arrow::{array::AsArray, datatypes::Fields};
 use arrow_array::{types::UInt64Type, Int32Array, PrimitiveArray};
-use arrow_schema::Schema;
+use arrow_schema::{Schema, SortOptions};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
 };
 
-use datafusion::datasource::MemTable;
 use datafusion::{
     arrow::{
         array::{ArrayRef, Float64Array, TimestampNanosecondArray},
@@ -42,13 +41,18 @@ use datafusion::{
     prelude::SessionContext,
     scalar::ScalarValue,
 };
+use datafusion::{
+    datasource::{MemTable, TableProvider},
+    physical_planner::create_physical_sort_expr,
+};
 use datafusion_common::{
-    assert_contains, cast::as_primitive_array, exec_err, DataFusionError,
+    assert_contains, cast::as_primitive_array, exec_err, Column, DFField, DFSchema, DFSchemaRef, DataFusionError, ToDFSchema
 };
 use datafusion_expr::{
-    create_udaf, AggregateUDFImpl, GroupsAccumulator, SimpleAggregateUDF,
+    create_udaf, create_udaf_with_ordering, expr::Sort, AggregateUDFImpl, Expr, GroupsAccumulator, SimpleAggregateUDF
 };
-use datafusion_physical_expr::expressions::AvgAccumulator;
+use datafusion_physical_expr::{execution_props::ExecutionProps, expressions::FirstValueAccumulator, PhysicalExpr};
+use datafusion_physical_expr::{expressions::AvgAccumulator, PhysicalSortExpr};
 
 /// Test to show the contents of the setup
 #[tokio::test]
@@ -249,6 +253,141 @@ async fn simple_udaf() -> Result<()> {
         "+-------------+",
         "| 3.0         |",
         "+-------------+",
+    ];
+    assert_batches_eq!(expected, &result);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn simple_udaf_order() -> Result<()> {
+    let schema = Schema::new(vec![
+        Field::new("a", DataType::Int32, false),
+        Field::new("b", DataType::Int32, false),
+    ]);
+
+    let batch = RecordBatch::try_new(
+        Arc::new(schema.clone()),
+        vec![
+            Arc::new(Int32Array::from(vec![1, 2, 3])),
+            Arc::new(Int32Array::from(vec![1, 1, 2])),
+        ],
+    )?;
+
+    let ctx = SessionContext::new();
+
+    let dfs = DFSchema::try_from_qualified_schema("t", &schema)?;
+    println!("dfs: {:?}", dfs);
+    let provider = MemTable::try_new(Arc::new(schema.clone()), vec![vec![batch]])?;
+    ctx.register_table("t", Arc::new(provider))?;
+
+    let s = ctx.state();
+    let p = s.execution_props().clone();
+    // println!("p: {:?}", p);
+
+    // let idx = input_dfschema.index_of_column(c)?;
+    // Ok(Arc::new(Column::new(&c.name, idx)))
+
+    let result = ctx
+        .sql("SELECT FIRST_VALUE(a order by a) FROM t group by b")
+        .await?
+        .collect()
+        .await?;
+
+    let order_by = Expr::Sort(Sort {
+        expr: Box::new(Expr::Column(Column::new(Some("t"), "a"))),
+        asc: true,
+        nulls_first: true,
+    });
+    let order_by = Some(vec![order_by]);
+
+    // let dfs = schema.to_dfschema().unwrap();
+    let order_by = match order_by {
+        Some(e) => Some(
+            e.iter()
+                .map(|expr| {
+                    create_physical_sort_expr(
+                        expr,
+                        &dfs,
+                        &p,
+                    )
+                })
+                .collect::<Result<Vec<_>>>()?,
+        ),
+        None => None,
+    };
+
+    let ordering_req = order_by.unwrap_or(vec![]);
+
+    let ordering_types = ordering_req
+        .iter()
+        .map(|e| e.expr.data_type(&schema))
+        .collect::<Result<Vec<_>>>()?;
+
+    let acc = FirstValueAccumulator::try_new(&DataType::Int64, &ordering_types, ordering_req)?;
+
+    fn create_accumulator(
+        data_type: &DataType,
+        // order_by: Option<Vec<Expr>>,
+        // input_dfschema: &DFSchema,
+        // execution_props: &ExecutionProps,
+        // input_schema: &Schema,
+    ) -> Result<Box<dyn Accumulator>> {
+        // TODO: Convert Vec<Expr> ot LexOrdering
+        // let order_by = match order_by {
+        //     Some(e) => Some(
+        //         e.iter()
+        //             .map(|expr| {
+        //                 create_physical_sort_expr(
+        //                     expr,
+        //                     input_dfschema,
+        //                     execution_props,
+        //                 )
+        //             })
+        //             .collect::<Result<Vec<_>>>()?,
+        //     ),
+        //     None => None,
+        // };
+
+        // let ordering_req = order_by.unwrap_or(vec![]);
+
+        // let ordering_types = ordering_req
+        //     .iter()
+        //     .map(|e| e.expr.data_type(input_schema))
+        //     .collect::<Result<Vec<_>>>()?;
+
+        let acc = FirstValueAccumulator::try_new(data_type, &[], vec![])?;
+        Ok(Box::new(acc))
+    }
+
+    // define a udaf, using a DataFusion's accumulator
+    let my_first = create_udaf_with_ordering(
+        "my_first",
+        vec![DataType::Int32],
+        Arc::new(DataType::Int32),
+        Volatility::Immutable,
+        // Arc::new(|d| create_accumulator(d, None, &dfs, &p, &schema)),
+        Arc::new(|d| create_accumulator(d)),
+        Arc::new(vec![DataType::Int32, DataType::Int32, DataType::Boolean]),
+        None,
+        None,
+    );
+
+    ctx.register_udaf(my_first);
+
+    let result = ctx
+        .sql("SELECT MY_FIRST(a order by a) FROM t group by b")
+        .await?
+        .collect()
+        .await?;
+
+    let expected = [
+        "+---------------+",
+        "| my_first(t.a) |",
+        "+---------------+",
+        "| 1             |",
+        "| 3             |",
+        "+---------------+",
     ];
     assert_batches_eq!(expected, &result);
 

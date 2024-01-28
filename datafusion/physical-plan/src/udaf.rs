@@ -30,9 +30,10 @@ use arrow::{
 use super::{expressions::format_state_name, Accumulator, AggregateExpr};
 use datafusion_common::{not_impl_err, DataFusionError, Result};
 pub use datafusion_expr::AggregateUDF;
-use datafusion_physical_expr::PhysicalExpr;
+use datafusion_physical_expr::{LexOrdering, PhysicalExpr, PhysicalSortExpr};
 
 use datafusion_physical_expr::aggregate::utils::down_cast_any_ref;
+use datafusion_physical_expr::aggregate::utils::ordering_fields;
 use std::sync::Arc;
 
 /// Creates a physical expression of the UDAF, that includes all necessary type coercion.
@@ -40,6 +41,7 @@ use std::sync::Arc;
 pub fn create_aggregate_expr(
     fun: &AggregateUDF,
     input_phy_exprs: &[Arc<dyn PhysicalExpr>],
+    ordering_req: &[PhysicalSortExpr],
     input_schema: &Schema,
     name: impl Into<String>,
 ) -> Result<Arc<dyn AggregateExpr>> {
@@ -48,12 +50,35 @@ pub fn create_aggregate_expr(
         .map(|arg| arg.data_type(input_schema))
         .collect::<Result<Vec<_>>>()?;
 
-    Ok(Arc::new(AggregateFunctionExpr {
-        fun: fun.clone(),
-        args: input_phy_exprs.to_vec(),
-        data_type: fun.return_type(&input_exprs_types)?,
-        name: name.into(),
-    }))
+    let input_phy_exprs = input_phy_exprs.to_vec();
+    // TODO: used in OrderSensitiveArrayAgg, not sure if it's needed here
+    let expr = input_phy_exprs[0].clone();
+    let nullable = expr.nullable(input_schema)?;
+
+    let ordering_types = ordering_req
+        .iter()
+        .map(|e| e.expr.data_type(input_schema))
+        .collect::<Result<Vec<_>>>()?;
+
+    if ordering_req.is_empty() {
+        Ok(Arc::new(AggregateFunctionExpr {
+            fun: fun.clone(),
+            args: input_phy_exprs,
+            data_type: fun.return_type(&input_exprs_types)?,
+            name: name.into(),
+            order_by_data_types: vec![],
+            ordering_req: vec![],
+        }))
+    } else {
+        Ok(Arc::new(AggregateFunctionExpr {
+            fun: fun.clone(),
+            args: input_phy_exprs.to_vec(),
+            data_type: fun.return_type(&input_exprs_types)?,
+            name: name.into(),
+            order_by_data_types: ordering_types,
+            ordering_req: ordering_req.to_vec(),
+        }))
+    }
 }
 
 /// Physical aggregate expression of a UDAF.
@@ -64,6 +89,8 @@ pub struct AggregateFunctionExpr {
     /// Output / return type of this aggregate
     data_type: DataType,
     name: String,
+    order_by_data_types: Vec<DataType>,
+    ordering_req: LexOrdering,
 }
 
 impl AggregateFunctionExpr {
@@ -98,6 +125,7 @@ impl AggregateExpr for AggregateFunctionExpr {
             })
             .collect::<Vec<Field>>();
 
+        println!("fields: {:?}", fields);
         Ok(fields)
     }
 
@@ -175,8 +203,13 @@ impl AggregateExpr for AggregateFunctionExpr {
     fn create_groups_accumulator(&self) -> Result<Box<dyn GroupsAccumulator>> {
         self.fun.create_groups_accumulator()
     }
+
+    fn order_bys(&self) -> Option<&[PhysicalSortExpr]> {
+        (!self.ordering_req.is_empty()).then_some(&self.ordering_req)
+    }
 }
 
+// TODO: add ordering expr
 impl PartialEq<dyn Any> for AggregateFunctionExpr {
     fn eq(&self, other: &dyn Any) -> bool {
         down_cast_any_ref(other)

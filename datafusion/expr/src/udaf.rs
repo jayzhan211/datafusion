@@ -277,6 +277,16 @@ pub trait AggregateUDFImpl: Debug + Send + Sync {
     fn create_groups_accumulator(&self) -> Result<Box<dyn GroupsAccumulator>> {
         not_impl_err!("GroupsAccumulator hasn't been implemented for {self:?} yet")
     }
+
+    /// Returns the lexical ordering requirements of the aggregate expression.
+    fn ordering_req(&self) -> &LexOrdering {
+        &self.ordering_req
+    }
+
+    /// Returns the data types of the order-by columns.
+    fn order_by_data_types(&self) -> &Vec<DataType> {
+        &self.order_by_data_types
+    }
 }
 
 /// Implementation of [`AggregateUDFImpl`] that wraps the function style pointers

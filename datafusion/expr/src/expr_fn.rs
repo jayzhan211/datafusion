@@ -21,7 +21,9 @@ use crate::expr::{
     AggregateFunction, BinaryExpr, Cast, Exists, GroupingSet, InList, InSubquery,
     Placeholder, ScalarFunction, TryCast,
 };
-use crate::function::PartitionEvaluatorFactory;
+use crate::function::{
+    AccumulatorFactoryFunctionWithOrdering, PartitionEvaluatorFactory,
+};
 use crate::{
     aggregate_function, built_in_function, conditional_expressions::CaseBuilder,
     logical_plan::Subquery, AccumulatorFactoryFunction, AggregateUDF,
@@ -1070,6 +1072,33 @@ pub fn create_udaf(
     ))
 }
 
+// TODO: Merge with ordering
+/// Creates a new UDAF with a specific signature, state type and return type.
+/// The signature and state type must match the `Accumulator's implementation`.
+pub fn create_udaf_with_ordering(
+    name: &str,
+    input_type: Vec<DataType>,
+    return_type: Arc<DataType>,
+    volatility: Volatility,
+    accumulator: AccumulatorFactoryFunction,
+    state_type: Arc<Vec<DataType>>,
+    ordering_dtypes: Option<Vec<DataType>>,
+    ordering_req: Option<Vec<Expr>>,
+) -> AggregateUDF {
+    let return_type = Arc::try_unwrap(return_type).unwrap_or_else(|t| t.as_ref().clone());
+    let state_type = Arc::try_unwrap(state_type).unwrap_or_else(|t| t.as_ref().clone());
+    AggregateUDF::from(SimpleOrderedAggregateUDF::new(
+        name,
+        input_type,
+        return_type,
+        volatility,
+        accumulator,
+        state_type,
+        ordering_dtypes,
+        ordering_req,
+    ))
+}
+
 /// Implements [`AggregateUDFImpl`] for functions that have a single signature and
 /// return type.
 pub struct SimpleAggregateUDF {
@@ -1131,6 +1160,102 @@ impl SimpleAggregateUDF {
 }
 
 impl AggregateUDFImpl for SimpleAggregateUDF {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn signature(&self) -> &Signature {
+        &self.signature
+    }
+
+    fn return_type(&self, _arg_types: &[DataType]) -> Result<DataType> {
+        Ok(self.return_type.clone())
+    }
+
+    fn accumulator(&self, arg: &DataType) -> Result<Box<dyn crate::Accumulator>> {
+        (self.accumulator)(arg)
+    }
+
+    fn state_type(&self, _return_type: &DataType) -> Result<Vec<DataType>> {
+        Ok(self.state_type.clone())
+    }
+}
+
+/// Implements [`AggregateUDFImpl`] for functions that have a single signature and
+/// return type.
+pub struct SimpleOrderedAggregateUDF {
+    name: String,
+    signature: Signature,
+    return_type: DataType,
+    accumulator: AccumulatorFactoryFunction,
+    state_type: Vec<DataType>,
+    ordering_dtypes: Option<Vec<DataType>>,
+    ordering_req: Option<Vec<Expr>>,
+}
+
+impl Debug for SimpleOrderedAggregateUDF {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        f.debug_struct("AggregateUDF")
+            .field("name", &self.name)
+            .field("signature", &self.signature)
+            .field("fun", &"<FUNC>")
+            .finish()
+    }
+}
+
+impl SimpleOrderedAggregateUDF {
+    /// Create a new `AggregateUDFImpl` from a name, input types, return type, state type and
+    /// implementation. Implementing [`AggregateUDFImpl`] allows more flexibility
+    pub fn new(
+        name: impl Into<String>,
+        input_type: Vec<DataType>,
+        return_type: DataType,
+        volatility: Volatility,
+        accumulator: AccumulatorFactoryFunction,
+        state_type: Vec<DataType>,
+        ordering_dtypes: Option<Vec<DataType>>,
+        ordering_req: Option<Vec<Expr>>,
+    ) -> Self {
+        let name = name.into();
+        let signature = Signature::exact(input_type, volatility);
+        Self {
+            name,
+            signature,
+            return_type,
+            accumulator,
+            state_type,
+            ordering_dtypes,
+            ordering_req,
+        }
+    }
+
+    pub fn new_with_signature(
+        name: impl Into<String>,
+        signature: Signature,
+        return_type: DataType,
+        accumulator: AccumulatorFactoryFunction,
+        state_type: Vec<DataType>,
+        ordering_dtypes: Option<Vec<DataType>>,
+        ordering_req: Option<Vec<Expr>>,
+    ) -> Self {
+        let name = name.into();
+        Self {
+            name,
+            signature,
+            return_type,
+            accumulator,
+            state_type,
+            ordering_dtypes,
+            ordering_req,
+        }
+    }
+}
+
+impl AggregateUDFImpl for SimpleOrderedAggregateUDF {
     fn as_any(&self) -> &dyn Any {
         self
     }
