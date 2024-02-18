@@ -21,7 +21,9 @@ use crate::expr::{
     AggregateFunction, BinaryExpr, Cast, Exists, GroupingSet, InList, InSubquery,
     Placeholder, ScalarFunction, TryCast,
 };
-use crate::function::{AccumulatorFactoryFunctionWithOrdering, PartitionEvaluatorFactory};
+use crate::function::{
+    AccumulatorFactoryFunctionWithOrdering, PartitionEvaluatorFactory,
+};
 use crate::{
     aggregate_function, built_in_function, conditional_expressions::CaseBuilder,
     logical_plan::Subquery, AccumulatorFactoryFunction, AggregateUDF,
@@ -1073,9 +1075,9 @@ pub fn create_udaf(
     ))
 }
 
-// TODO: Merge with ordering
 /// Creates a new UDAF with a specific signature, state type and return type.
 /// The signature and state type must match the `Accumulator's implementation`.
+#[allow(clippy::too_many_arguments)]
 pub fn create_udaf_with_ordering(
     name: &str,
     input_type: Vec<DataType>,
@@ -1212,6 +1214,7 @@ impl Debug for SimpleOrderedAggregateUDF {
 impl SimpleOrderedAggregateUDF {
     /// Create a new `AggregateUDFImpl` from a name, input types, return type, state type and
     /// implementation. Implementing [`AggregateUDFImpl`] allows more flexibility
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         name: impl Into<String>,
         input_type: Vec<DataType>,
