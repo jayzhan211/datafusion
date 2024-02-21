@@ -21,9 +21,7 @@ use crate::expr::{
     AggregateFunction, BinaryExpr, Cast, Exists, GroupingSet, InList, InSubquery,
     Placeholder, ScalarFunction, TryCast,
 };
-use crate::function::{
-    AccumulatorFactoryFunctionWithOrdering, PartitionEvaluatorFactory,
-};
+use crate::function::PartitionEvaluatorFactory;
 use crate::{
     aggregate_function, built_in_function, conditional_expressions::CaseBuilder,
     logical_plan::Subquery, AccumulatorFactoryFunction, AggregateUDF,
@@ -1083,7 +1081,7 @@ pub fn create_udaf_with_ordering(
     input_type: Vec<DataType>,
     return_type: Arc<DataType>,
     volatility: Volatility,
-    accumulator: AccumulatorFactoryFunctionWithOrdering,
+    accumulator: AccumulatorFactoryFunction,
     state_type: Arc<Vec<DataType>>,
     ordering_req: Vec<Expr>,
     schema: Option<Schema>,
@@ -1186,7 +1184,7 @@ impl AggregateUDFImpl for SimpleAggregateUDF {
         sort_exprs: Vec<Expr>,
         schema: Option<Schema>,
     ) -> Result<Box<dyn crate::Accumulator>> {
-        (self.accumulator)(arg)
+        (self.accumulator)(arg, sort_exprs, schema)
     }
 
     fn state_type(&self, _return_type: &DataType) -> Result<Vec<DataType>> {
@@ -1200,7 +1198,7 @@ pub struct SimpleOrderedAggregateUDF {
     name: String,
     signature: Signature,
     return_type: DataType,
-    accumulator: AccumulatorFactoryFunctionWithOrdering,
+    accumulator: AccumulatorFactoryFunction,
     state_type: Vec<DataType>,
     ordering_req: Vec<Expr>,
     schema: Option<Schema>,
@@ -1225,7 +1223,7 @@ impl SimpleOrderedAggregateUDF {
         input_type: Vec<DataType>,
         return_type: DataType,
         volatility: Volatility,
-        accumulator: AccumulatorFactoryFunctionWithOrdering,
+        accumulator: AccumulatorFactoryFunction,
         state_type: Vec<DataType>,
         ordering_req: Vec<Expr>,
         schema: Option<Schema>,

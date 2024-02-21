@@ -341,7 +341,7 @@ async fn simple_udaf() -> Result<()> {
         vec![DataType::Float64],
         Arc::new(DataType::Float64),
         Volatility::Immutable,
-        Arc::new(|_| Ok(Box::<AvgAccumulator>::default())),
+        Arc::new(|_, _, _| Ok(Box::<AvgAccumulator>::default())),
         Arc::new(vec![DataType::UInt64, DataType::Float64]),
     );
 
@@ -374,7 +374,7 @@ async fn case_sensitive_identifiers_user_defined_aggregates() -> Result<()> {
         vec![DataType::Float64],
         Arc::new(DataType::Float64),
         Volatility::Immutable,
-        Arc::new(|_| Ok(Box::<AvgAccumulator>::default())),
+        Arc::new(|_, _, _| Ok(Box::<AvgAccumulator>::default())),
         Arc::new(vec![DataType::UInt64, DataType::Float64]),
     );
 
@@ -545,7 +545,7 @@ impl TimeSum {
 
         let captured_state = Arc::clone(&test_state);
         let accumulator: AccumulatorFactoryFunction =
-            Arc::new(move |_| Ok(Box::new(Self::new(Arc::clone(&captured_state)))));
+            Arc::new(move |_, _, _| Ok(Box::new(Self::new(Arc::clone(&captured_state)))));
 
         let time_sum = AggregateUDF::from(SimpleAggregateUDF::new(
             name,
@@ -644,7 +644,7 @@ impl FirstSelector {
         let signatures = vec![TypeSignature::Exact(Self::input_datatypes())];
 
         let accumulator: AccumulatorFactoryFunction =
-            Arc::new(|_| Ok(Box::new(Self::new())));
+            Arc::new(|_, _, _| Ok(Box::new(Self::new())));
 
         let volatility = Volatility::Immutable;
 
