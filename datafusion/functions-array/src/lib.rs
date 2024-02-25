@@ -28,8 +28,8 @@
 #[macro_use]
 pub mod macros;
 
-mod kernels;
-mod udf;
+mod make_array;
+mod to_string;
 
 use datafusion_common::Result;
 use datafusion_execution::FunctionRegistry;
@@ -39,12 +39,16 @@ use std::sync::Arc;
 
 /// Fluent-style API for creating `Expr`s
 pub mod expr_fn {
-    pub use super::udf::array_to_string;
+    pub use super::make_array::make_array;
+    pub use super::to_string::array_to_string;
 }
 
 /// Registers all enabled packages with a [`FunctionRegistry`]
 pub fn register_all(registry: &mut dyn FunctionRegistry) -> Result<()> {
-    let functions: Vec<Arc<ScalarUDF>> = vec![udf::array_to_string_udf()];
+    let functions: Vec<Arc<ScalarUDF>> = vec![
+        to_string::array_to_string_udf(),
+        make_array::make_array_udf(),
+    ];
     functions.into_iter().try_for_each(|udf| {
         let existing_udf = registry.register_udf(udf)?;
         if let Some(existing_udf) = existing_udf {
