@@ -153,9 +153,12 @@ impl AggregateUDF {
     }
 
     /// Return an accumulator the given aggregate, given its return datatype
-    pub fn accumulator(&self, return_type: &DataType) -> Result<Box<dyn Accumulator>> {
-        let sort_exprs = self.inner.sort_exprs();
-        let schema = self.inner.schema();
+    pub fn accumulator(
+        &self,
+        return_type: &DataType,
+        sort_exprs: Vec<Expr>,
+        schema: &Schema,
+    ) -> Result<Box<dyn Accumulator>> {
         self.inner.accumulator(return_type, sort_exprs, schema)
     }
 
@@ -266,7 +269,7 @@ pub trait AggregateUDFImpl: Debug + Send + Sync {
         &self,
         arg: &DataType,
         sort_exprs: Vec<Expr>,
-        schema: Option<&Schema>,
+        schema: &Schema,
     ) -> Result<Box<dyn Accumulator>>;
 
     /// Return the type used to serialize the  [`Accumulator`]'s intermediate state.
@@ -287,16 +290,6 @@ pub trait AggregateUDFImpl: Debug + Send + Sync {
     /// implemented in addition to [`Accumulator`].
     fn create_groups_accumulator(&self) -> Result<Box<dyn GroupsAccumulator>> {
         not_impl_err!("GroupsAccumulator hasn't been implemented for {self:?} yet")
-    }
-
-    /// Return the ordering expressions for the accumulator
-    fn sort_exprs(&self) -> Vec<Expr> {
-        vec![]
-    }
-
-    /// Return the schema for the accumulator
-    fn schema(&self) -> Option<&Schema> {
-        None
     }
 }
 
@@ -348,7 +341,7 @@ impl AggregateUDFImpl for AggregateUDFLegacyWrapper {
         &self,
         arg: &DataType,
         sort_exprs: Vec<Expr>,
-        schema: Option<&Schema>,
+        schema: &Schema,
     ) -> Result<Box<dyn Accumulator>> {
         (self.accumulator)(arg, sort_exprs, schema)
     }

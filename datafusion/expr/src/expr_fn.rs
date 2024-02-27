@@ -1073,34 +1073,6 @@ pub fn create_udaf(
     ))
 }
 
-/// Creates a new UDAF with a specific signature, state type and return type.
-/// The signature and state type must match the `Accumulator's implementation`.
-#[allow(clippy::too_many_arguments)]
-pub fn create_udaf_with_ordering(
-    name: &str,
-    input_type: Vec<DataType>,
-    return_type: Arc<DataType>,
-    volatility: Volatility,
-    accumulator: AccumulatorFactoryFunction,
-    state_type: Arc<Vec<DataType>>,
-    ordering_req: Vec<Expr>,
-    schema: Option<&Schema>,
-) -> AggregateUDF {
-    let return_type = Arc::try_unwrap(return_type).unwrap_or_else(|t| t.as_ref().clone());
-    let state_type = Arc::try_unwrap(state_type).unwrap_or_else(|t| t.as_ref().clone());
-
-    AggregateUDF::from(SimpleOrderedAggregateUDF::new(
-        name,
-        input_type,
-        return_type,
-        volatility,
-        accumulator,
-        state_type,
-        ordering_req,
-        schema,
-    ))
-}
-
 /// Implements [`AggregateUDFImpl`] for functions that have a single signature and
 /// return type.
 pub struct SimpleAggregateUDF {
@@ -1182,102 +1154,13 @@ impl AggregateUDFImpl for SimpleAggregateUDF {
         &self,
         arg: &DataType,
         sort_exprs: Vec<Expr>,
-        schema: Option<&Schema>,
+        schema: &Schema,
     ) -> Result<Box<dyn crate::Accumulator>> {
         (self.accumulator)(arg, sort_exprs, schema)
     }
 
     fn state_type(&self, _return_type: &DataType) -> Result<Vec<DataType>> {
         Ok(self.state_type.clone())
-    }
-}
-
-/// Implements [`AggregateUDFImpl`] for functions that have a single signature and
-/// return type.
-pub struct SimpleOrderedAggregateUDF {
-    name: String,
-    signature: Signature,
-    return_type: DataType,
-    accumulator: AccumulatorFactoryFunction,
-    state_type: Vec<DataType>,
-    ordering_req: Vec<Expr>,
-    schema: Option<Schema>,
-}
-
-impl Debug for SimpleOrderedAggregateUDF {
-    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        f.debug_struct("AggregateUDF")
-            .field("name", &self.name)
-            .field("signature", &self.signature)
-            .field("fun", &"<FUNC>")
-            .finish()
-    }
-}
-
-impl SimpleOrderedAggregateUDF {
-    /// Create a new `AggregateUDFImpl` from a name, input types, return type, state type and
-    /// implementation. Implementing [`AggregateUDFImpl`] allows more flexibility
-    #[allow(clippy::too_many_arguments)]
-    pub fn new(
-        name: impl Into<String>,
-        input_type: Vec<DataType>,
-        return_type: DataType,
-        volatility: Volatility,
-        accumulator: AccumulatorFactoryFunction,
-        state_type: Vec<DataType>,
-        ordering_req: Vec<Expr>,
-        schema: Option<&Schema>,
-    ) -> Self {
-        let name = name.into();
-        let signature = Signature::exact(input_type, volatility);
-        Self {
-            name,
-            signature,
-            return_type,
-            accumulator,
-            state_type,
-            ordering_req,
-            schema: schema.cloned(),
-        }
-    }
-}
-
-impl AggregateUDFImpl for SimpleOrderedAggregateUDF {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
-    fn name(&self) -> &str {
-        &self.name
-    }
-
-    fn signature(&self) -> &Signature {
-        &self.signature
-    }
-
-    fn return_type(&self, _arg_types: &[DataType]) -> Result<DataType> {
-        Ok(self.return_type.clone())
-    }
-
-    fn accumulator(
-        &self,
-        arg: &DataType,
-        sort_exprs: Vec<Expr>,
-        schema: Option<&Schema>,
-    ) -> Result<Box<dyn crate::Accumulator>> {
-        (self.accumulator)(arg, sort_exprs, schema)
-    }
-
-    fn state_type(&self, _return_type: &DataType) -> Result<Vec<DataType>> {
-        Ok(self.state_type.clone())
-    }
-
-    fn sort_exprs(&self) -> Vec<Expr> {
-        self.ordering_req.clone()
-    }
-
-    fn schema(&self) -> Option<&Schema> {
-        self.schema.as_ref()
     }
 }
 
