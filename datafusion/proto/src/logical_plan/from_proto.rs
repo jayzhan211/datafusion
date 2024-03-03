@@ -40,7 +40,9 @@ use arrow::{
 };
 use datafusion::execution::registry::FunctionRegistry;
 use datafusion_common::{
-    arrow_datafusion_err, internal_err, plan_datafusion_err, utils::array_into_scalar_list, Column, Constraint, Constraints, DFField, DFSchema, DFSchemaRef, DataFusionError, OwnedTableReference, Result, ScalarValue
+    arrow_datafusion_err, internal_err, plan_datafusion_err,
+    utils::array_into_scalar_list, Column, Constraint, Constraints, DFField, DFSchema,
+    DFSchemaRef, DataFusionError, OwnedTableReference, Result, ScalarValue,
 };
 use datafusion_expr::expr::Unnest;
 use datafusion_expr::window_frame::{check_window_frame, regularize_window_order_by};

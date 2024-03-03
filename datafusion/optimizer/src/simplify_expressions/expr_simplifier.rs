@@ -28,7 +28,6 @@ use arrow::{
 use datafusion_common::{
     cast::{as_large_list_array, as_list_array},
     tree_node::{RewriteRecursion, TreeNode, TreeNodeRewriter},
-    utils::array_into_scalar_list,
 };
 use datafusion_common::{
     internal_err, DFSchema, DFSchemaRef, DataFusionError, Result, ScalarValue,

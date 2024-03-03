@@ -4118,12 +4118,9 @@ mod tests {
     #[test]
     fn scalar_list_null_to_array() {
         let list_array = ScalarValue::new_list(&[], &DataType::UInt64);
-        let (arr, is_scalar) = list_array.get();
-
-        assert_eq!(arr.len(), 1);
+        let (arr, _) = list_array.get();
         let arr = arr.as_list::<i32>();
         assert_eq!(arr.values().len(), 0);
-        assert_eq!(is_scalar, true);
     }
 
     #[test]

@@ -185,8 +185,8 @@ mod tests {
     use arrow::datatypes::{DataType, Schema};
     use arrow::record_batch::RecordBatch;
     use arrow_array::types::Int32Type;
-    use arrow_array::Array;
     use arrow_array::ListArray;
+    use arrow_array::{Array, Scalar};
     use arrow_buffer::OffsetBuffer;
     use datafusion_common::internal_err;
 
@@ -355,9 +355,9 @@ mod tests {
             None,
         );
 
-        let l1 = ScalarValue::List(Arc::new(l1));
-        let l2 = ScalarValue::List(Arc::new(l2));
-        let l3 = ScalarValue::List(Arc::new(l3));
+        let l1 = ScalarValue::List(Arc::new(Scalar::new(l1)));
+        let l2 = ScalarValue::List(Arc::new(Scalar::new(l2)));
+        let l3 = ScalarValue::List(Arc::new(Scalar::new(l3)));
 
         // Duplicate l1 and l3 in the input array and check that it is deduped in the output.
         let array = ScalarValue::iter_to_array(vec![
@@ -422,9 +422,9 @@ mod tests {
             None,
         );
 
-        let l1 = ScalarValue::List(Arc::new(l1));
-        let l2 = ScalarValue::List(Arc::new(l2));
-        let l3 = ScalarValue::List(Arc::new(l3));
+        let l1 = ScalarValue::List(Arc::new(Scalar::new(l1)));
+        let l2 = ScalarValue::List(Arc::new(Scalar::new(l2)));
+        let l3 = ScalarValue::List(Arc::new(Scalar::new(l3)));
 
         // Duplicate l1 in the input array and check that it is deduped in the output.
         let input1 = ScalarValue::iter_to_array(vec![l1.clone(), l2.clone()]).unwrap();
