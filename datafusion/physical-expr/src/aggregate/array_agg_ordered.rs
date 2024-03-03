@@ -33,7 +33,7 @@ use crate::{
 use arrow::array::{Array, ArrayRef};
 use arrow::datatypes::{DataType, Field};
 use arrow_array::cast::AsArray;
-use arrow_array::{new_empty_array, Scalar, StructArray};
+use arrow_array::{new_empty_array, Datum, Scalar, StructArray};
 use arrow_schema::{Fields, SortOptions};
 
 use datafusion_common::utils::array_into_list_array;
@@ -258,6 +258,9 @@ impl Accumulator for OrderSensitiveArrayAggAccumulator {
             let ordering_value = partition_ordering_rows.into_iter().map(|ordering_row| {
                     if let ScalarValue::Struct(s) = ordering_row {
                         let mut ordering_columns_per_row = vec![];
+
+                        let (s, _) = s.get();
+                        let s = s.as_struct();
 
                         for column in s.columns() {
                             let sv = ScalarValue::try_from_array(column, 0)?;

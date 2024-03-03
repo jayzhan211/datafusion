@@ -602,7 +602,8 @@ impl LinearSearch {
         batch: &RecordBatch,
     ) -> Result<Vec<(PartitionKey, Vec<u32>)>> {
         let mut batch_hashes = vec![0; batch.num_rows()];
-        create_hashes(columns, &self.random_state, &mut batch_hashes)?;
+        let columns: Vec<&dyn Array> = columns.iter().map(|e| e.as_ref()).collect();
+        create_hashes(&columns, &self.random_state, &mut batch_hashes)?;
         self.input_buffer_hashes.extend(&batch_hashes);
         // reset row_map for new calculation
         self.row_map_batch.clear();

@@ -61,6 +61,7 @@ use arrow::array::{
 use arrow::compute::concat_batches;
 use arrow::datatypes::{Schema, SchemaRef};
 use arrow::record_batch::RecordBatch;
+use arrow_array::Array;
 use datafusion_common::hash_utils::create_hashes;
 use datafusion_common::utils::bisect;
 use datafusion_common::{internal_err, plan_err, JoinSide, JoinType, Result};
@@ -896,6 +897,7 @@ fn lookup_join_hashmap(
 
     hashes_buffer.clear();
     hashes_buffer.resize(probe_batch.num_rows(), 0);
+    let keys_values: Vec<&dyn Array> = keys_values.iter().map(|x| x.as_ref()).collect();
     let hash_values = create_hashes(&keys_values, random_state, hashes_buffer)?;
 
     // As SymmetricHashJoin uses LIFO JoinHashMap, the chained list algorithm

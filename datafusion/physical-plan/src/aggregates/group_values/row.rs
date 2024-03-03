@@ -109,7 +109,8 @@ impl GroupValues for GroupValuesRows {
         let batch_hashes = &mut self.hashes_buffer;
         batch_hashes.clear();
         batch_hashes.resize(n_rows, 0);
-        create_hashes(cols, &self.random_state, batch_hashes)?;
+        let cols: Vec<&dyn Array> = cols.iter().map(|a| a.as_ref()).collect();
+        create_hashes(&cols, &self.random_state, batch_hashes)?;
 
         for (row, &hash) in batch_hashes.iter().enumerate() {
             let entry = self.map.get_mut(hash, |(_hash, group_idx)| {

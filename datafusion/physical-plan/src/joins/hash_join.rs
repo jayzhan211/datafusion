@@ -793,6 +793,8 @@ where
         .map(|c| c.evaluate(batch)?.into_array(batch.num_rows()))
         .collect::<Result<Vec<_>>>()?;
 
+    let keys_values: Vec<&dyn Array> = keys_values.iter().map(|x| x.as_ref()).collect();
+
     // calculate the hash values
     let hash_values = create_hashes(&keys_values, random_state, hashes_buffer)?;
 
@@ -1214,6 +1216,8 @@ impl HashJoinStream {
 
                 self.hashes_buffer.clear();
                 self.hashes_buffer.resize(batch.num_rows(), 0);
+                let keys_values: Vec<&dyn Array> =
+                    keys_values.iter().map(|x| x.as_ref()).collect();
                 create_hashes(&keys_values, &self.random_state, &mut self.hashes_buffer)?;
 
                 self.join_metrics.input_batches.add(1);

@@ -21,6 +21,7 @@ use crate::error::_internal_err;
 use crate::{Result, ScalarValue};
 use arrow::array::{ArrayRef, StructArray};
 use arrow::datatypes::{DataType, FieldRef, Fields};
+use arrow_array::Scalar;
 use arrow_schema::Field;
 use std::sync::Arc;
 
@@ -121,7 +122,7 @@ impl ScalarStructBuilder {
         }
 
         let struct_array = StructArray::try_new(Fields::from(fields), arrays, None)?;
-        Ok(ScalarValue::Struct(Arc::new(struct_array)))
+        Ok(ScalarValue::Struct(Arc::new(Scalar::new(struct_array))))
     }
 }
 

@@ -41,6 +41,7 @@ use crate::{DisplayFormatType, ExecutionPlan, Partitioning, PlanProperties, Stat
 use arrow::array::{ArrayRef, UInt64Builder};
 use arrow::datatypes::SchemaRef;
 use arrow::record_batch::RecordBatch;
+use arrow_array::Array;
 use datafusion_common::{arrow_datafusion_err, not_impl_err, DataFusionError, Result};
 use datafusion_execution::memory_pool::MemoryConsumer;
 use datafusion_execution::TaskContext;
@@ -174,6 +175,8 @@ impl BatchPartitioner {
                     hash_buffer.clear();
                     hash_buffer.resize(batch.num_rows(), 0);
 
+                    let arrays: Vec<&dyn Array> =
+                        arrays.iter().map(|a| a.as_ref()).collect();
                     create_hashes(&arrays, random_state, hash_buffer)?;
 
                     let mut indices: Vec<_> = (0..*partitions)

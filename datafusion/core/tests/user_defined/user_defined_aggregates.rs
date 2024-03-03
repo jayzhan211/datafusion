@@ -614,7 +614,7 @@ impl FirstSelector {
 
         let struct_arr =
             StructArray::try_new(Self::fields(), vec![f64arr, timearr], None)?;
-        Ok(ScalarValue::Struct(Arc::new(struct_arr)))
+        Ok(ScalarValue::Struct(Arc::new(Scalar::new(struct_arr))))
     }
 }
 

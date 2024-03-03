@@ -34,10 +34,10 @@ use crate::cast::{
     as_fixed_size_binary_array, as_fixed_size_list_array,
 };
 use crate::error::{DataFusionError, Result, _internal_err, _not_impl_err};
-use crate::hash_utils::{create_hashes, create_hashes_v2};
+use crate::hash_utils::create_hashes;
 use crate::utils::{
-    array_into_fixed_size_list_array, array_into_large_list_array, array_into_list_array,
-    array_into_scalar_large_list, array_into_scalar_list,
+    array_into_large_list_array, array_into_list_array, array_into_scalar_large_list,
+    array_into_scalar_list,
 };
 use arrow::compute::kernels::numeric::*;
 use arrow::util::display::{array_value_to_string, ArrayFormatter, FormatOptions};
@@ -178,7 +178,7 @@ pub use struct_builder::ScalarStructBuilder;
 /// let arr = StructArray::new(fields, arrays, nulls);
 ///
 /// // Create a ScalarValue::Struct directly
-/// let s1 = ScalarValue::Struct(Arc::new(arr));
+/// let s1 = ScalarValue::Struct(Arc::new(Scalar::new(arr)));
 /// ```
 ///
 ///
@@ -229,7 +229,7 @@ pub enum ScalarValue {
     /// Fixed size list scalar.
     ///
     /// The array must be a FixedSizeListArray with length 1.
-    FixedSizeList(Arc<FixedSizeListArray>),
+    FixedSizeList(Arc<Scalar<FixedSizeListArray>>),
     /// Represents a single element of a [`ListArray`] as an [`ArrayRef`]
     ///
     /// The array must be a ListArray with length 1.
@@ -238,7 +238,7 @@ pub enum ScalarValue {
     LargeList(Arc<Scalar<LargeListArray>>),
     /// Represents a single element [`StructArray`] as an [`ArrayRef`]. See
     /// [`ScalarValue`] for examples of how to create instances of this type.
-    Struct(Arc<StructArray>),
+    Struct(Arc<Scalar<StructArray>>),
     /// Date stored as a signed 32bit int days since UNIX epoch 1970-01-01
     Date32(Option<i32>),
     /// Date stored as a signed 64bit int milliseconds since UNIX epoch 1970-01-01
@@ -334,7 +334,11 @@ impl PartialEq for ScalarValue {
             (FixedSizeBinary(_, _), _) => false,
             (LargeBinary(v1), LargeBinary(v2)) => v1.eq(v2),
             (LargeBinary(_), _) => false,
-            (FixedSizeList(v1), FixedSizeList(v2)) => v1.eq(v2),
+            (FixedSizeList(v1), FixedSizeList(v2)) => {
+                let (arr1, _) = v1.get();
+                let (arr2, _) = v2.get();
+                arr1.eq(arr2)
+            }
             (FixedSizeList(_), _) => false,
             (List(v1), List(v2)) => {
                 let (arr1, _) = v1.get();
@@ -348,7 +352,11 @@ impl PartialEq for ScalarValue {
                 arr1.eq(arr2)
             }
             (LargeList(_), _) => false,
-            (Struct(v1), Struct(v2)) => v1.eq(v2),
+            (Struct(v1), Struct(v2)) => {
+                let (arr1, _) = v1.get();
+                let (arr2, _) = v2.get();
+                arr1.eq(arr2)
+            }
             (Struct(_), _) => false,
             (Date32(v1), Date32(v2)) => v1.eq(v2),
             (Date32(_), _) => false,
@@ -462,7 +470,9 @@ impl PartialOrd for ScalarValue {
                 partial_cmp_list(arr1, arr2)
             }
             (FixedSizeList(arr1), FixedSizeList(arr2)) => {
-                partial_cmp_list(arr1.as_ref(), arr2.as_ref())
+                let (arr1, _) = arr1.get();
+                let (arr2, _) = arr2.get();
+                partial_cmp_list(arr1, arr2)
             }
             (LargeList(arr1), LargeList(arr2)) => {
                 let (arr1, _) = arr1.get();
@@ -471,6 +481,10 @@ impl PartialOrd for ScalarValue {
             }
             (List(_), _) | (LargeList(_), _) | (FixedSizeList(_), _) => None,
             (Struct(struct_arr1), Struct(struct_arr2)) => {
+                let (struct_arr1, _) = struct_arr1.get();
+                let (struct_arr2, _) = struct_arr2.get();
+                let struct_arr1 = struct_arr1.as_struct();
+                let struct_arr2 = struct_arr2.as_struct();
                 partial_cmp_struct(struct_arr1, struct_arr2)
             }
             (Struct(_), _) => None,
@@ -567,7 +581,7 @@ fn partial_cmp_list(arr1: &dyn Array, arr2: &dyn Array) -> Option<Ordering> {
     Some(Ordering::Equal)
 }
 
-fn partial_cmp_struct(s1: &Arc<StructArray>, s2: &Arc<StructArray>) -> Option<Ordering> {
+fn partial_cmp_struct(s1: &StructArray, s2: &StructArray) -> Option<Ordering> {
     if s1.len() != s2.len() {
         return None;
     }
@@ -650,17 +664,19 @@ impl std::hash::Hash for ScalarValue {
             LargeBinary(v) => v.hash(state),
             List(arr) => {
                 let (arr, _) = arr.get();
-                hash_nested_array_v2(arr, state);
+                hash_nested_array(arr, state);
             }
             LargeList(arr) => {
                 let (arr, _) = arr.get();
-                hash_nested_array_v2(arr, state);
+                hash_nested_array(arr, state);
             }
             FixedSizeList(arr) => {
-                hash_nested_array(arr.to_owned() as ArrayRef, state);
+                let (arr, _) = arr.get();
+                hash_nested_array(arr, state);
             }
             Struct(arr) => {
-                hash_nested_array(arr.to_owned() as ArrayRef, state);
+                let (arr, _) = arr.get();
+                hash_nested_array(arr, state);
             }
             Date32(v) => v.hash(state),
             Date64(v) => v.hash(state),
@@ -689,19 +705,11 @@ impl std::hash::Hash for ScalarValue {
     }
 }
 
-fn hash_nested_array_v2<H: std::hash::Hasher>(arr: &dyn Array, state: &mut H) {
+fn hash_nested_array<H: std::hash::Hasher>(arr: &dyn Array, state: &mut H) {
     // let arrays = vec![arr.to_owned()];
     let hashes_buffer = &mut vec![0; arr.len()];
     let random_state = ahash::RandomState::with_seeds(0, 0, 0, 0);
-    let hashes = create_hashes_v2(&[arr], &random_state, hashes_buffer).unwrap();
-    // Hash back to std::hash::Hasher
-    hashes.hash(state);
-}
-fn hash_nested_array<H: std::hash::Hasher>(arr: ArrayRef, state: &mut H) {
-    let arrays = vec![arr.to_owned()];
-    let hashes_buffer = &mut vec![0; arr.len()];
-    let random_state = ahash::RandomState::with_seeds(0, 0, 0, 0);
-    let hashes = create_hashes(&arrays, &random_state, hashes_buffer).unwrap();
+    let hashes = create_hashes(&[arr], &random_state, hashes_buffer).unwrap();
     // Hash back to std::hash::Hasher
     hashes.hash(state);
 }
@@ -1098,8 +1106,14 @@ impl ScalarValue {
                 let (arr, _) = arr.get();
                 arr.data_type().to_owned()
             }
-            ScalarValue::FixedSizeList(arr) => arr.data_type().to_owned(),
-            ScalarValue::Struct(arr) => arr.data_type().to_owned(),
+            ScalarValue::FixedSizeList(arr) => {
+                let (arr, _) = arr.get();
+                arr.data_type().to_owned()
+            }
+            ScalarValue::Struct(arr) => {
+                let (arr, _) = arr.get();
+                arr.data_type().to_owned()
+            }
             ScalarValue::Date32(_) => DataType::Date32,
             ScalarValue::Date64(_) => DataType::Date64,
             ScalarValue::Time32Second(_) => DataType::Time32(TimeUnit::Second),
@@ -1307,8 +1321,14 @@ impl ScalarValue {
                 let (arr, _) = arr.get();
                 arr.len() == arr.null_count()
             }
-            ScalarValue::FixedSizeList(arr) => arr.len() == arr.null_count(),
-            ScalarValue::Struct(arr) => arr.len() == arr.null_count(),
+            ScalarValue::FixedSizeList(arr) => {
+                let (arr, _) = arr.get();
+                arr.len() == arr.null_count()
+            }
+            ScalarValue::Struct(arr) => {
+                let (arr, _) = arr.get();
+                arr.len() == arr.null_count()
+            }
             ScalarValue::Date32(v) => v.is_none(),
             ScalarValue::Date64(v) => v.is_none(),
             ScalarValue::Time32Second(v) => v.is_none(),
@@ -2020,17 +2040,23 @@ impl ScalarValue {
             },
             ScalarValue::List(arr) => {
                 let (arr, _) = arr.get();
-                Self::list_to_array_of_size(arr, size)?
+                let arrays = std::iter::repeat(arr).take(size).collect::<Vec<_>>();
+                arrow::compute::concat(arrays.as_slice())?
             }
             ScalarValue::LargeList(arr) => {
                 let (arr, _) = arr.get();
-                Self::list_to_array_of_size(arr, size)?
+                let arrays = std::iter::repeat(arr).take(size).collect::<Vec<_>>();
+                arrow::compute::concat(arrays.as_slice())?
             }
             ScalarValue::FixedSizeList(arr) => {
-                Self::list_to_array_of_size(arr.as_ref() as &dyn Array, size)?
+                let (arr, _) = arr.get();
+                let arrays = std::iter::repeat(arr).take(size).collect::<Vec<_>>();
+                arrow::compute::concat(arrays.as_slice())?
             }
             ScalarValue::Struct(arr) => {
-                Self::list_to_array_of_size(arr.as_ref() as &dyn Array, size)?
+                let (arr, _) = arr.get();
+                let arrays = std::iter::repeat(arr).take(size).collect::<Vec<_>>();
+                arrow::compute::concat(arrays.as_slice())?
             }
             ScalarValue::Date32(e) => {
                 build_array_from_option!(Date32, Date32Array, e, size)
@@ -2168,11 +2194,6 @@ impl ScalarValue {
             }
             _ => _internal_err!("Unsupported decimal type"),
         }
-    }
-
-    fn list_to_array_of_size(arr: &dyn Array, size: usize) -> Result<ArrayRef> {
-        let arrays = std::iter::repeat(arr).take(size).collect::<Vec<_>>();
-        Ok(arrow::compute::concat(arrays.as_slice())?)
     }
 
     /// Retrieve ScalarValue for each row in `array`
@@ -2324,12 +2345,17 @@ impl ScalarValue {
             DataType::FixedSizeList(_, _) => {
                 let list_array = as_fixed_size_list_array(array)?;
                 let nested_array = list_array.value(index);
+                let data_type = nested_array.data_type().clone();
                 // Produces a single element `ListArray` with the value at `index`.
-                let list_size = nested_array.len();
-                let arr =
-                    Arc::new(array_into_fixed_size_list_array(nested_array, list_size));
+                let list_size = nested_array.len() as i32;
+                let list = FixedSizeListArray::new(
+                    Arc::new(Field::new("item", data_type, true)),
+                    list_size,
+                    nested_array,
+                    None,
+                );
 
-                ScalarValue::FixedSizeList(arr)
+                ScalarValue::FixedSizeList(Arc::new(Scalar::new(list)))
             }
             DataType::Date32 => typed_cast!(array, index, Date32Array, Date32)?,
             DataType::Date64 => typed_cast!(array, index, Date64Array, Date64)?,
@@ -2398,7 +2424,8 @@ impl ScalarValue {
             }
             DataType::Struct(_) => {
                 let a = array.slice(index, 1);
-                Self::Struct(Arc::new(a.as_struct().to_owned()))
+                let array = a.as_struct().to_owned();
+                Self::Struct(Arc::new(Scalar::new(array)))
             }
             DataType::FixedSizeBinary(_) => {
                 let array = as_fixed_size_binary_array(array)?;
@@ -2602,19 +2629,23 @@ impl ScalarValue {
             }
             ScalarValue::List(arr) => {
                 let (arr1, _) = arr.get();
-                let arr2 = array.as_ref();
-                Self::eq_array_list_v2(arr1, arr2, index)
+                let arr2 = array.slice(index, 1);
+                arr1 == arr2.as_ref()
             }
             ScalarValue::LargeList(arr) => {
                 let (arr1, _) = arr.get();
-                let arr2 = array.as_ref();
-                Self::eq_array_list_v2(arr1, arr2, index)
+                let arr2 = array.slice(index, 1);
+                arr1 == arr2.as_ref()
             }
             ScalarValue::FixedSizeList(arr) => {
-                Self::eq_array_list(&(arr.to_owned() as ArrayRef), array, index)
+                let (arr1, _) = arr.get();
+                let arr2 = array.slice(index, 1);
+                arr1 == arr2.as_ref()
             }
             ScalarValue::Struct(arr) => {
-                Self::eq_array_list(&(arr.to_owned() as ArrayRef), array, index)
+                let (arr1, _) = arr.get();
+                let arr2 = array.slice(index, 1);
+                arr1 == arr2.as_ref()
             }
             ScalarValue::Date32(val) => {
                 eq_array_primitive!(array, index, Date32Array, val)?
@@ -2689,16 +2720,6 @@ impl ScalarValue {
         })
     }
 
-    fn eq_array_list_v2(arr1: &dyn Array, arr2: &dyn Array, index: usize) -> bool {
-        let right = arr2.slice(index, 1);
-        arr1 == &right
-    }
-
-    fn eq_array_list(arr1: &ArrayRef, arr2: &ArrayRef, index: usize) -> bool {
-        let right = arr2.slice(index, 1);
-        arr1 == &right
-    }
-
     /// Estimate size if bytes including `Self`. For values with internal containers such as `String`
     /// includes the allocated size (`capacity`) rather than the current length (`len`)
     pub fn size(&self) -> usize {
@@ -2753,8 +2774,14 @@ impl ScalarValue {
                     let (arr, _) = arr.get();
                     arr.get_array_memory_size()
                 }
-                ScalarValue::FixedSizeList(arr) => arr.get_array_memory_size(),
-                ScalarValue::Struct(arr) => arr.get_array_memory_size(),
+                ScalarValue::FixedSizeList(arr) => {
+                    let (arr, _) = arr.get();
+                    arr.get_array_memory_size()
+                }
+                ScalarValue::Struct(arr) => {
+                    let (arr, _) = arr.get();
+                    arr.get_array_memory_size()
+                }
                 ScalarValue::Dictionary(dt, sv) => {
                     // `dt` and `sv` are boxed, so they are NOT already included in `self`
                     dt.size() + sv.size()
@@ -3087,22 +3114,26 @@ impl TryFrom<&DataType> for ScalarValue {
             ),
             // `ScalaValue::FixedSizeList` contains single element `FixedSizeList`.
             DataType::FixedSizeList(field, _) => ScalarValue::FixedSizeList(
-                new_null_array(
-                    &DataType::FixedSizeList(
-                        Arc::new(Field::new("item", field.data_type().clone(), true)),
+                Scalar::new(
+                    new_null_array(
+                        &DataType::FixedSizeList(
+                            Arc::new(Field::new("item", field.data_type().clone(), true)),
+                            1,
+                        ),
                         1,
-                    ),
-                    1,
+                    )
+                    .as_fixed_size_list()
+                    .to_owned(),
                 )
-                .as_fixed_size_list()
-                .to_owned()
                 .into(),
             ),
             DataType::Struct(fields) => ScalarValue::Struct(
-                new_null_array(&DataType::Struct(fields.to_owned()), 1)
-                    .as_struct()
-                    .to_owned()
-                    .into(),
+                Scalar::new(
+                    new_null_array(&DataType::Struct(fields.to_owned()), 1)
+                        .as_struct()
+                        .to_owned(),
+                )
+                .into(),
             ),
             DataType::Null => ScalarValue::Null,
             _ => {
@@ -3169,13 +3200,16 @@ impl fmt::Display for ScalarValue {
             },
             ScalarValue::List(arr) => {
                 let (arr, _) = arr.get();
-                fmt_list_v2(arr, f)?
+                fmt_list(arr, f)?
             }
             ScalarValue::LargeList(arr) => {
                 let (arr, _) = arr.get();
-                fmt_list_v2(arr, f)?
+                fmt_list(arr, f)?
             }
-            ScalarValue::FixedSizeList(arr) => fmt_list(arr.to_owned() as ArrayRef, f)?,
+            ScalarValue::FixedSizeList(arr) => {
+                let (arr, _) = arr.get();
+                fmt_list(arr, f)?
+            }
             ScalarValue::Date32(e) => format_option!(f, e)?,
             ScalarValue::Date64(e) => format_option!(f, e)?,
             ScalarValue::Time32Second(e) => format_option!(f, e)?,
@@ -3190,8 +3224,8 @@ impl fmt::Display for ScalarValue {
             ScalarValue::DurationMicrosecond(e) => format_option!(f, e)?,
             ScalarValue::DurationNanosecond(e) => format_option!(f, e)?,
             ScalarValue::Struct(struct_arr) => {
-                // ScalarValue Struct should always have a single element
-                assert_eq!(struct_arr.len(), 1);
+                let (struct_arr, _) = struct_arr.get();
+                let struct_arr = struct_arr.as_struct();
 
                 if struct_arr.null_count() == struct_arr.len() {
                     write!(f, "NULL")?;
@@ -3213,9 +3247,9 @@ impl fmt::Display for ScalarValue {
                             if nulls.is_some_and(|b| b.is_null(index)) {
                                 format!("{}:NULL", field.name())
                             } else if let DataType::Struct(_) = field.data_type() {
-                                let sv = ScalarValue::Struct(Arc::new(
+                                let sv = ScalarValue::Struct(Arc::new(Scalar::new(
                                     column.as_struct().to_owned(),
-                                ));
+                                )));
                                 format!("{}:{sv}", field.name())
                             } else {
                                 let sv = array_value_to_string(column, 0).unwrap();
@@ -3233,17 +3267,7 @@ impl fmt::Display for ScalarValue {
     }
 }
 
-fn fmt_list(arr: ArrayRef, f: &mut fmt::Formatter) -> fmt::Result {
-    // ScalarValue List, LargeList, FixedSizeList should always have a single element
-    assert_eq!(arr.len(), 1);
-    let options = FormatOptions::default().with_display_error(true);
-    let formatter =
-        ArrayFormatter::try_new(arr.as_ref() as &dyn Array, &options).unwrap();
-    let value_formatter = formatter.value(0);
-    write!(f, "{value_formatter}")
-}
-
-fn fmt_list_v2(arr: &dyn Array, f: &mut fmt::Formatter) -> fmt::Result {
+fn fmt_list(arr: &dyn Array, f: &mut fmt::Formatter) -> fmt::Result {
     let options = FormatOptions::default().with_display_error(true);
     let formatter = ArrayFormatter::try_new(arr, &options).unwrap();
     let value_formatter = formatter.value(0);
@@ -3296,8 +3320,8 @@ impl fmt::Debug for ScalarValue {
             ScalarValue::List(_) => write!(f, "List({self})"),
             ScalarValue::LargeList(_) => write!(f, "LargeList({self})"),
             ScalarValue::Struct(struct_arr) => {
-                // ScalarValue Struct should always have a single element
-                assert_eq!(struct_arr.len(), 1);
+                let (struct_arr, _) = struct_arr.get();
+                let struct_arr = struct_arr.as_struct();
 
                 let columns = struct_arr.columns();
                 let fields = struct_arr.fields();
@@ -3477,7 +3501,7 @@ mod tests {
                 int.clone() as ArrayRef,
             ),
         ]);
-        let sv = ScalarValue::Struct(Arc::new(struct_array));
+        let sv = ScalarValue::Struct(Arc::new(Scalar::new(struct_array)));
         let actual_arr = sv.to_array_of_size(2).unwrap();
 
         let boolean = Arc::new(BooleanArray::from(vec![
@@ -3525,7 +3549,7 @@ mod tests {
         let values = Int32Array::from_iter([Some(1), None, Some(2)]);
         let field = Arc::new(Field::new("item", DataType::Int32, true));
         let arr = FixedSizeListArray::new(field.clone(), 3, Arc::new(values), None);
-        let sv = ScalarValue::FixedSizeList(Arc::new(arr));
+        let sv = ScalarValue::FixedSizeList(Arc::new(Scalar::new(arr)));
         let actual_arr = sv
             .to_array_of_size(2)
             .expect("Failed to convert to array of size");
@@ -3608,19 +3632,19 @@ mod tests {
     #[test]
     fn test_iter_to_array_fixed_size_list() {
         let field = Arc::new(Field::new("item", DataType::Int32, true));
-        let f1 = Arc::new(FixedSizeListArray::new(
+        let f1 = Arc::new(Scalar::new(FixedSizeListArray::new(
             field.clone(),
             3,
             Arc::new(Int32Array::from(vec![1, 2, 3])),
             None,
-        ));
-        let f2 = Arc::new(FixedSizeListArray::new(
+        )));
+        let f2 = Arc::new(Scalar::new(FixedSizeListArray::new(
             field.clone(),
             3,
             Arc::new(Int32Array::from(vec![4, 5, 6])),
             None,
-        ));
-        let f_nulls = Arc::new(FixedSizeListArray::new_null(field, 1, 1));
+        )));
+        let f_nulls = Arc::new(Scalar::new(FixedSizeListArray::new_null(field, 1, 1)));
 
         let scalars = vec![
             ScalarValue::FixedSizeList(f_nulls.clone()),
@@ -3668,8 +3692,8 @@ mod tests {
         ]);
 
         let scalars = vec![
-            ScalarValue::Struct(Arc::new(s1)),
-            ScalarValue::Struct(Arc::new(s2)),
+            ScalarValue::Struct(Arc::new(Scalar::new(s1))),
+            ScalarValue::Struct(Arc::new(Scalar::new(s2))),
         ];
 
         let array = ScalarValue::iter_to_array(scalars).unwrap();
@@ -3721,8 +3745,8 @@ mod tests {
         ));
 
         let scalars = vec![
-            ScalarValue::Struct(Arc::new(s1)),
-            ScalarValue::Struct(Arc::new(s2)),
+            ScalarValue::Struct(Arc::new(Scalar::new(s1))),
+            ScalarValue::Struct(Arc::new(Scalar::new(s2))),
         ];
 
         let array = ScalarValue::iter_to_array(scalars).unwrap();
@@ -4848,7 +4872,7 @@ mod tests {
             ),
             (field_d.clone(), Arc::new(struct_array) as ArrayRef),
         ]);
-        let scalar = ScalarValue::Struct(Arc::new(struct_array));
+        let scalar = ScalarValue::Struct(Arc::new(Scalar::new(struct_array)));
 
         let array = scalar
             .to_array_of_size(2)
@@ -5738,20 +5762,20 @@ mod tests {
 
         let scalars = vec![
             // all null
-            ScalarValue::Struct(Arc::new(StructArray::from((
+            ScalarValue::Struct(Arc::new(Scalar::new(StructArray::from((
                 struct_value.clone(),
                 Buffer::from(&[0]),
-            )))),
+            ))))),
             // field 1 valid, field 2 null
-            ScalarValue::Struct(Arc::new(StructArray::from((
+            ScalarValue::Struct(Arc::new(Scalar::new(StructArray::from((
                 struct_value_with_nulls.clone(),
                 Buffer::from(&[1]),
-            )))),
+            ))))),
             // all valid
-            ScalarValue::Struct(Arc::new(StructArray::from((
+            ScalarValue::Struct(Arc::new(Scalar::new(StructArray::from((
                 struct_value.clone(),
                 Buffer::from(&[1]),
-            )))),
+            ))))),
         ];
 
         let check_array = |array| {
@@ -5806,6 +5830,9 @@ mod tests {
         let ScalarValue::Struct(arr) = s else {
             panic!("Expected struct");
         };
+        let (arr, _) = arr.get();
+        let arr = arr.as_struct().to_owned();
+        let arr = Arc::new(arr) as ArrayRef;
 
         //verify compared to arrow display
         let batch = RecordBatch::try_from_iter(vec![("s", arr as _)]).unwrap();
@@ -5828,6 +5855,9 @@ mod tests {
         let ScalarValue::Struct(arr) = s else {
             panic!("Expected struct");
         };
+        let (arr, _) = arr.get();
+        let arr = arr.as_struct().to_owned();
+        let arr = Arc::new(arr) as ArrayRef;
 
         //verify compared to arrow display
         let batch = RecordBatch::try_from_iter(vec![("s", arr as _)]).unwrap();
