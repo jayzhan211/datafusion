@@ -25,10 +25,7 @@ use arrow::{
     record_batch::RecordBatch,
 };
 
-use datafusion_common::{
-    cast::{as_large_list_array, as_list_array},
-    tree_node::{RewriteRecursion, TreeNode, TreeNodeRewriter},
-};
+use datafusion_common::tree_node::{RewriteRecursion, TreeNode, TreeNodeRewriter};
 use datafusion_common::{
     internal_err, DFSchema, DFSchemaRef, DataFusionError, Result, ScalarValue,
 };
@@ -525,15 +522,14 @@ impl<'a> ConstEvaluator<'a> {
                         DataFusionError::Execution(format!("Could not evaluate the expression, found a result of length {}", a.len())),
                         expr,
                     )
-                } else if as_list_array(&a).is_ok() {
-                    let arr = a.as_list::<i32>().to_owned();
+                } else if let Some(arr) = a.as_list_opt::<i32>() {
                     ConstSimplifyResult::Simplified(ScalarValue::List(Arc::new(
-                        Scalar::new(arr),
+                        Scalar::new(arr.to_owned()),
                     )))
-                } else if as_large_list_array(&a).is_ok() {
-                    ConstSimplifyResult::Simplified(ScalarValue::LargeList(
-                        a.as_list::<i64>().to_owned().into(),
-                    ))
+                } else if let Some(arr) = a.as_list_opt::<i64>() {
+                    ConstSimplifyResult::Simplified(ScalarValue::LargeList(Arc::new(
+                        Scalar::new(arr.to_owned()),
+                    )))
                 } else {
                     // Non-ListArray
                     match ScalarValue::try_from_array(&a, 0) {

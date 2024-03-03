@@ -1190,7 +1190,11 @@ impl TryFrom<&ScalarValue> for protobuf::ScalarValue {
                 encode_scalar_nested_value(arr, val)
             }
             ScalarValue::LargeList(arr) => {
-                encode_scalar_nested_value(arr.to_owned() as ArrayRef, val)
+                let (arr, _) = arr.get();
+                let list = arr.as_list::<i64>();
+                let arr = Arc::new(list.to_owned()) as ArrayRef;
+
+                encode_scalar_nested_value(arr, val)
             }
             ScalarValue::FixedSizeList(arr) => {
                 encode_scalar_nested_value(arr.to_owned() as ArrayRef, val)

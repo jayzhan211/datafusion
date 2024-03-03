@@ -426,8 +426,7 @@ pub fn create_hashes_v2<'a>(
     random_state: &RandomState,
     hashes_buffer: &'a mut Vec<u64>,
 ) -> Result<&'a mut Vec<u64>> {
-    for (i, &col) in arrays.iter().enumerate() {
-        let array = col;
+    for (i, &array) in arrays.iter().enumerate() {
         // combine hashes with `combine_hashes` for all columns besides the first
         let rehash = i >= 1;
         downcast_primitive_array! {
@@ -474,7 +473,7 @@ pub fn create_hashes_v2<'a>(
                 // This is internal because we should have caught this before.
                 return _internal_err!(
                     "Unsupported data type in hasher: {}",
-                    col.data_type()
+                    array.data_type()
                 );
             }
         }

@@ -381,6 +381,17 @@ pub fn array_into_large_list_array(arr: ArrayRef) -> LargeListArray {
     )
 }
 
+pub fn array_into_scalar_large_list(arr: ArrayRef) -> ScalarValue {
+    let offsets = OffsetBuffer::from_lengths([arr.len()]);
+    let arr = LargeListArray::new(
+        Arc::new(Field::new("item", arr.data_type().to_owned(), true)),
+        offsets,
+        arr,
+        None,
+    );
+    ScalarValue::LargeList(Arc::new(Scalar::new(arr)))
+}
+
 pub fn array_into_fixed_size_list_array(
     arr: ArrayRef,
     list_size: usize,
