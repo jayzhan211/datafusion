@@ -26,7 +26,7 @@ use arrow::compute::{partition, SortColumn, SortOptions};
 use arrow::datatypes::{Field, SchemaRef, UInt32Type};
 use arrow::record_batch::RecordBatch;
 use arrow_array::{
-    Array, FixedSizeListArray, LargeListArray, ListArray, RecordBatchOptions,
+    Array, FixedSizeListArray, LargeListArray, ListArray, RecordBatchOptions, Scalar,
 };
 use arrow_schema::DataType;
 use sqlparser::ast::Ident;
@@ -356,6 +356,17 @@ pub fn array_into_list_array(arr: ArrayRef) -> ListArray {
         arr,
         None,
     )
+}
+
+pub fn array_into_scalar_list(arr: ArrayRef) -> ScalarValue {
+    let offsets = OffsetBuffer::from_lengths([arr.len()]);
+    let arr = ListArray::new(
+        Arc::new(Field::new("item", arr.data_type().to_owned(), true)),
+        offsets,
+        arr,
+        None,
+    );
+    ScalarValue::List(Arc::new(Scalar::new(arr)))
 }
 
 /// Wrap an array into a single element `LargeListArray`.

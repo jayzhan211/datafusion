@@ -32,7 +32,7 @@ use arrow_array::types::ArrowPrimitiveType;
 use arrow_array::PrimitiveArray;
 
 use datafusion_common::cast::{as_list_array, as_primitive_array};
-use datafusion_common::utils::array_into_list_array;
+use datafusion_common::utils::array_into_scalar_list;
 use datafusion_common::ScalarValue;
 use datafusion_expr::Accumulator;
 
@@ -68,8 +68,7 @@ where
         let arr = Arc::new(PrimitiveArray::<T>::from_iter_values(
             self.values.iter().cloned(),
         )) as ArrayRef;
-        let list = Arc::new(array_into_list_array(arr));
-        Ok(vec![ScalarValue::List(list)])
+        Ok(vec![array_into_scalar_list(arr)])
     }
 
     fn update_batch(&mut self, values: &[ArrayRef]) -> datafusion_common::Result<()> {
@@ -154,8 +153,7 @@ where
         let arr = Arc::new(PrimitiveArray::<T>::from_iter_values(
             self.values.iter().map(|v| v.0),
         )) as ArrayRef;
-        let list = Arc::new(array_into_list_array(arr));
-        Ok(vec![ScalarValue::List(list)])
+        Ok(vec![array_into_scalar_list(arr)])
     }
 
     fn update_batch(&mut self, values: &[ArrayRef]) -> datafusion_common::Result<()> {

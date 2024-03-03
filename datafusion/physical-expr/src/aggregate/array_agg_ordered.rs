@@ -33,7 +33,7 @@ use crate::{
 use arrow::array::{Array, ArrayRef};
 use arrow::datatypes::{DataType, Field};
 use arrow_array::cast::AsArray;
-use arrow_array::{new_empty_array, StructArray};
+use arrow_array::{new_empty_array, Scalar, StructArray};
 use arrow_schema::{Fields, SortOptions};
 
 use datafusion_common::utils::array_into_list_array;
@@ -304,7 +304,9 @@ impl Accumulator for OrderSensitiveArrayAggAccumulator {
         } else {
             ScalarValue::new_list_from_iter(values.into_iter(), &self.datatypes[0])
         };
-        Ok(ScalarValue::List(array))
+
+        let array = array.as_ref().clone();
+        Ok(ScalarValue::List(Arc::new(Scalar::new(array))))
     }
 
     fn size(&self) -> usize {
@@ -358,8 +360,9 @@ impl OrderSensitiveArrayAggAccumulator {
             column_wise_ordering_values,
             None,
         )?;
-        Ok(ScalarValue::List(Arc::new(array_into_list_array(
-            Arc::new(ordering_array),
+
+        Ok(ScalarValue::List(Arc::new(Scalar::new(
+            array_into_list_array(Arc::new(ordering_array)),
         ))))
     }
 }

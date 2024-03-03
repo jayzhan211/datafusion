@@ -415,6 +415,73 @@ pub fn create_hashes<'a>(
     Ok(hashes_buffer)
 }
 
+/// Creates hash values for every row, based on the values in the
+/// columns.
+///
+/// The number of rows to hash is determined by `hashes_buffer.len()`.
+/// `hashes_buffer` should be pre-sized appropriately
+#[cfg(not(feature = "force_hash_collisions"))]
+pub fn create_hashes_v2<'a>(
+    arrays: &[&dyn Array],
+    random_state: &RandomState,
+    hashes_buffer: &'a mut Vec<u64>,
+) -> Result<&'a mut Vec<u64>> {
+    for (i, &col) in arrays.iter().enumerate() {
+        let array = col;
+        // combine hashes with `combine_hashes` for all columns besides the first
+        let rehash = i >= 1;
+        downcast_primitive_array! {
+            array => hash_array_primitive(array, random_state, hashes_buffer, rehash),
+            DataType::Null => hash_null(random_state, hashes_buffer, rehash),
+            DataType::Boolean => hash_array(as_boolean_array(array)?, random_state, hashes_buffer, rehash),
+            DataType::Utf8 => hash_array(as_string_array(array)?, random_state, hashes_buffer, rehash),
+            DataType::LargeUtf8 => hash_array(as_largestring_array(array), random_state, hashes_buffer, rehash),
+            DataType::Binary => hash_array(as_generic_binary_array::<i32>(array)?, random_state, hashes_buffer, rehash),
+            DataType::LargeBinary => hash_array(as_generic_binary_array::<i64>(array)?, random_state, hashes_buffer, rehash),
+            DataType::FixedSizeBinary(_) => {
+                let array: &FixedSizeBinaryArray = array.as_any().downcast_ref().unwrap();
+                hash_array(array, random_state, hashes_buffer, rehash)
+            }
+            DataType::Decimal128(_, _) => {
+                let array = as_primitive_array::<Decimal128Type>(array)?;
+                hash_array_primitive(array, random_state, hashes_buffer, rehash)
+            }
+            DataType::Decimal256(_, _) => {
+                let array = as_primitive_array::<Decimal256Type>(array)?;
+                hash_array_primitive(array, random_state, hashes_buffer, rehash)
+            }
+            DataType::Dictionary(_, _) => downcast_dictionary_array! {
+                array => hash_dictionary(array, random_state, hashes_buffer, rehash)?,
+                _ => unreachable!()
+            }
+            DataType::Struct(_) => {
+                let array = as_struct_array(array)?;
+                hash_struct_array(array, random_state, hashes_buffer)?;
+            }
+            DataType::List(_) => {
+                let array = as_list_array(array)?;
+                hash_list_array(array, random_state, hashes_buffer)?;
+            }
+            DataType::LargeList(_) => {
+                let array = as_large_list_array(array)?;
+                hash_list_array(array, random_state, hashes_buffer)?;
+            }
+            DataType::FixedSizeList(_,_) => {
+                let array = as_fixed_size_list_array(array)?;
+                hash_fixed_list_array(array, random_state, hashes_buffer)?;
+            }
+            _ => {
+                // This is internal because we should have caught this before.
+                return _internal_err!(
+                    "Unsupported data type in hasher: {}",
+                    col.data_type()
+                );
+            }
+        }
+    }
+    Ok(hashes_buffer)
+}
+
 /// Test version of `create_row_hashes_v2` that produces the same value for
 /// all hashes (to test collisions)
 ///

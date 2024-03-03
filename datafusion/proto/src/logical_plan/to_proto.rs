@@ -19,6 +19,8 @@
 //! DataFusion logical plans to be serialized and transmitted between
 //! processes.
 
+use std::sync::Arc;
+
 use crate::protobuf::{
     self,
     arrow_type::ArrowTypeEnum,
@@ -33,7 +35,7 @@ use crate::protobuf::{
 };
 
 use arrow::{
-    array::ArrayRef,
+    array::{ArrayRef, AsArray, Datum},
     datatypes::{
         DataType, Field, IntervalMonthDayNanoType, IntervalUnit, Schema, SchemaRef,
         TimeUnit, UnionMode,
@@ -1181,7 +1183,11 @@ impl TryFrom<&ScalarValue> for protobuf::ScalarValue {
                 })
             }
             ScalarValue::List(arr) => {
-                encode_scalar_nested_value(arr.to_owned() as ArrayRef, val)
+                let (arr, _) = arr.get();
+                let list = arr.as_list::<i32>();
+                let arr = Arc::new(list.to_owned()) as ArrayRef;
+
+                encode_scalar_nested_value(arr, val)
             }
             ScalarValue::LargeList(arr) => {
                 encode_scalar_nested_value(arr.to_owned() as ArrayRef, val)

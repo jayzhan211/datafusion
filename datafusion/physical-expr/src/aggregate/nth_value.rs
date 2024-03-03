@@ -30,9 +30,11 @@ use crate::{
 };
 
 use arrow_array::cast::AsArray;
-use arrow_array::{new_empty_array, ArrayRef, StructArray};
+use arrow_array::{new_empty_array, ArrayRef, Scalar, StructArray};
 use arrow_schema::{DataType, Field, Fields};
-use datafusion_common::utils::{array_into_list_array, get_row_at_idx};
+use datafusion_common::utils::{
+    array_into_list_array, array_into_scalar_list, get_row_at_idx,
+};
 use datafusion_common::{exec_err, internal_err, Result, ScalarValue};
 use datafusion_expr::Accumulator;
 
@@ -388,8 +390,8 @@ impl NthValueAccumulator {
             None,
         )?;
 
-        Ok(ScalarValue::List(Arc::new(array_into_list_array(
-            Arc::new(ordering_array),
+        Ok(ScalarValue::List(Arc::new(Scalar::new(
+            array_into_list_array(Arc::new(ordering_array)),
         ))))
     }
 

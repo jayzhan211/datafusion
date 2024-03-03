@@ -40,9 +40,7 @@ use arrow::{
 };
 use datafusion::execution::registry::FunctionRegistry;
 use datafusion_common::{
-    arrow_datafusion_err, internal_err, plan_datafusion_err, Column, Constraint,
-    Constraints, DFField, DFSchema, DFSchemaRef, DataFusionError, OwnedTableReference,
-    Result, ScalarValue,
+    arrow_datafusion_err, internal_err, plan_datafusion_err, utils::array_into_scalar_list, Column, Constraint, Constraints, DFField, DFSchema, DFSchemaRef, DataFusionError, OwnedTableReference, Result, ScalarValue
 };
 use datafusion_expr::expr::Unnest;
 use datafusion_expr::window_frame::{check_window_frame, regularize_window_order_by};
@@ -721,7 +719,8 @@ impl TryFrom<&protobuf::ScalarValue> for ScalarValue {
                 let arr = record_batch.column(0);
                 match value {
                     Value::ListValue(_) => {
-                        Self::List(arr.as_list::<i32>().to_owned().into())
+                        array_into_scalar_list(arr.to_owned())
+                        // Self::List(arr.as_list::<i32>().to_owned().into())
                     }
                     Value::LargeListValue(_) => {
                         Self::LargeList(arr.as_list::<i64>().to_owned().into())

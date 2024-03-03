@@ -17,10 +17,10 @@
 
 //! Expression simplification API
 
-use std::ops::Not;
+use std::{ops::Not, sync::Arc};
 
 use arrow::{
-    array::{new_null_array, AsArray},
+    array::{new_null_array, AsArray, Scalar},
     datatypes::{DataType, Field, Schema},
     record_batch::RecordBatch,
 };
@@ -28,6 +28,7 @@ use arrow::{
 use datafusion_common::{
     cast::{as_large_list_array, as_list_array},
     tree_node::{RewriteRecursion, TreeNode, TreeNodeRewriter},
+    utils::array_into_scalar_list,
 };
 use datafusion_common::{
     internal_err, DFSchema, DFSchemaRef, DataFusionError, Result, ScalarValue,
@@ -526,9 +527,10 @@ impl<'a> ConstEvaluator<'a> {
                         expr,
                     )
                 } else if as_list_array(&a).is_ok() {
-                    ConstSimplifyResult::Simplified(ScalarValue::List(
-                        a.as_list::<i32>().to_owned().into(),
-                    ))
+                    let arr = a.as_list::<i32>().to_owned();
+                    ConstSimplifyResult::Simplified(ScalarValue::List(Arc::new(
+                        Scalar::new(arr),
+                    )))
                 } else if as_large_list_array(&a).is_ok() {
                     ConstSimplifyResult::Simplified(ScalarValue::LargeList(
                         a.as_list::<i64>().to_owned().into(),

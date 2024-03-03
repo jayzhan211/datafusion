@@ -24,7 +24,7 @@ use arrow::array::ArrayRef;
 use arrow::datatypes::{DataType, Field};
 use arrow_array::Array;
 use datafusion_common::cast::as_list_array;
-use datafusion_common::utils::array_into_list_array;
+use datafusion_common::utils::array_into_scalar_list;
 use datafusion_common::Result;
 use datafusion_common::ScalarValue;
 use datafusion_expr::Accumulator;
@@ -169,9 +169,7 @@ impl Accumulator for ArrayAggAccumulator {
         }
 
         let concated_array = arrow::compute::concat(&element_arrays)?;
-        let list_array = array_into_list_array(concated_array);
-
-        Ok(ScalarValue::List(Arc::new(list_array)))
+        Ok(array_into_scalar_list(concated_array))
     }
 
     fn size(&self) -> usize {
@@ -198,6 +196,7 @@ mod tests {
     use arrow::record_batch::RecordBatch;
     use arrow_array::Array;
     use arrow_array::ListArray;
+    use arrow_array::Scalar;
     use arrow_buffer::OffsetBuffer;
     use datafusion_common::DataFusionError;
     use datafusion_common::Result;
@@ -237,7 +236,7 @@ mod tests {
             Some(4),
             Some(5),
         ])]);
-        let list = ScalarValue::List(Arc::new(list));
+        let list = ScalarValue::List(Arc::new(Scalar::new(list)));
 
         test_op!(a, DataType::Int32, ArrayAgg, list, DataType::Int32)
     }
@@ -288,10 +287,10 @@ mod tests {
             arrow::compute::concat(&[&l1, &l2, &l3])?,
             None,
         );
-        let list = ScalarValue::List(Arc::new(list));
-        let l1 = ScalarValue::List(Arc::new(l1));
-        let l2 = ScalarValue::List(Arc::new(l2));
-        let l3 = ScalarValue::List(Arc::new(l3));
+        let list = ScalarValue::List(Arc::new(Scalar::new(list)));
+        let l1 = ScalarValue::List(Arc::new(Scalar::new(l1)));
+        let l2 = ScalarValue::List(Arc::new(Scalar::new(l2)));
+        let l3 = ScalarValue::List(Arc::new(Scalar::new(l3)));
 
         let array = ScalarValue::iter_to_array(vec![l1, l2, l3]).unwrap();
 

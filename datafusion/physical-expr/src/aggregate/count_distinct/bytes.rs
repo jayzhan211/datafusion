@@ -20,11 +20,10 @@
 use crate::binary_map::{ArrowBytesSet, OutputType};
 use arrow_array::{ArrayRef, OffsetSizeTrait};
 use datafusion_common::cast::as_list_array;
-use datafusion_common::utils::array_into_list_array;
+use datafusion_common::utils::array_into_scalar_list;
 use datafusion_common::ScalarValue;
 use datafusion_expr::Accumulator;
 use std::fmt::Debug;
-use std::sync::Arc;
 
 /// Specialized implementation of
 /// `COUNT DISTINCT` for [`StringArray`] [`LargeStringArray`],
@@ -47,8 +46,7 @@ impl<O: OffsetSizeTrait> Accumulator for BytesDistinctCountAccumulator<O> {
     fn state(&mut self) -> datafusion_common::Result<Vec<ScalarValue>> {
         let set = self.0.take();
         let arr = set.into_state();
-        let list = Arc::new(array_into_list_array(arr));
-        Ok(vec![ScalarValue::List(list)])
+        Ok(vec![array_into_scalar_list(arr)])
     }
 
     fn update_batch(&mut self, values: &[ArrayRef]) -> datafusion_common::Result<()> {

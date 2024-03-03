@@ -27,8 +27,10 @@
 //! [TDigest sketch algorithm]: https://arxiv.org/abs/1902.04023
 //! [Facebook's Folly TDigest]: https://github.com/facebook/folly/blob/main/folly/stats/TDigest.h
 
+use arrow::array::AsArray;
 use arrow::datatypes::DataType;
 use arrow_array::types::Float64Type;
+use arrow_array::Datum;
 use datafusion_common::cast::as_primitive_array;
 use datafusion_common::Result;
 use datafusion_common::ScalarValue;
@@ -605,7 +607,10 @@ impl TDigest {
 
         let centroids: Vec<_> = match &state[5] {
             ScalarValue::List(arr) => {
-                let array = arr.values();
+                let (arr, _) = arr.get();
+                // let array = arr.values();
+                let array = arr.as_list::<i32>();
+                let array = array.values();
 
                 let f64arr =
                     as_primitive_array::<Float64Type>(array).expect("expected f64 array");
