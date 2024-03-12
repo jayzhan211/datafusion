@@ -234,6 +234,7 @@ pub(super) fn array_to_string(args: &[ArrayRef]) -> Result<ArrayRef> {
             )?
         }
         _ => {
+            // add cos
             let mut arg = String::from("");
             let mut res: Vec<Option<String>> = Vec::new();
             // delimiter length is 1
