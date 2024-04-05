@@ -360,17 +360,6 @@ pub fn create_aggregate_expr(
         (AggregateFunction::Median, true) => {
             return not_impl_err!("MEDIAN(DISTINCT) aggregations are not available");
         }
-        (AggregateFunction::FirstValue, _) => Arc::new(
-            expressions::FirstValue::new(
-                input_phy_exprs[0].clone(),
-                name,
-                input_phy_types[0].clone(),
-                ordering_req.to_vec(),
-                ordering_types,
-                vec![],
-            )
-            .with_ignore_nulls(ignore_nulls),
-        ),
         (AggregateFunction::LastValue, _) => Arc::new(
             expressions::LastValue::new(
                 input_phy_exprs[0].clone(),

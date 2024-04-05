@@ -49,8 +49,8 @@ pub enum AggregateFunction {
     ApproxDistinct,
     /// Aggregation into an array
     ArrayAgg,
-    /// First value in a group according to some ordering
-    FirstValue,
+    // /// First value in a group according to some ordering
+    // FirstValue,
     /// Last value in a group according to some ordering
     LastValue,
     /// N'th value in a group according to some ordering
@@ -121,7 +121,6 @@ impl AggregateFunction {
             Median => "MEDIAN",
             ApproxDistinct => "APPROX_DISTINCT",
             ArrayAgg => "ARRAY_AGG",
-            FirstValue => "FIRST_VALUE",
             LastValue => "LAST_VALUE",
             NthValue => "NTH_VALUE",
             Variance => "VAR",
@@ -178,7 +177,6 @@ impl FromStr for AggregateFunction {
             "min" => AggregateFunction::Min,
             "sum" => AggregateFunction::Sum,
             "array_agg" => AggregateFunction::ArrayAgg,
-            "first_value" => AggregateFunction::FirstValue,
             "last_value" => AggregateFunction::LastValue,
             "nth_value" => AggregateFunction::NthValue,
             "string_agg" => AggregateFunction::StringAgg,
@@ -294,7 +292,6 @@ impl AggregateFunction {
                 Ok(coerced_data_types[0].clone())
             }
             AggregateFunction::Grouping => Ok(DataType::Int32),
-            AggregateFunction::FirstValue
             | AggregateFunction::LastValue
             | AggregateFunction::NthValue => Ok(coerced_data_types[0].clone()),
             AggregateFunction::StringAgg => Ok(DataType::LargeUtf8),
@@ -352,7 +349,6 @@ impl AggregateFunction {
             | AggregateFunction::StddevPop
             | AggregateFunction::Median
             | AggregateFunction::ApproxMedian
-            | AggregateFunction::FirstValue
             | AggregateFunction::LastValue => {
                 Signature::uniform(1, NUMERICS.to_vec(), Volatility::Immutable)
             }

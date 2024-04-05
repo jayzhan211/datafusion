@@ -24,6 +24,7 @@ use crate::expr::{
 use crate::function::{
     AccumulatorArgs, AccumulatorFactoryFunction, PartitionEvaluatorFactory,
 };
+use crate::type_coercion::aggregates::NUMERICS;
 use crate::udaf::format_state_name;
 use crate::{
     aggregate_function, built_in_function, conditional_expressions::CaseBuilder,
@@ -712,11 +713,9 @@ pub fn create_udaf(
 /// The signature and state type must match the `Accumulator's implementation`.
 /// TOOD: We plan to move aggregate function to its own crate. This function will be deprecated then.
 pub fn create_first_value(
-    name: &str,
-    signature: Signature,
     accumulator: AccumulatorFactoryFunction,
 ) -> AggregateUDF {
-    AggregateUDF::from(FirstValue::new(name, signature, accumulator))
+    AggregateUDF::from(FirstValue::new(accumulator))
 }
 
 /// Implements [`AggregateUDFImpl`] for functions that have a single signature and
@@ -813,16 +812,17 @@ impl AggregateUDFImpl for SimpleAggregateUDF {
     }
 }
 
+// TODO: Move to aggregate-funtctions crate
 pub struct FirstValue {
-    name: String,
     signature: Signature,
+    aliases: Vec<String>,
     accumulator: AccumulatorFactoryFunction,
 }
 
 impl Debug for FirstValue {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         f.debug_struct("FirstValue")
-            .field("name", &self.name)
+            .field("name", &self.name())
             .field("signature", &self.signature)
             .field("accumulator", &"<FUNC>")
             .finish()
@@ -831,14 +831,13 @@ impl Debug for FirstValue {
 
 impl FirstValue {
     pub fn new(
-        name: impl Into<String>,
-        signature: Signature,
         accumulator: AccumulatorFactoryFunction,
     ) -> Self {
-        let name = name.into();
         Self {
-            name,
-            signature,
+            signature: Signature::uniform(1, NUMERICS.to_vec(), Volatility::Immutable),
+            aliases: vec![
+                String::from("FIRST_VALUE"),
+            ],
             accumulator,
         }
     }
@@ -850,7 +849,7 @@ impl AggregateUDFImpl for FirstValue {
     }
 
     fn name(&self) -> &str {
-        &self.name
+        "FIRST_VALUE"
     }
 
     fn signature(&self) -> &Signature {
@@ -884,6 +883,7 @@ impl AggregateUDFImpl for FirstValue {
         Ok(fields)
     }
 }
+
 
 /// Creates a new UDWF with a specific signature, state type and return type.
 ///

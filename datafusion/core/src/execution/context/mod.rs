@@ -1461,8 +1461,6 @@ impl SessionState {
             .expect("can not register array expressions");
 
         let first_value = create_first_value(
-            "FIRST_VALUE",
-            Signature::uniform(1, NUMERICS.to_vec(), Volatility::Immutable),
             Arc::new(create_first_value_accumulator),
         );
 
