@@ -51,7 +51,11 @@ pub fn create_aggregate_expr(
         .collect::<Result<Vec<_>>>()?;
 
     // check with signature
-    check_arg_count(fun.name(), &input_exprs_types, &fun.signature().type_signature)?;
+    check_arg_count(
+        fun.name(),
+        &input_exprs_types,
+        &fun.signature().type_signature,
+    )?;
 
     let ordering_types = ordering_req
         .iter()
@@ -72,7 +76,6 @@ pub fn create_aggregate_expr(
         ordering_fields,
     }))
 }
-
 
 /// Physical aggregate expression of a UDAF.
 #[derive(Debug)]

@@ -1460,9 +1460,7 @@ impl SessionState {
         datafusion_functions_array::register_all(&mut new_self)
             .expect("can not register array expressions");
 
-        let first_value = create_first_value(
-            Arc::new(create_first_value_accumulator),
-        );
+        let first_value = create_first_value(Arc::new(create_first_value_accumulator));
 
         match new_self.register_udaf(Arc::new(first_value)) {
             Ok(Some(existing_udaf)) => {

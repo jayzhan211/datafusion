@@ -292,8 +292,9 @@ impl AggregateFunction {
                 Ok(coerced_data_types[0].clone())
             }
             AggregateFunction::Grouping => Ok(DataType::Int32),
-            | AggregateFunction::LastValue
-            | AggregateFunction::NthValue => Ok(coerced_data_types[0].clone()),
+            AggregateFunction::LastValue | AggregateFunction::NthValue => {
+                Ok(coerced_data_types[0].clone())
+            }
             AggregateFunction::StringAgg => Ok(DataType::LargeUtf8),
         }
     }

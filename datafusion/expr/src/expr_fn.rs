@@ -712,9 +712,7 @@ pub fn create_udaf(
 /// Creates a new UDAF with a specific signature, state type and return type.
 /// The signature and state type must match the `Accumulator's implementation`.
 /// TOOD: We plan to move aggregate function to its own crate. This function will be deprecated then.
-pub fn create_first_value(
-    accumulator: AccumulatorFactoryFunction,
-) -> AggregateUDF {
+pub fn create_first_value(accumulator: AccumulatorFactoryFunction) -> AggregateUDF {
     AggregateUDF::from(FirstValue::new(accumulator))
 }
 
@@ -830,14 +828,10 @@ impl Debug for FirstValue {
 }
 
 impl FirstValue {
-    pub fn new(
-        accumulator: AccumulatorFactoryFunction,
-    ) -> Self {
+    pub fn new(accumulator: AccumulatorFactoryFunction) -> Self {
         Self {
             signature: Signature::uniform(1, NUMERICS.to_vec(), Volatility::Immutable),
-            aliases: vec![
-                String::from("FIRST_VALUE"),
-            ],
+            aliases: vec![String::from("FIRST_VALUE")],
             accumulator,
         }
     }
@@ -883,7 +877,6 @@ impl AggregateUDFImpl for FirstValue {
         Ok(fields)
     }
 }
-
 
 /// Creates a new UDWF with a specific signature, state type and return type.
 ///
