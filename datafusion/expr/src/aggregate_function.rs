@@ -49,7 +49,7 @@ pub enum AggregateFunction {
     ApproxDistinct,
     /// Aggregation into an array
     ArrayAgg,
-    /// First value in a group according to some ordering
+    /// N'th value in a group according to some ordering
     NthValue,
     /// Variance (Sample)
     Variance,
