@@ -80,7 +80,7 @@ impl Default for FirstValue {
 impl FirstValue {
     pub fn new() -> Self {
         Self {
-            aliases: vec![String::from("FIRST_VALUE")],
+            aliases: vec![String::from("FIRST_VALUE"), String::from("first_value")],
             signature: Signature::uniform(1, NUMERICS.to_vec(), Volatility::Immutable),
         }
     }
@@ -546,7 +546,7 @@ impl Default for LastValue {
 impl LastValue {
     pub fn new() -> Self {
         Self {
-            aliases: vec![String::from("LAST_VALUE")],
+            aliases: vec![String::from("LAST_VALUE"), String::from("last_value")],
             signature: Signature::uniform(1, NUMERICS.to_vec(), Volatility::Immutable),
         }
     }

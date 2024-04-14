@@ -208,6 +208,19 @@ impl<'a, S: ContextProvider> SqlToRel<'a, S> {
                             null_treatment,
                         ))
                     }
+                    WindowFunctionDefinition::AggregateUDF(aggregate_udf) => {
+                        let args =
+                            self.function_args_to_expr(args, schema, planner_context)?;
+
+                        Expr::WindowFunction(expr::WindowFunction::new(
+                            WindowFunctionDefinition::AggregateUDF(aggregate_udf),
+                            args,
+                            partition_by,
+                            order_by,
+                            window_frame,
+                            null_treatment,
+                        ))
+                    }
                     _ => Expr::WindowFunction(expr::WindowFunction::new(
                         fun,
                         self.function_args_to_expr(args, schema, planner_context)?,
@@ -297,19 +310,15 @@ impl<'a, S: ContextProvider> SqlToRel<'a, S> {
         &self,
         name: &str,
     ) -> Result<WindowFunctionDefinition> {
-        expr::find_df_window_func(name)
-            // next check user defined aggregates
-            .or_else(|| {
-                self.context_provider
-                    .get_aggregate_meta(name)
-                    .map(WindowFunctionDefinition::AggregateUDF)
-            })
-            // next check user defined window functions
+        self.context_provider
+            .get_aggregate_meta(name)
+            .map(WindowFunctionDefinition::AggregateUDF)
             .or_else(|| {
                 self.context_provider
                     .get_window_meta(name)
                     .map(WindowFunctionDefinition::WindowUDF)
             })
+            .or_else(|| expr::find_df_window_func(name))
             .ok_or_else(|| {
                 plan_datafusion_err!("There is no window function named {name}")
             })

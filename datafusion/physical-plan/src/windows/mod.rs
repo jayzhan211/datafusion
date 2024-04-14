@@ -34,8 +34,8 @@ use arrow::datatypes::Schema;
 use arrow_schema::{DataType, Field, SchemaRef};
 use datafusion_common::{exec_err, DataFusionError, Result, ScalarValue};
 use datafusion_expr::{
-    BuiltInWindowFunction, PartitionEvaluator, WindowFrame, WindowFunctionDefinition,
-    WindowUDF,
+    BuiltInWindowFunction, Expr, PartitionEvaluator, WindowFrame,
+    WindowFunctionDefinition, WindowUDF,
 };
 use datafusion_physical_expr::equivalence::collapse_lex_req;
 use datafusion_physical_expr::{
@@ -60,7 +60,7 @@ pub fn create_window_expr(
     name: String,
     args: &[Arc<dyn PhysicalExpr>],
     partition_by: &[Arc<dyn PhysicalExpr>],
-    order_by: &[PhysicalSortExpr],
+    physical_sort_exprs: &[PhysicalSortExpr],
     window_frame: Arc<WindowFrame>,
     input_schema: &Schema,
     ignore_nulls: bool,
@@ -78,7 +78,7 @@ pub fn create_window_expr(
             )?;
             window_expr_from_aggregate_expr(
                 partition_by,
-                order_by,
+                physical_sort_exprs,
                 window_frame,
                 aggregate,
             )
@@ -87,27 +87,23 @@ pub fn create_window_expr(
             Arc::new(BuiltInWindowExpr::new(
                 create_built_in_window_expr(fun, args, input_schema, name, ignore_nulls)?,
                 partition_by,
-                order_by,
+                physical_sort_exprs,
                 window_frame,
             ))
         }
         WindowFunctionDefinition::AggregateUDF(fun) => {
-            // TODO: Ordering not supported for Window UDFs yet
-            let sort_exprs = &[];
-            let ordering_req = &[];
-
             let aggregate = udaf::create_aggregate_expr(
                 fun.as_ref(),
                 args,
-                sort_exprs,
-                ordering_req,
+                &[],
+                &[],
                 input_schema,
                 name,
                 ignore_nulls,
             )?;
             window_expr_from_aggregate_expr(
                 partition_by,
-                order_by,
+                physical_sort_exprs,
                 window_frame,
                 aggregate,
             )
@@ -115,7 +111,7 @@ pub fn create_window_expr(
         WindowFunctionDefinition::WindowUDF(fun) => Arc::new(BuiltInWindowExpr::new(
             create_udwf_window_expr(fun, args, input_schema, name)?,
             partition_by,
-            order_by,
+            physical_sort_exprs,
             window_frame,
         )),
     })
