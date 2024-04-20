@@ -19,8 +19,11 @@ use std::{any::Any, sync::Arc};
 
 use arrow::{
     compute::SortOptions,
-    datatypes::{DataType, Field},
+    datatypes::{DataType, Field, Schema},
 };
+use datafusion_common::DFSchema;
+use datafusion_common::Result;
+use datafusion_expr::{execution_props::ExecutionProps, expr::AggregateFunction};
 
 use crate::sort_expr::PhysicalSortExpr;
 
@@ -66,4 +69,79 @@ pub fn ordering_fields(
 /// Selects the sort option attribute from all the given `PhysicalSortExpr`s.
 pub fn get_sort_options(ordering_req: &[PhysicalSortExpr]) -> Vec<SortOptions> {
     ordering_req.iter().map(|item| item.options).collect()
+}
+
+/// Create physical aggregate expressions from
+/// logical expressions. Similar to [create_aggregate_expr_with_name_and_maybe_filter]
+/// but we dont return filter clause and ordering requirements.
+pub fn create_aggregate_expr(
+    e: AggregateFunction,
+    name: impl Into<String>,
+    logical_input_schema: &DFSchema,
+    physical_input_schema: &Schema,
+    execution_props: &ExecutionProps,
+) -> Result<Arc<dyn AggregateExpr>> {
+    let AggregateFunction {
+        func_def,
+        distinct,
+        args,
+        filter: _,
+        order_by,
+        null_treatment,
+    } = e;
+
+    let args = create_physical_exprs(&args, logical_input_schema, execution_props)?;
+
+    let ignore_nulls = null_treatment
+        .unwrap_or(sqlparser::ast::NullTreatment::RespectNulls)
+        == NullTreatment::IgnoreNulls;
+
+    match func_def {
+        AggregateFunctionDefinition::BuiltIn(fun) => {
+            let physical_sort_exprs = match order_by {
+                Some(exprs) => Some(create_physical_sort_exprs(
+                    &exprs,
+                    logical_input_schema,
+                    execution_props,
+                )?),
+                None => None,
+            };
+            let ordering_reqs: Vec<PhysicalSortExpr> =
+                physical_sort_exprs.clone().unwrap_or(vec![]);
+            aggregates::create_aggregate_expr(
+                &fun,
+                distinct,
+                &args,
+                &ordering_reqs,
+                physical_input_schema,
+                name,
+                ignore_nulls,
+            )
+        }
+        AggregateFunctionDefinition::UDF(fun) => {
+            let sort_exprs = order_by.clone().unwrap_or(vec![]);
+            let physical_sort_exprs = match order_by {
+                Some(exprs) => Some(create_physical_sort_exprs(
+                    &exprs,
+                    logical_input_schema,
+                    execution_props,
+                )?),
+                None => None,
+            };
+            let ordering_reqs: Vec<PhysicalSortExpr> =
+                physical_sort_exprs.clone().unwrap_or(vec![]);
+            udaf::create_aggregate_expr(
+                &fun,
+                &args,
+                &sort_exprs,
+                &ordering_reqs,
+                physical_input_schema,
+                name,
+                ignore_nulls,
+            )
+        }
+        AggregateFunctionDefinition::Name(_) => {
+            internal_err!("Aggregate function name should have been resolved")
+        }
+    }
 }

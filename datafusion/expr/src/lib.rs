@@ -83,6 +83,7 @@ pub use signature::{
     TIMEZONE_WILDCARD,
 };
 pub use table_source::{TableProviderFilterPushDown, TableSource, TableType};
+pub use udaf::ReversedExpr;
 pub use udaf::{AggregateUDF, AggregateUDFImpl};
 pub use udf::{ScalarUDF, ScalarUDFImpl};
 pub use udwf::{WindowUDF, WindowUDFImpl};

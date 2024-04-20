@@ -19,7 +19,9 @@ pub mod utils;
 
 use arrow::datatypes::{DataType, Field, Schema};
 use datafusion_common::{not_impl_err, Result};
+use datafusion_expr::expr::AggregateFunction;
 use datafusion_expr::type_coercion::aggregates::check_arg_count;
+use datafusion_expr::ReversedExpr;
 use datafusion_expr::{
     function::AccumulatorArgs, Accumulator, AggregateUDF, Expr, GroupsAccumulator,
 };
@@ -313,6 +315,24 @@ impl AggregateExpr for AggregateFunctionExpr {
 
     fn sort_exprs(&self) -> &[Expr] {
         &self.sort_exprs
+    }
+
+    fn reverse_expr(&self) -> Option<Arc<dyn AggregateExpr>> {
+        match self.fun.reverse_expr() {
+            ReversedExpr::NotSupported => None,
+            ReversedExpr::Identical => Some(Arc::new(self.clone())),
+            ReversedExpr::Reversed(AggregateFunction {
+                func_def,
+                args,
+                distinct,
+                filter,
+                order_by,
+                null_treatment,
+            }) => {
+
+
+            }
+        }
     }
 }
 

@@ -1676,6 +1676,7 @@ pub fn create_aggregate_expr_with_name_and_maybe_filter(
     }
 }
 
+
 /// Create an aggregate expression from a logical expression or an alias
 pub fn create_aggregate_expr_and_maybe_filter(
     e: &Expr,

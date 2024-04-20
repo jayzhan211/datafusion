@@ -24,12 +24,12 @@ use datafusion_common::utils::{compare_rows, get_arrayref_at_indices, get_row_at
 use datafusion_common::{
     arrow_datafusion_err, internal_err, DataFusionError, Result, ScalarValue,
 };
-use datafusion_expr::expr::Sort;
+use datafusion_expr::expr::{AggregateFunction, Sort};
 use datafusion_expr::function::AccumulatorArgs;
 use datafusion_expr::type_coercion::aggregates::NUMERICS;
 use datafusion_expr::utils::format_state_name;
 use datafusion_expr::{
-    Accumulator, AggregateUDFImpl, ArrayFunctionSignature, Expr, Signature,
+    Accumulator, AggregateUDFImpl, ArrayFunctionSignature, Expr, ReversedExpr, Signature,
     TypeSignature, Volatility,
 };
 use datafusion_physical_expr_common::aggregate::utils::get_sort_options;
@@ -185,6 +185,10 @@ impl AggregateUDFImpl for FirstValue {
 
     fn aliases(&self) -> &[String] {
         &self.aliases
+    }
+
+    fn reverse_expr(&self) -> ReversedExpr {
+        ReversedExpr::NotSupported
     }
 }
 
