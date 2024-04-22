@@ -35,9 +35,9 @@ use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
 use crate::functions::{create_physical_fun, out_ordering};
+use crate::physical_expr::PhysicalExpr;
 use crate::physical_expr::{down_cast_any_ref, physical_exprs_equal};
 use crate::sort_properties::SortProperties;
-use crate::PhysicalExpr;
 
 use arrow::datatypes::{DataType, Schema};
 use arrow::record_batch::RecordBatch;

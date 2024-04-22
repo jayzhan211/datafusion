@@ -26,11 +26,16 @@ use arrow::datatypes::{DataType, Schema};
 use arrow::record_batch::RecordBatch;
 
 use datafusion_common::utils::DataPtr;
-use datafusion_common::{exec_err, internal_err, not_impl_err, DFSchema, Result, ScalarValue};
+use datafusion_common::{
+    exec_err, internal_err, not_impl_err, DFSchema, Result, ScalarValue,
+};
 use datafusion_expr::execution_props::ExecutionProps;
-use datafusion_expr::expr::{Alias, InList};
+use datafusion_expr::expr::{Alias, InList, ScalarFunction};
 use datafusion_expr::interval_arithmetic::Interval;
-use datafusion_expr::{Between, BinaryExpr, Cast, ColumnarValue, Expr, Like, Operator, TryCast};
+use datafusion_expr::{
+    Between, BinaryExpr, Cast, ColumnarValue, Expr, Like, Operator,
+    ScalarFunctionDefinition, TryCast,
+};
 
 use crate::expressions::binary::binary;
 use crate::expressions::cast::cast;
@@ -40,7 +45,9 @@ use crate::expressions::like::like;
 use crate::expressions::literal::{lit, Literal};
 use crate::expressions::not::not;
 use crate::expressions::try_cast::try_cast;
+use crate::functions::create_builtin_physical_expr;
 use crate::sort_properties::SortProperties;
+use crate::udf;
 use crate::utils::scatter;
 
 /// See [create_physical_expr](https://docs.rs/datafusion/latest/datafusion/physical_expr/fn.create_physical_expr.html)
@@ -242,6 +249,15 @@ pub fn physical_exprs_bag_equal(
     } else {
         false
     }
+}
+
+/// Checks whether the given physical expression slices are equal.
+pub fn physical_exprs_equal(
+    lhs: &[Arc<dyn PhysicalExpr>],
+    rhs: &[Arc<dyn PhysicalExpr>],
+) -> bool {
+    use itertools::izip;
+    lhs.len() == rhs.len() && izip!(lhs, rhs).all(|(lhs, rhs)| lhs.eq(rhs))
 }
 
 /// [PhysicalExpr] evaluate DataFusion expressions such as `A + 1`, or `CAST(c1
@@ -512,32 +528,29 @@ pub fn create_physical_expr(
         //         internal_err!("ListRange should be rewritten in OperatorToFunction")
         //     }
         // },
+        Expr::ScalarFunction(ScalarFunction { func_def, args }) => {
+            let physical_args =
+                create_physical_exprs(args, input_dfschema, execution_props)?;
 
-        // Expr::ScalarFunction(ScalarFunction { func_def, args }) => {
-        //     let physical_args =
-        //         create_physical_exprs(args, input_dfschema, execution_props)?;
-
-        //     match func_def {
-        //         ScalarFunctionDefinition::BuiltIn(fun) => {
-        //             functions::create_builtin_physical_expr(
-        //                 fun,
-        //                 &physical_args,
-        //                 input_schema,
-        //                 execution_props,
-        //             )
-        //         }
-        //         ScalarFunctionDefinition::UDF(fun) => udf::create_physical_expr(
-        //             fun.clone().as_ref(),
-        //             &physical_args,
-        //             input_schema,
-        //             args,
-        //             input_dfschema,
-        //         ),
-        //         ScalarFunctionDefinition::Name(_) => {
-        //             internal_err!("Function `Expr` with name should be resolved.")
-        //         }
-        //     }
-        // }
+            match func_def {
+                ScalarFunctionDefinition::BuiltIn(fun) => create_builtin_physical_expr(
+                    fun,
+                    &physical_args,
+                    input_schema,
+                    execution_props,
+                ),
+                ScalarFunctionDefinition::UDF(fun) => udf::create_physical_expr(
+                    fun.clone().as_ref(),
+                    &physical_args,
+                    input_schema,
+                    args,
+                    input_dfschema,
+                ),
+                ScalarFunctionDefinition::Name(_) => {
+                    internal_err!("Function `Expr` with name should be resolved.")
+                }
+            }
+        }
         Expr::Between(Between {
             expr,
             negated,
@@ -567,9 +580,7 @@ pub fn create_physical_expr(
             list,
             negated,
         }) => match expr.as_ref() {
-            Expr::Literal(ScalarValue::Utf8(None)) => {
-                Ok(lit(ScalarValue::Boolean(None)))
-            }
+            Expr::Literal(ScalarValue::Utf8(None)) => Ok(lit(ScalarValue::Boolean(None))),
             _ => {
                 let value_expr =
                     create_physical_expr(expr, input_dfschema, execution_props)?;
@@ -598,4 +609,46 @@ where
         .into_iter()
         .map(|expr| create_physical_expr(expr, input_dfschema, execution_props))
         .collect::<Result<Vec<_>>>()
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use crate::{
+        expressions::{column::Column, literal::Literal},
+        physical_expr::{physical_exprs_bag_equal, physical_exprs_equal, PhysicalExpr},
+    };
+
+    use datafusion_common::ScalarValue;
+
+    #[test]
+    fn test_physical_exprs_equal() {
+        let lit_true = Arc::new(Literal::new(ScalarValue::Boolean(Some(true))))
+            as Arc<dyn PhysicalExpr>;
+        let lit_false = Arc::new(Literal::new(ScalarValue::Boolean(Some(false))))
+            as Arc<dyn PhysicalExpr>;
+        let lit1 =
+            Arc::new(Literal::new(ScalarValue::Int32(Some(1)))) as Arc<dyn PhysicalExpr>;
+        let lit2 =
+            Arc::new(Literal::new(ScalarValue::Int32(Some(2)))) as Arc<dyn PhysicalExpr>;
+        let col_b_expr = Arc::new(Column::new("b", 1)) as Arc<dyn PhysicalExpr>;
+
+        let vec1 = vec![lit_true.clone(), lit_false.clone()];
+        let vec2 = vec![lit_true.clone(), col_b_expr.clone()];
+        let vec3 = vec![lit2.clone(), lit1.clone()];
+        let vec4 = vec![lit_true.clone(), lit_false.clone()];
+
+        // these vectors are same
+        assert!(physical_exprs_equal(&vec1, &vec1));
+        assert!(physical_exprs_equal(&vec1, &vec4));
+        assert!(physical_exprs_bag_equal(&vec1, &vec1));
+        assert!(physical_exprs_bag_equal(&vec1, &vec4));
+
+        // these vectors are different
+        assert!(!physical_exprs_equal(&vec1, &vec2));
+        assert!(!physical_exprs_equal(&vec1, &vec3));
+        assert!(!physical_exprs_bag_equal(&vec1, &vec2));
+        assert!(!physical_exprs_bag_equal(&vec1, &vec3));
+    }
 }

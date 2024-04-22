@@ -17,7 +17,7 @@
 
 use crate::{
     expressions::{self, binary, like, Column, Literal},
-    functions, udf, PhysicalExpr,
+    PhysicalExpr,
 };
 use arrow::datatypes::Schema;
 use datafusion_common::{
@@ -31,6 +31,7 @@ use datafusion_expr::{
     binary_expr, Between, BinaryExpr, Expr, GetFieldAccess, GetIndexedField, Like,
     Operator, ScalarFunctionDefinition, TryCast,
 };
+use datafusion_physical_expr_common::{functions::create_builtin_physical_expr, udf};
 use std::sync::Arc;
 
 /// [PhysicalExpr] evaluate DataFusion expressions such as `A + 1`, or `CAST(c1
@@ -314,14 +315,12 @@ pub fn create_physical_expr(
                 create_physical_exprs(args, input_dfschema, execution_props)?;
 
             match func_def {
-                ScalarFunctionDefinition::BuiltIn(fun) => {
-                    functions::create_builtin_physical_expr(
-                        fun,
-                        &physical_args,
-                        input_schema,
-                        execution_props,
-                    )
-                }
+                ScalarFunctionDefinition::BuiltIn(fun) => create_builtin_physical_expr(
+                    fun,
+                    &physical_args,
+                    input_schema,
+                    execution_props,
+                ),
                 ScalarFunctionDefinition::UDF(fun) => udf::create_physical_expr(
                     fun.clone().as_ref(),
                     &physical_args,

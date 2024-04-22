@@ -18,7 +18,6 @@
 pub mod aggregate;
 pub mod analysis;
 pub mod binary_map;
-pub mod conditional_expressions;
 pub mod equivalence;
 pub mod expressions;
 pub mod functions;
@@ -27,8 +26,6 @@ pub mod math_expressions;
 mod partitioning;
 mod physical_expr;
 pub mod planner;
-mod scalar_function;
-pub mod udf;
 pub mod utils;
 pub mod window;
 
@@ -44,18 +41,18 @@ pub use datafusion_physical_expr_common::aggregate::AggregateExpr;
 pub use equivalence::EquivalenceProperties;
 pub use partitioning::{Distribution, Partitioning};
 pub use physical_expr::{
-    physical_exprs_bag_equal, physical_exprs_contains, physical_exprs_equal,
-    PhysicalExprRef,
+    physical_exprs_bag_equal, physical_exprs_contains, PhysicalExprRef,
 };
 
+pub use datafusion_physical_expr_common::physical_expr::physical_exprs_equal;
 pub use datafusion_physical_expr_common::physical_expr::PhysicalExpr;
 pub use datafusion_physical_expr_common::sort_expr::{
     LexOrdering, LexOrderingRef, LexRequirement, LexRequirementRef, PhysicalSortExpr,
     PhysicalSortRequirement,
 };
 
+pub use datafusion_physical_expr_common::scalar_function::ScalarFunctionExpr;
 pub use planner::{create_physical_expr, create_physical_exprs};
-pub use scalar_function::ScalarFunctionExpr;
 
 pub use datafusion_physical_expr_common::utils::reverse_order_bys;
 pub use utils::split_conjunction;
@@ -70,4 +67,8 @@ pub mod sort_properties {
 // For backwards compatibility
 pub mod tree_node {
     pub use datafusion_physical_expr_common::tree_node::ExprContext;
+}
+
+pub mod udf {
+    pub use datafusion_physical_expr_common::udf::create_physical_expr;
 }

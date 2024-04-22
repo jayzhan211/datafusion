@@ -16,10 +16,14 @@
 // under the License.
 
 pub mod aggregate;
+pub mod conditional_expressions;
 pub mod expressions;
+pub mod functions;
 pub mod intervals;
 pub mod physical_expr;
+pub mod scalar_function;
 pub mod sort_expr;
 pub mod sort_properties;
 pub mod tree_node;
+pub mod udf;
 pub mod utils;
