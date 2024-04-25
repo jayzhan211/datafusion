@@ -57,10 +57,6 @@ impl ScalarUDFImpl for UuidFunc {
         Ok(Utf8)
     }
 
-    fn support_randomness(&self) -> bool {
-        true
-    }
-
     /// Prints random (v4) uuid values per row
     /// uuid() = 'a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11'
     fn invoke_no_args(&self, num_rows: usize) -> Result<ColumnarValue> {

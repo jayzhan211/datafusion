@@ -66,6 +66,10 @@ impl ScalarUDFImpl for PiFunc {
         ))))
     }
 
+    fn invoke_no_args(&self, _number_rows: usize) -> Result<ColumnarValue> {
+        self.invoke(&[])
+    }
+
     fn monotonicity(&self) -> Result<Option<FuncMonotonicity>> {
         Ok(Some(vec![Some(true)]))
     }

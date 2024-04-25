@@ -63,11 +63,8 @@ impl ScalarUDFImpl for RandomFunc {
         Ok(Float64)
     }
 
-    fn support_randomness(&self) -> bool {
-        true
-    }
-
     fn invoke_no_args(&self, num_rows: usize) -> Result<ColumnarValue> {
+        // Since random is volatile, return a different value each row
         let mut rng = thread_rng();
         let values = std::iter::repeat_with(|| rng.gen_range(0.0..1.0)).take(num_rows);
         let array = Float64Array::from_iter_values(values);

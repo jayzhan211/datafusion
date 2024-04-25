@@ -205,10 +205,6 @@ impl ScalarUDF {
     pub fn short_circuits(&self) -> bool {
         self.inner.short_circuits()
     }
-
-    pub fn support_randomness(&self) -> bool {
-        self.inner.support_randomness()
-    }
 }
 
 impl<F> From<F> for ScalarUDF
@@ -405,12 +401,6 @@ pub trait ScalarUDFImpl: Debug + Send + Sync {
     /// and thus any side effects (like divide by zero) may not be encountered
     /// Setting this to true prevents certain optimizations such as common subexpression elimination
     fn short_circuits(&self) -> bool {
-        false
-    }
-
-    /// Returns true if the function supports randomness, This is useful for functions that need to generate
-    /// random values for each row. `invoke_no_args` can be called in this case.
-    fn support_randomness(&self) -> bool {
         false
     }
 }
