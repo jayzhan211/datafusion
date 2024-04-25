@@ -344,7 +344,15 @@ pub trait ScalarUDFImpl: Debug + Send + Sync {
         )
     }
 
-    /// Invoke the function without `args` but number of rows, returning the appropriate result
+    /// Invoke the function without `args` but number of rows, returning the
+    /// appropriate result
+    ///
+    /// Note this is different than [`Self::invoke`] in that it is called with
+    /// the number of rows in the batch.
+    ///
+    /// For functions that return a constant such as `pi()` the number of rows
+    /// does not matter. However for functions such as `random()` that return a
+    /// batch with different values for each row, the number of rows is needed.
     fn invoke_no_args(&self, _number_rows: usize) -> Result<ColumnarValue> {
         not_impl_err!(
             "Function {} does not implement invoke_no_args but called",
