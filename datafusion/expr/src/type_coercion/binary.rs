@@ -29,6 +29,7 @@ use arrow::datatypes::{
     DECIMAL256_MAX_PRECISION, DECIMAL256_MAX_SCALE,
 };
 
+use datafusion_common::utils::{base_type, coerced_type_with_base_type_only, list_ndims};
 use datafusion_common::{exec_datafusion_err, plan_datafusion_err, plan_err, Result};
 
 /// The type signature of an instantiation of binary operator expression such as
@@ -438,9 +439,51 @@ fn type_union_resolution_coercion(
 
     // numeric coercion is the same as comparison coercion, both find the narrowest type
     // that can accommodate both types
-    binary_numeric_coercion(lhs_type, rhs_type)
+    list_coercion(lhs_type, rhs_type)
+        .or_else(|| binary_numeric_coercion(lhs_type, rhs_type))
         .or_else(|| pure_string_coercion(lhs_type, rhs_type))
         .or_else(|| numeric_string_coercion(lhs_type, rhs_type))
+}
+
+// TODO: Support LargeList
+fn list_coercion(lhs_type: &DataType, rhs_type: &DataType) -> Option<DataType> {
+    use arrow::datatypes::DataType::*;
+    match (lhs_type, rhs_type) {
+        (FixedSizeList(f1, _), List(f2)) | (List(f2), FixedSizeList(f1, _)) => {
+            let dt = type_union_resolution_coercion(f1.data_type(), f2.data_type());
+            if let Some(dt) = dt {
+                Some(List(Arc::new(Field::new(f2.name(), dt, f2.is_nullable()))))
+            } else {
+                None
+            }
+        }
+        // Only accept list and largelist with the same number of dimensions unless the type is Null.
+        // List or LargeList with different dimensions should be handled in TypeSignature or other places before this
+        (List(lhs_field), List(rhs_field)) => {
+            let lhs_inner_type = lhs_field.data_type();
+            let rhs_inner_type = rhs_field.data_type();
+            let lhs_base_type = base_type(lhs_inner_type);
+            let rhs_base_type = base_type(rhs_inner_type);
+            if lhs_base_type.is_null() {
+                Some(rhs_type.clone())
+            } else if rhs_base_type.is_null() {
+                Some(lhs_type.clone())
+            } else if list_ndims(lhs_inner_type) == list_ndims(rhs_inner_type) {
+                let coerced_base_type =
+                    type_union_resolution_coercion(&lhs_base_type, &rhs_base_type);
+
+                if let Some(dt) = coerced_base_type {
+                    Some(coerced_type_with_base_type_only(rhs_type, &dt))
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        }
+
+        _ => None,
+    }
 }
 
 /// Coerce `lhs_type` and `rhs_type` to a common type for the purposes of a comparison operation

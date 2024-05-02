@@ -58,10 +58,13 @@ impl MakeArray {
     pub fn new() -> Self {
         Self {
             signature: Signature::one_of(
-                vec![TypeSignature::VariadicEqual, TypeSignature::Any(0)],
+                vec![
+                    TypeSignature::Union(Box::new(TypeSignature::VariadicAny)),
+                    TypeSignature::Any(0),
+                ],
                 Volatility::Immutable,
             ),
-            aliases: vec![String::from("make_array"), String::from("make_list")],
+            aliases: vec![String::from("make_list")],
         }
     }
 }

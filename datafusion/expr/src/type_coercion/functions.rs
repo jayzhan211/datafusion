@@ -65,8 +65,10 @@ pub fn data_types(
     }
 
     // Well-supported signature that returns exact valid types.
-    if !valid_types.is_empty()
-        && matches!(signature.type_signature, TypeSignature::Union(_))
+    let is_well_supported_signature =
+        |s: &TypeSignature| matches!(s, TypeSignature::Union(_) | TypeSignature::Any(0));
+    if !valid_types.is_empty() && (is_well_supported_signature(&signature.type_signature)
+        || matches!(&signature.type_signature, TypeSignature::OneOf(signatures) if signatures.iter().all(|s| is_well_supported_signature(s))))
     {
         // exact valid types
         assert_eq!(valid_types.len(), 1);

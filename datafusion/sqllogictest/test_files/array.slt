@@ -6008,11 +6008,21 @@ select make_array(1, 2.0, null, 3)
 ----
 [1.0, 2.0, , 3.0]
 
-# make_array scalar function #4
+# numeric string float to integer is not valid in Postgres
+query error
+select make_array(1, '2.0');
+
+# numeric string both float
+query ?
+select make_array(1.2, '2.0');
+----
+[1.2, 2.0]
+
+# numeric string integer to float
 query ?
 select make_array(1.0, '2', null)
 ----
-[1.0, 2, ]
+[1.0, 2.0, ]
 
 ### FixedSizeListArray
 
