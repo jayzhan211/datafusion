@@ -43,54 +43,15 @@ make_udf_function!(coalesce::CoalesceFunc, COALESCE, coalesce);
 
 // Export the functions out of this package, both as expr_fn as well as a list of functions
 pub mod expr_fn {
-    use datafusion_expr::Expr;
-
-    /// returns NULL if value1 equals value2; otherwise it returns value1. This
-    /// can be used to perform the inverse operation of the COALESCE expression
-    pub fn nullif(arg1: Expr, arg2: Expr) -> Expr {
-        super::nullif().call(vec![arg1, arg2])
-    }
-
-    /// returns value1 cast to the `arrow_type` given the second argument. This
-    /// can be used to cast to a specific `arrow_type`.
-    pub fn arrow_cast(arg1: Expr, arg2: Expr) -> Expr {
-        super::arrow_cast().call(vec![arg1, arg2])
-    }
-
-    /// Returns value2 if value1 is NULL; otherwise it returns value1
-    pub fn nvl(arg1: Expr, arg2: Expr) -> Expr {
-        super::nvl().call(vec![arg1, arg2])
-    }
-
-    /// Returns value2 if value1 is not NULL; otherwise, it returns value3.
-    pub fn nvl2(arg1: Expr, arg2: Expr, arg3: Expr) -> Expr {
-        super::nvl2().call(vec![arg1, arg2, arg3])
-    }
-
-    /// Returns the Arrow type of the input expression.
-    pub fn arrow_typeof(arg1: Expr) -> Expr {
-        super::arrow_typeof().call(vec![arg1])
-    }
-
-    /// Returns a struct with the given arguments
-    pub fn r#struct(args: Vec<Expr>) -> Expr {
-        super::r#struct().call(args)
-    }
-
-    /// Returns a struct with the given names and arguments pairs
-    pub fn named_struct(args: Vec<Expr>) -> Expr {
-        super::named_struct().call(args)
-    }
-
-    /// Returns the value of the field with the given name from the struct
-    pub fn get_field(arg1: Expr, arg2: Expr) -> Expr {
-        super::get_field().call(vec![arg1, arg2])
-    }
-
-    /// Returns `coalesce(args...)`, which evaluates to the value of the first expr which is not NULL
-    pub fn coalesce(args: Vec<Expr>) -> Expr {
-        super::coalesce().call(args)
-    }
+    export_functions_single!(nullif, arg_1 arg_2, "returns NULL if value1 equals value2; otherwise it returns value1. This can be used to perform the inverse operation of the COALESCE expression.");
+    export_functions_single!(arrow_cast, arg1 arg2, "returns value1 cast to the `arrow_type` given the second argument. This can be used to cast to a specific `arrow_type`.");
+    export_functions_single!(nvl, arg1 arg2, "Returns value2 if value1 is NULL; otherwise it returns value1");
+    export_functions_single!(nvl2, arg1 arg2 arg3, "Returns value2 if value1 is not NULL; otherwise, it returns value3.");
+    export_functions_single!(arrow_typeof, arg1, "Returns the Arrow type of the input expression.");
+    export_functions_single!(r#struct, "Returns a struct with the given arguments");
+    export_functions_single!(named_struct, "Returns a struct with the given names and arguments pairs");
+    export_functions_single!(get_field, arg1 arg2, "Returns the value of the field with the given name from the struct");
+    export_functions_single!(coalesce, "Returns `coalesce(args...)`, which evaluates to the value of the first expr which is not NULL");
 }
 
 ///   Return a list of all functions in this package

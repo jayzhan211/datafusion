@@ -59,6 +59,23 @@ macro_rules! export_functions {
     };
 }
 
+macro_rules! export_functions_single {
+    ($FUNC:ident,  $($arg:ident)*, $DOC:expr) => {
+        #[doc = $DOC]
+        /// Return $name(arg)
+        pub fn $FUNC($($arg: datafusion_expr::Expr),*) -> datafusion_expr::Expr {
+            super::$FUNC().call(vec![$($arg),*],)
+        }
+    };
+    ($FUNC:ident, $DOC:expr) => {
+        #[doc = $DOC]
+        /// Return $name(arg)
+        pub fn $FUNC(args: Vec<datafusion_expr::Expr >) -> datafusion_expr::Expr {
+            super::$FUNC().call(args)
+        }
+    };
+}
+
 /// Creates a singleton `ScalarUDF` of the `$UDF` function named `$GNAME` and a
 /// function named `$NAME` which returns that function named $NAME.
 ///
