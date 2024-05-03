@@ -143,8 +143,7 @@ impl ExprSchemable for Expr {
                         // verify that function is invoked with correct number and type of arguments as defined in `TypeSignature`
                         data_types(&arg_data_types, fun.signature()).map_err(|err| {
                             plan_datafusion_err!(
-                                "{} and {}",
-                                err,
+                                "{}",
                                 utils::generate_signature_error_msg(
                                     fun.name(),
                                     fun.signature().clone(),

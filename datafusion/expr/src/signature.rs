@@ -91,17 +91,6 @@ pub enum TypeSignature {
     /// # Examples
     /// A function such as `concat` is `Variadic(vec![DataType::Utf8, DataType::LargeUtf8])`
     Variadic(Vec<DataType>),
-    /// One or more arguments of an arbitrary but equal type.
-    /// DataFusion attempts to coerce all argument types to match to the common type with [comparision coercion].
-    ///
-    /// [comparision coercion]: https://docs.rs/datafusion/latest/datafusion/logical_expr/type_coercion/binary/fn.comparison_coercion.html
-    ///
-    /// # Examples
-    /// Given types in signature should be coercible to the same final type.
-    /// A function such as `make_array` is `VariadicEqual`.
-    ///
-    /// `make_array(i32, i64) -> make_array(i64, i64)`
-    VariadicEqual,
     /// One or more arguments of an arbitrary but equal type or Null.
     /// [Type union coercion] is attempted to match the signatures.
     ///
@@ -199,9 +188,6 @@ impl TypeSignature {
                     .collect::<Vec<&str>>()
                     .join(", ")]
             }
-            TypeSignature::VariadicEqual => {
-                vec!["CoercibleT, .., CoercibleT".to_string()]
-            }
             TypeSignature::Union(sig) => {
                 vec![format!("Union({:?})", sig.to_string_repr())]
             }
@@ -264,14 +250,6 @@ impl Signature {
     pub fn variadic(common_types: Vec<DataType>, volatility: Volatility) -> Self {
         Self {
             type_signature: TypeSignature::Variadic(common_types),
-            volatility,
-        }
-    }
-    /// One or more number of arguments that is coercible to the same type, with `comparison_coercion`
-    /// See [TypeSignature::VariadicEqual] for more details.
-    pub fn variadic_equal(volatility: Volatility) -> Self {
-        Self {
-            type_signature: TypeSignature::VariadicEqual,
             volatility,
         }
     }

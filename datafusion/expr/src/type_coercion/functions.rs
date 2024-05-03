@@ -27,9 +27,7 @@ use arrow::{
     datatypes::{DataType, TimeUnit},
 };
 use datafusion_common::utils::{coerced_fixed_size_list_to_list, list_ndims};
-use datafusion_common::{
-    internal_datafusion_err, internal_err, not_impl_err, plan_err, Result,
-};
+use datafusion_common::{internal_datafusion_err, not_impl_err, plan_err, Result};
 
 use super::binary::comparison_coercion;
 
@@ -63,8 +61,6 @@ pub fn data_types(
     {
         return Ok(current_types.to_vec());
     }
-
-    println!("valid_types: {:?}", valid_types);
 
     // Well-supported signature that returns exact valid types.
     let is_well_supported_signature =
@@ -217,7 +213,7 @@ fn get_valid_types(
                         "The function expected {} arguments but received {}",
                         arg_count,
                         current_types.len()
-                    ); 
+                    );
                 }
 
                 if let Some(common_type) = type_union_resolution(current_types) {
@@ -225,7 +221,6 @@ fn get_valid_types(
                 } else {
                     vec![]
                 }
-
             }
             _ => {
                 return not_impl_err!(
@@ -234,32 +229,9 @@ fn get_valid_types(
                 )
             }
         },
-        TypeSignature::VariadicEqual => {
-            let new_type = current_types.iter().skip(1).try_fold(
-                current_types.first().unwrap().clone(),
-                |acc, x| {
-                    // The coerced types found by `comparison_coercion` are not guaranteed to be
-                    // coercible for the arguments. `comparison_coercion` returns more loose
-                    // types that can be coerced to both `acc` and `x` for comparison purpose.
-                    // See `maybe_data_types` for the actual coercion.
-                    let coerced_type = comparison_coercion(&acc, x);
-                    if let Some(coerced_type) = coerced_type {
-                        Ok(coerced_type)
-                    } else {
-                        internal_err!("Coercion from {acc:?} to {x:?} failed.")
-                    }
-                },
-            );
-
-            match new_type {
-                Ok(new_type) => vec![vec![new_type; current_types.len()]],
-                Err(e) => return Err(e),
-            }
-        }
         TypeSignature::VariadicAny => {
             vec![current_types.to_vec()]
         }
-
         TypeSignature::Exact(valid_types) => vec![valid_types.clone()],
         TypeSignature::ArraySignature(ref function_signature) => match function_signature
         {
