@@ -19,8 +19,8 @@ use arrow::array::Array;
 use arrow::compute::is_not_null;
 use arrow::compute::kernels::zip::zip;
 use arrow::datatypes::DataType;
-use datafusion_common::{internal_err, plan_datafusion_err, Result};
-use datafusion_expr::{utils, ColumnarValue, ScalarUDFImpl, Signature, Volatility};
+use datafusion_common::{internal_err, Result};
+use datafusion_expr::{ColumnarValue, ScalarUDFImpl, Signature, Volatility};
 
 #[derive(Debug)]
 pub struct NVL2Func {
@@ -36,7 +36,7 @@ impl Default for NVL2Func {
 impl NVL2Func {
     pub fn new() -> Self {
         Self {
-            signature: Signature::variadic_equal(Volatility::Immutable),
+            signature: Signature::union_uniform(3, Volatility::Immutable),
         }
     }
 }
@@ -55,16 +55,6 @@ impl ScalarUDFImpl for NVL2Func {
     }
 
     fn return_type(&self, arg_types: &[DataType]) -> Result<DataType> {
-        if arg_types.len() != 3 {
-            return Err(plan_datafusion_err!(
-                "{}",
-                utils::generate_signature_error_msg(
-                    self.name(),
-                    self.signature().clone(),
-                    arg_types,
-                )
-            ));
-        }
         Ok(arg_types[1].clone())
     }
 

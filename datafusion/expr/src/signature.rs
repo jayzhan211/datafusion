@@ -283,6 +283,14 @@ impl Signature {
             volatility,
         }
     }
+    /// A fixed number of arguments that is coercible to the same type, with `type_union_resolution`
+    /// See [TypeSignature::Union] for more details.
+    pub fn union_uniform(arg_count: usize, volatility: Volatility) -> Self {
+        Self {
+            type_signature: TypeSignature::Union(Box::new(TypeSignature::Any(arg_count))),
+            volatility,
+        }
+    }
     /// An arbitrary number of arguments of any type.
     pub fn variadic_any(volatility: Volatility) -> Self {
         Self {

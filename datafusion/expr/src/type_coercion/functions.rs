@@ -64,6 +64,8 @@ pub fn data_types(
         return Ok(current_types.to_vec());
     }
 
+    println!("valid_types: {:?}", valid_types);
+
     // Well-supported signature that returns exact valid types.
     let is_well_supported_signature =
         |s: &TypeSignature| matches!(s, TypeSignature::Union(_) | TypeSignature::Any(0));
@@ -208,6 +210,22 @@ fn get_valid_types(
                 } else {
                     vec![]
                 }
+            }
+            TypeSignature::Any(arg_count) => {
+                if current_types.len() != *arg_count {
+                    return plan_err!(
+                        "The function expected {} arguments but received {}",
+                        arg_count,
+                        current_types.len()
+                    ); 
+                }
+
+                if let Some(common_type) = type_union_resolution(current_types) {
+                    vec![vec![common_type; current_types.len()]]
+                } else {
+                    vec![]
+                }
+
             }
             _ => {
                 return not_impl_err!(
