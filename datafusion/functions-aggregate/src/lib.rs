@@ -55,6 +55,7 @@
 #[macro_use]
 pub mod macros;
 
+pub mod count_distinct;
 pub mod first_last;
 
 use datafusion_common::Result;
