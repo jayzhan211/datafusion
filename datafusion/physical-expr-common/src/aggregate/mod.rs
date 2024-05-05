@@ -15,6 +15,7 @@
 // specific language governing permissions and limitations
 // under the License.
 
+pub mod count_distinct;
 pub mod utils;
 
 use arrow::datatypes::{DataType, Field, Schema};
