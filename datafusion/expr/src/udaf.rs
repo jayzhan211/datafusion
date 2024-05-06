@@ -195,6 +195,11 @@ impl AggregateUDF {
     pub fn create_groups_accumulator(&self) -> Result<Box<dyn GroupsAccumulator>> {
         self.inner.create_groups_accumulator()
     }
+
+    /// See [`AggregateUDFImpl::reverse_expr`] for more details.
+    pub fn reverse_expr(&self) -> ReversedUDAF {
+        self.inner.reverse_expr()
+    }
 }
 
 impl<F> From<F> for AggregateUDF
@@ -354,6 +359,20 @@ pub trait AggregateUDFImpl: Debug + Send + Sync {
     fn aliases(&self) -> &[String] {
         &[]
     }
+
+    /// Returns the result of reversing the expression, if possible.
+    fn reverse_expr(&self) -> ReversedUDAF {
+        ReversedUDAF::NotSupported
+    }
+}
+
+pub enum ReversedUDAF {
+    /// The expression is the same as the original expression, like SUM, COUNT
+    Identical,
+    /// The expression does not support reverse calculation, like ArrayAgg
+    NotSupported,
+    /// The expression is different from the original expression
+    Reversed(Arc<dyn AggregateUDFImpl>),
 }
 
 /// AggregateUDF that adds an alias to the underlying function. It is better to
