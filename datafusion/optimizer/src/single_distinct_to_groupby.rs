@@ -107,7 +107,7 @@ fn is_single_distinct_agg(aggr_expr: &[Expr]) -> Result<bool> {
                 for e in args {
                     fields_set.insert(e);
                 }
-            } else if fun.name() != "SUM" && fun.name() != "MIN" && fun.name() != "MAX" {
+            } else if fun.name() != "sum" && fun.name() != "min" && fun.name() != "max" {
                 return Ok(false);
             }
         } else {

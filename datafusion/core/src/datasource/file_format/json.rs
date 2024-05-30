@@ -478,7 +478,7 @@ mod tests {
         #[rustfmt::skip]
         let expected = [
             "+----------------------+",
-            "| SUM(json_parallel.a) |",
+            "| sum(json_parallel.a) |",
             "+----------------------+",
             "| -7                   |",
             "+----------------------+"
