@@ -17,6 +17,7 @@
 
 pub mod aggregate;
 pub mod binary_map;
+pub mod binary_map_v2;
 pub mod expressions;
 pub mod physical_expr;
 pub mod sort_expr;

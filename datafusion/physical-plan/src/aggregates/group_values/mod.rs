@@ -22,6 +22,7 @@ use datafusion_common::Result;
 
 pub(crate) mod primitive;
 use datafusion_expr::EmitTo;
+use multi_col::GroupValuesMultiColumn;
 use primitive::GroupValuesPrimitive;
 
 mod row;
@@ -30,6 +31,8 @@ use row::GroupValuesRows;
 mod bytes;
 use bytes::GroupValuesByes;
 use datafusion_physical_expr::binary_map::OutputType;
+
+mod multi_col;
 
 /// An interning store for group keys
 pub trait GroupValues: Send {
@@ -79,6 +82,15 @@ pub fn new_group_values(schema: SchemaRef) -> Result<Box<dyn GroupValues>> {
         if let DataType::LargeBinary = d {
             return Ok(Box::new(GroupValuesByes::<i64>::new(OutputType::Binary)));
         }
+    }
+
+
+
+    let fields = schema.fields();
+    let data_types: Vec<&DataType> = fields.iter().map(|f|f.data_type()).collect();
+
+    if data_types.into_iter().any(|f| matches!(f, DataType::Utf8 | DataType::LargeUtf8 | DataType::Binary | DataType::LargeBinary)) {
+        Ok(Box::new(GroupValuesMultiColumn::try_new()))
     }
 
     Ok(Box::new(GroupValuesRows::try_new(schema)?))
