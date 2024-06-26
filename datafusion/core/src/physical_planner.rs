@@ -153,6 +153,7 @@ fn create_physical_name(e: &Expr, is_first_expr: bool) -> Result<String> {
             let right = create_physical_name(right, false)?;
             Ok(format!("{left} {op} {right}"))
         }
+        Expr::CommutativeExpr(expr) => todo!("123"),
         Expr::Case(case) => {
             let mut name = "CASE ".to_string();
             if let Some(e) = &case.expr {

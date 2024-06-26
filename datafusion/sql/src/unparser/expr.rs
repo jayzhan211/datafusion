@@ -171,6 +171,7 @@ impl Unparser<'_> {
 
                 Ok(ast::Expr::Nested(Box::new(self.binary_op_to_sql(l, r, op))))
             }
+            Expr::CommutativeExpr(_) => todo!("123"),
             Expr::Case(Case {
                 expr,
                 when_then_expr,

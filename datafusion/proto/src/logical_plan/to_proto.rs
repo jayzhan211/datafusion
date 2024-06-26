@@ -258,6 +258,7 @@ pub fn serialize_expr(
                 expr_type: Some(ExprType::BinaryExpr(binary_expr)),
             }
         }
+        Expr::CommutativeExpr(_) => todo!(""),
         Expr::Like(Like {
             negated,
             expr,

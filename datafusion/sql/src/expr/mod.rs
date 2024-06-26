@@ -18,6 +18,7 @@
 use arrow_schema::DataType;
 use arrow_schema::TimeUnit;
 use datafusion_common::utils::list_ndims;
+use datafusion_expr::expr::CommutativeExpr;
 use sqlparser::ast::{CastKind, Expr as SQLExpr, Subscript, TrimWhereField, Value};
 
 use datafusion_common::{
@@ -154,6 +155,77 @@ impl<'a, S: ContextProvider> SqlToRel<'a, S> {
                 }
             }
         }
+
+        // Convert to CommutativeExpr
+        if op.is_commutative() {
+            return match (left, right) {
+                (Expr::CommutativeExpr(left_comm), Expr::CommutativeExpr(right_comm))
+                    if left_comm.op == right_comm.op && op == left_comm.op =>
+                {
+                    let combined_exprs = left_comm
+                        .exprs
+                        .into_iter()
+                        .chain(right_comm.exprs)
+                        .collect();
+                    Ok(Expr::CommutativeExpr(CommutativeExpr::new(
+                        combined_exprs,
+                        op,
+                    )?))
+                }
+                (Expr::CommutativeExpr(comm), Expr::BinaryExpr(bin))
+                | (Expr::BinaryExpr(bin), Expr::CommutativeExpr(comm))
+                    if comm.op == bin.op && op == comm.op =>
+                {
+                    let mut combined_exprs = comm.exprs;
+                    combined_exprs.push(*bin.left);
+                    combined_exprs.push(*bin.right);
+                    Ok(Expr::CommutativeExpr(CommutativeExpr::new(
+                        combined_exprs,
+                        op,
+                    )?))
+                }
+                (Expr::CommutativeExpr(comm), expr)
+                | (expr, Expr::CommutativeExpr(comm))
+                    if op == comm.op =>
+                {
+                    let mut combined_exprs = comm.exprs;
+                    combined_exprs.push(expr);
+                    Ok(Expr::CommutativeExpr(CommutativeExpr::new(
+                        combined_exprs,
+                        op,
+                    )?))
+                }
+                (Expr::BinaryExpr(left_bin), Expr::BinaryExpr(right_bin))
+                    if left_bin.op == right_bin.op && left_bin.op == op =>
+                {
+                    let combined_exprs = vec![
+                        *left_bin.left,
+                        *left_bin.right,
+                        *right_bin.left,
+                        *right_bin.right,
+                    ];
+                    Ok(Expr::CommutativeExpr(CommutativeExpr::new(
+                        combined_exprs,
+                        op,
+                    )?))
+                }
+                (Expr::BinaryExpr(bin), expr) | (expr, Expr::BinaryExpr(bin))
+                    if op == bin.op =>
+                {
+                    let combined_exprs = vec![*bin.left, *bin.right, expr];
+                    Ok(Expr::CommutativeExpr(CommutativeExpr::new(
+                        combined_exprs,
+                        op,
+                    )?))
+                }
+                (left, right) => Ok(Expr::BinaryExpr(BinaryExpr::new(
+                    Box::new(left),
+                    op,
+                    Box::new(right),
+                ))),
+            };
+        }
+
         Ok(Expr::BinaryExpr(BinaryExpr::new(
             Box::new(left),
             op,
@@ -171,6 +243,7 @@ impl<'a, S: ContextProvider> SqlToRel<'a, S> {
         let mut expr = self.sql_expr_to_logical_expr(sql, schema, planner_context)?;
         expr = self.rewrite_partial_qualifier(expr, schema);
         self.validate_schema_satisfies_exprs(schema, &[expr.clone()])?;
+        println!("expr: {:?}", expr);
         let expr = expr.infer_placeholder_types(schema)?;
         Ok(expr)
     }

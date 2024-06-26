@@ -228,6 +228,7 @@ pub enum Expr {
     Literal(ScalarValue),
     /// A binary expression such as "age > 21"
     BinaryExpr(BinaryExpr),
+    CommutativeExpr(CommutativeExpr),
     /// LIKE expression
     Like(Like),
     /// LIKE expression that uses regular expressions
@@ -308,7 +309,9 @@ pub enum Expr {
     ///
     /// This expr has to be resolved to a list of columns before translating logical
     /// plan into physical plan.
-    Wildcard { qualifier: Option<TableReference> },
+    Wildcard {
+        qualifier: Option<TableReference>,
+    },
     /// List of grouping set expressions. Only valid in the context of an aggregate
     /// GROUP BY expression list
     GroupingSet(GroupingSet),
@@ -380,6 +383,25 @@ impl Alias {
             relation: relation.map(|r| r.into()),
             name: name.into(),
         }
+    }
+}
+
+/// Binary expression
+#[derive(Clone, PartialEq, Eq, Hash, Debug)]
+pub struct CommutativeExpr {
+    /// Left-hand side of the expression
+    pub exprs: Vec<Expr>,
+    /// The comparison operator
+    pub op: Operator,
+}
+
+impl CommutativeExpr {
+    pub fn new(exprs: Vec<Expr>, op: Operator) -> Result<Self> {
+        if exprs.len() < 3 {
+            return internal_err!("CommutativeExpr must have at least 3 operands");
+        }
+
+        Ok(Self { exprs, op })
     }
 }
 
@@ -1002,6 +1024,7 @@ impl Expr {
             Expr::Alias(..) => "Alias",
             Expr::Between { .. } => "Between",
             Expr::BinaryExpr { .. } => "BinaryExpr",
+            Expr::CommutativeExpr { .. } => "CommutativeExpr",
             Expr::Case { .. } => "Case",
             Expr::Cast { .. } => "Cast",
             Expr::Column(..) => "Column",
@@ -1423,7 +1446,8 @@ impl Expr {
     pub fn short_circuits(&self) -> bool {
         match self {
             Expr::ScalarFunction(ScalarFunction { func, .. }) => func.short_circuits(),
-            Expr::BinaryExpr(BinaryExpr { op, .. }) => {
+            Expr::BinaryExpr(BinaryExpr { op, .. })
+            | Expr::CommutativeExpr(CommutativeExpr { op, .. }) => {
                 matches!(op, Operator::And | Operator::Or)
             }
             Expr::Case { .. } => true,
@@ -1502,7 +1526,8 @@ impl Expr {
                 left: _left,
                 op,
                 right: _right,
-            }) => {
+            }) => op.hash(hasher),
+            Expr::CommutativeExpr(CommutativeExpr { op, .. }) => {
                 op.hash(hasher);
             }
             Expr::Like(Like {
@@ -1725,6 +1750,7 @@ impl fmt::Display for Expr {
             }) => write!(f, "{expr} IN ({subquery:?})"),
             Expr::ScalarSubquery(subquery) => write!(f, "({subquery:?})"),
             Expr::BinaryExpr(expr) => write!(f, "{expr}"),
+            Expr::CommutativeExpr(expr) => todo!("123"),
             Expr::Sort(Sort {
                 expr,
                 asc,
@@ -1940,6 +1966,12 @@ fn write_name<W: Write>(w: &mut W, e: &Expr) -> Result<()> {
             write_name(w, binary_expr.left.as_ref())?;
             write!(w, " {} ", binary_expr.op)?;
             write_name(w, binary_expr.right.as_ref())?;
+        }
+        Expr::CommutativeExpr(expr) => {
+            // write_name(w, binary_expr.left.as_ref())?;
+            // write!(w, " {} ", binary_expr.op)?;
+            // write_name(w, binary_expr.right.as_ref())?;
+            todo!("123")
         }
         Expr::Like(Like {
             negated,

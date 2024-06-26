@@ -214,7 +214,6 @@ impl<'a, S: ContextProvider> SqlToRel<'a, S> {
         statement: Statement,
         planner_context: &mut PlannerContext,
     ) -> Result<LogicalPlan> {
-        let sql = Some(statement.to_string());
         match statement {
             Statement::ExplainTable {
                 describe_alias: DescribeAlias::Describe, // only parse 'DESCRIBE table_name' and not 'EXPLAIN table_name'
@@ -358,6 +357,7 @@ impl<'a, S: ContextProvider> SqlToRel<'a, S> {
                 let mut plan = self.query_to_plan(*query, &mut PlannerContext::new())?;
                 plan = self.apply_expr_alias(plan, columns)?;
 
+                let sql = Some(String::from("1"));
                 Ok(LogicalPlan::Ddl(DdlStatement::CreateView(CreateView {
                     name: self.object_name_to_table_reference(name)?,
                     input: Arc::new(plan),
@@ -790,6 +790,7 @@ impl<'a, S: ContextProvider> SqlToRel<'a, S> {
                 }
             }
             _ => {
+                let sql = Some(statement.to_string());
                 not_impl_err!("Unsupported SQL statement: {sql:?}")
             }
         }

@@ -28,8 +28,8 @@ use datafusion_common::{
     DataFusionError, Result, ScalarValue,
 };
 use datafusion_expr::expr::{
-    self, AggregateFunctionDefinition, Between, BinaryExpr, Case, Exists, InList,
-    InSubquery, Like, ScalarFunction, WindowFunction,
+    self, AggregateFunctionDefinition, Between, BinaryExpr, Case, CommutativeExpr,
+    Exists, InList, InSubquery, Like, ScalarFunction, WindowFunction,
 };
 use datafusion_expr::expr_schema::cast_subquery;
 use datafusion_expr::logical_plan::tree_node::unwrap_arc;
@@ -170,6 +170,25 @@ impl<'a> TypeCoercionRewriter<'a> {
             right.cast_to(&right_type, self.schema)?,
         ))
     }
+
+    fn coerce_commutative_exprs_op(
+        &self,
+        exprs: Vec<Expr>,
+        op: Operator,
+    ) -> Result<Vec<Expr>> {
+        let mut data_type = exprs[0].get_type(self.schema)?;
+        for expr in exprs.iter().skip(1) {
+            let expr_type = expr.get_type(self.schema)?;
+            let (left_type, right_type) = get_input_types(&data_type, &op, &expr_type)?;
+            if left_type != right_type {
+                return internal_err!("coerced types should be the same")
+            }
+
+            data_type = right_type
+        }
+
+        exprs.into_iter().map(|expr| expr.cast_to(&data_type, self.schema)).collect()
+    }
 }
 
 impl<'a> TreeNodeRewriter for TypeCoercionRewriter<'a> {
@@ -285,6 +304,10 @@ impl<'a> TreeNodeRewriter for TypeCoercionRewriter<'a> {
                     op,
                     Box::new(right),
                 ))))
+            }
+            Expr::CommutativeExpr(CommutativeExpr { exprs, op }) => {
+                let exprs = self.coerce_commutative_exprs_op(exprs, op)?;
+                Ok(Transformed::yes(Expr::CommutativeExpr(CommutativeExpr::new(exprs, op)?)))
             }
             Expr::Between(Between {
                 expr,

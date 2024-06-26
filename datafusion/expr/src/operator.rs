@@ -96,6 +96,10 @@ pub enum Operator {
 }
 
 impl Operator {
+    pub fn is_commutative(&self) -> bool {
+        matches!(self, Operator::Or | Operator::And)
+    }
+
     /// If the operator can be negated, return the negated operator
     /// otherwise return None
     pub fn negate(&self) -> Option<Operator> {

@@ -79,6 +79,7 @@ pub fn expr_applicable_for_cols(col_names: &[String], expr: &Expr) -> bool {
             | Expr::Cast { .. }
             | Expr::TryCast { .. }
             | Expr::BinaryExpr { .. }
+            | Expr::CommutativeExpr { .. }
             | Expr::Between { .. }
             | Expr::Like { .. }
             | Expr::SimilarTo { .. }

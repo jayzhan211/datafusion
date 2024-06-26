@@ -603,6 +603,7 @@ impl<'a> ConstEvaluator<'a> {
             Expr::Literal(_)
             | Expr::Unnest(_)
             | Expr::BinaryExpr { .. }
+            | Expr::CommutativeExpr { .. }
             | Expr::Not(_)
             | Expr::IsNotNull(_)
             | Expr::IsNull(_)

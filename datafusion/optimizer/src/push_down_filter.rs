@@ -222,6 +222,7 @@ fn can_evaluate_as_join_condition(predicate: &Expr) -> Result<bool> {
         }
         Expr::Alias(_)
         | Expr::BinaryExpr(_)
+        | Expr::CommutativeExpr(_)
         | Expr::Like(_)
         | Expr::SimilarTo(_)
         | Expr::Not(_)

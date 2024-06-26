@@ -19,8 +19,8 @@
 
 use crate::expr::{
     AggregateFunction, AggregateFunctionDefinition, Alias, Between, BinaryExpr, Case,
-    Cast, GroupingSet, InList, InSubquery, Like, Placeholder, ScalarFunction, Sort,
-    TryCast, Unnest, WindowFunction,
+    Cast, CommutativeExpr, GroupingSet, InList, InSubquery, Like, Placeholder,
+    ScalarFunction, Sort, TryCast, Unnest, WindowFunction,
 };
 use crate::Expr;
 
@@ -70,6 +70,9 @@ impl TreeNode for Expr {
             | Expr::Placeholder (_) => vec![],
             Expr::BinaryExpr(BinaryExpr { left, right, .. }) => {
                 vec![left.as_ref(), right.as_ref()]
+            }
+            Expr::CommutativeExpr(CommutativeExpr { exprs, op}) => {
+                exprs.iter().collect()
             }
             Expr::Like(Like { expr, pattern, .. })
             | Expr::SimilarTo(Like { expr, pattern, .. }) => {
@@ -158,6 +161,11 @@ impl TreeNode for Expr {
                 )?
                 .update_data(|(new_left, new_right)| {
                     Expr::BinaryExpr(BinaryExpr::new(new_left, op, new_right))
+                })
+            }
+            Expr::CommutativeExpr(CommutativeExpr { exprs, op }) => {
+                transform_vec(exprs, &mut f)?.update_data(|exprs| {
+                    Expr::CommutativeExpr(CommutativeExpr { exprs, op })
                 })
             }
             Expr::Like(Like {
