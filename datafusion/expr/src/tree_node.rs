@@ -71,7 +71,7 @@ impl TreeNode for Expr {
             Expr::BinaryExpr(BinaryExpr { left, right, .. }) => {
                 vec![left.as_ref(), right.as_ref()]
             }
-            Expr::CommutativeExpr(CommutativeExpr { exprs, op}) => {
+            Expr::CommutativeExpr(CommutativeExpr { exprs, ..}) => {
                 exprs.iter().collect()
             }
             Expr::Like(Like { expr, pattern, .. })

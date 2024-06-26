@@ -243,9 +243,7 @@ impl<'a, S: ContextProvider> SqlToRel<'a, S> {
         let mut expr = self.sql_expr_to_logical_expr(sql, schema, planner_context)?;
         expr = self.rewrite_partial_qualifier(expr, schema);
         self.validate_schema_satisfies_exprs(schema, &[expr.clone()])?;
-        println!("expr: {:?}", expr);
-        let expr = expr.infer_placeholder_types(schema)?;
-        Ok(expr)
+        expr.infer_placeholder_types(schema)
     }
 
     /// Rewrite aliases which are not-complete (e.g. ones that only include only table qualifier in a schema.table qualified relation)

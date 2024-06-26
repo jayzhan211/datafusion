@@ -21,6 +21,7 @@
 mod binary;
 mod case;
 mod column;
+mod commutative;
 mod datum;
 mod in_list;
 mod is_not_null;
@@ -54,6 +55,7 @@ pub use crate::PhysicalSortExpr;
 pub use binary::{binary, BinaryExpr};
 pub use case::{case, CaseExpr};
 pub use column::UnKnownColumn;
+pub use commutative::create_commutative_expr;
 pub use datafusion_expr::utils::format_state_name;
 pub use datafusion_functions_aggregate::first_last::{FirstValue, LastValue};
 pub use datafusion_physical_expr_common::expressions::column::{col, Column};

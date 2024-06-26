@@ -405,6 +405,44 @@ impl CommutativeExpr {
     }
 }
 
+impl Display for CommutativeExpr {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        // Put parentheses around child binary expressions so that we can see the difference
+        // between `(a OR b) AND c` and `a OR (b AND c)`. We only insert parentheses when needed,
+        // based on operator precedence. For example, `(a AND b) OR c` and `a AND b OR c` are
+        // equivalent and the parentheses are not necessary.
+
+        fn write_child(
+            f: &mut Formatter<'_>,
+            expr: &Expr,
+            precedence: u8,
+        ) -> fmt::Result {
+            match expr {
+                Expr::BinaryExpr(child) => {
+                    let p = child.op.precedence();
+                    if p == 0 || p < precedence {
+                        write!(f, "({child})")?;
+                    } else {
+                        write!(f, "{child}")?;
+                    }
+                }
+                _ => write!(f, "{expr}")?,
+            }
+            Ok(())
+        }
+
+        let precedence = self.op.precedence();
+        for (i, e) in self.exprs.iter().enumerate() {
+            if i > 0 {
+                write!(f, " {} ", self.op)?;
+            }
+            write_child(f, e, precedence)?;
+        }
+
+        Ok(())
+    }
+}
+
 /// Binary expression
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub struct BinaryExpr {
@@ -1750,7 +1788,7 @@ impl fmt::Display for Expr {
             }) => write!(f, "{expr} IN ({subquery:?})"),
             Expr::ScalarSubquery(subquery) => write!(f, "({subquery:?})"),
             Expr::BinaryExpr(expr) => write!(f, "{expr}"),
-            Expr::CommutativeExpr(expr) => todo!("123"),
+            Expr::CommutativeExpr(expr) => write!(f, "{expr}"),
             Expr::Sort(Sort {
                 expr,
                 asc,
@@ -1967,11 +2005,13 @@ fn write_name<W: Write>(w: &mut W, e: &Expr) -> Result<()> {
             write!(w, " {} ", binary_expr.op)?;
             write_name(w, binary_expr.right.as_ref())?;
         }
-        Expr::CommutativeExpr(expr) => {
-            // write_name(w, binary_expr.left.as_ref())?;
-            // write!(w, " {} ", binary_expr.op)?;
-            // write_name(w, binary_expr.right.as_ref())?;
-            todo!("123")
+        Expr::CommutativeExpr(commutative_expr) => {
+            for (i, e) in commutative_expr.exprs.iter().enumerate() {
+                if i > 0 {
+                    write!(w, " {} ", commutative_expr.op)?;
+                }
+                write_name(w, e)?;
+            }
         }
         Expr::Like(Like {
             negated,

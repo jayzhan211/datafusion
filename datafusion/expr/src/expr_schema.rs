@@ -17,7 +17,9 @@
 
 use super::{Between, Expr, Like};
 use crate::expr::{
-    AggregateFunction, AggregateFunctionDefinition, Alias, BinaryExpr, Cast, CommutativeExpr, InList, InSubquery, Placeholder, ScalarFunction, Sort, TryCast, Unnest, WindowFunction
+    AggregateFunction, AggregateFunctionDefinition, Alias, BinaryExpr, Cast,
+    CommutativeExpr, InList, InSubquery, Placeholder, ScalarFunction, Sort, TryCast,
+    Unnest, WindowFunction,
 };
 use crate::type_coercion::binary::get_result_type;
 use crate::type_coercion::functions::{
@@ -227,13 +229,11 @@ impl ExprSchemable for Expr {
             }) => get_result_type(&left.get_type(schema)?, op, &right.get_type(schema)?),
             Expr::CommutativeExpr(CommutativeExpr {exprs, op}) => {
                 let mut result_type = exprs[0].get_type(schema)?;
-    
                 for expr in exprs.iter().skip(1) {
                     let expr_type = expr.get_type(schema)?;
                     result_type = get_result_type(&result_type, op, &expr_type)?;
                 }
-                
-                Ok(result_type) 
+                Ok(result_type)
             }
             Expr::Like { .. } | Expr::SimilarTo { .. } => Ok(DataType::Boolean),
             Expr::Placeholder(Placeholder { data_type, .. }) => {
@@ -348,7 +348,17 @@ impl ExprSchemable for Expr {
                 ref right,
                 ..
             }) => Ok(left.nullable(input_schema)? || right.nullable(input_schema)?),
-            Expr::CommutativeExpr(..) => todo!(""),
+            Expr::CommutativeExpr(CommutativeExpr { exprs, .. }) => {
+                exprs.iter().try_fold(false, |acc, e| {
+                    if acc {
+                        // If any previous expression is nullable, short-circuit and return true
+                        Ok(true)
+                    } else {
+                        // Otherwise, check the current expression
+                        e.nullable(input_schema)
+                    }
+                })
+            }
             Expr::Like(Like { expr, pattern, .. })
             | Expr::SimilarTo(Like { expr, pattern, .. }) => {
                 Ok(expr.nullable(input_schema)? || pattern.nullable(input_schema)?)

@@ -33,7 +33,7 @@ use datafusion_common::{
 };
 use datafusion_common::{internal_err, DFSchema, DataFusionError, Result, ScalarValue};
 use datafusion_expr::expr::{
-    AggregateFunctionDefinition, InList, InSubquery, WindowFunction,
+    AggregateFunctionDefinition, CommutativeExpr, InList, InSubquery, WindowFunction
 };
 use datafusion_expr::simplify::ExprSimplifyResult;
 use datafusion_expr::{
@@ -791,6 +791,31 @@ impl<'a, S: SimplifyInfo> TreeNodeRewriter for Simplifier<'a, S> {
                 op: Or,
                 right,
             }) if is_false(&right) => Transformed::yes(*left),
+            // Remove all the false in commutative expression
+            // (A OR B OR ... OR false) -> (A OR B OR ... )
+            Expr::CommutativeExpr(CommutativeExpr { exprs, op: Or }) if exprs.iter().any(is_false) => {
+                let mut exprs = exprs.into_iter().filter(|e| !is_false(e)).collect::<Vec<_>>();
+                match exprs.len() {
+                    0 => {
+                        Transformed::yes(lit(false))
+                    }
+                    1 => {
+                        let e = exprs.pop().unwrap();
+                        Transformed::yes(e)
+                    }
+                    2 => {
+                        let right = exprs.pop().unwrap();
+                        let left = exprs.pop().unwrap();
+                        Transformed::yes(Expr::BinaryExpr(BinaryExpr::new(Box::new(left), Or, Box::new(right))))
+                    }
+                    _ =>  {
+                        Transformed::yes(Expr::CommutativeExpr(CommutativeExpr::new(exprs, Or)?))
+                    }   
+                }
+            }
+            // If there is any true in commutative expression, returns true
+            // (A OR B OR ... OR true) -> true
+            Expr::CommutativeExpr(CommutativeExpr { exprs, op: Or }) if exprs.iter().any(is_true) => Transformed::yes(lit(true)),
             // A OR !A ---> true (if A not nullable)
             Expr::BinaryExpr(BinaryExpr {
                 left,
@@ -1497,6 +1522,30 @@ impl<'a, S: SimplifyInfo> TreeNodeRewriter for Simplifier<'a, S> {
             // Combine multiple OR expressions into a single IN list expression if possible
             //
             // i.e. `a = 1 OR a = 2 OR a = 3` -> `a IN (1, 2, 3)`
+            Expr::CommutativeExpr(CommutativeExpr {
+                exprs,
+                op: Operator::Or
+            }) if are_all_inlist_and_eq(&exprs) => {
+                // Get the first element for the final expr in inlist
+                let mut exprs = exprs;
+                let first_expr = exprs.remove(0);
+                let inlist_expr = to_inlist(first_expr).unwrap();
+
+                let inlist_exprs = inlist_expr.list.into_iter().chain(exprs.into_iter().flat_map(|e|to_inlist(e).unwrap().list)).collect::<Vec<_>>();
+                let mut seen: HashSet<Expr> = HashSet::new();
+                let list = inlist_exprs
+                    .into_iter()
+                    .filter(|e| seen.insert(e.to_owned()))
+                    .collect::<Vec<_>>();
+
+                let merged_inlist = InList {
+                    expr: inlist_expr.expr,
+                    list,
+                    negated: false,
+                };
+
+                Transformed::yes(Expr::InList(merged_inlist))
+            }
             Expr::BinaryExpr(BinaryExpr {
                 left,
                 op: Operator::Or,
@@ -1673,11 +1722,41 @@ fn are_inlist_and_eq(left: &Expr, right: &Expr) -> bool {
     }
 }
 
+// Commutative version of are_inlist_and_eq
+fn are_all_inlist_and_eq(exprs: &[Expr]) -> bool {
+    println!("exprs: {:?}", exprs);
+    let inlist_exprs = exprs.iter().map(|e|as_inlist(e)).collect::<Vec<_>>();
+    println!("inlist_exprs: {:?}", inlist_exprs);
+    if inlist_exprs.iter().any(|e| e.is_none()) {
+        return false;
+    } 
+    let inlist_exprs: Vec<_> = inlist_exprs.into_iter().map(Option::unwrap).collect();
+
+    println!("her2");
+    let first_expr = &inlist_exprs[0];
+    if !matches!(first_expr.expr.as_ref(), Expr::Column(_)) || first_expr.negated {
+        return false;
+    }
+
+    println!("her1");
+    for expr in &inlist_exprs[1..] {
+        if !matches!(expr.expr.as_ref(), Expr::Column(_))
+            || expr.negated
+            || expr.expr != first_expr.expr
+        {
+            return false;
+        }
+    }
+
+    println!("true");
+    true
+}
+
 /// Try to convert an expression to an in-list expression
 fn as_inlist(expr: &Expr) -> Option<Cow<InList>> {
     match expr {
         Expr::InList(inlist) => Some(Cow::Borrowed(inlist)),
-        Expr::BinaryExpr(BinaryExpr { left, op, right }) if *op == Operator::Eq => {
+        Expr::BinaryExpr(BinaryExpr { left, op: Operator::Eq, right }) => {
             match (left.as_ref(), right.as_ref()) {
                 (Expr::Column(_), Expr::Literal(_)) => Some(Cow::Owned(InList {
                     expr: left.clone(),
@@ -1691,6 +1770,10 @@ fn as_inlist(expr: &Expr) -> Option<Cow<InList>> {
                 })),
                 _ => None,
             }
+        }
+        Expr::CommutativeExpr(CommutativeExpr { exprs, op: Operator::Eq }) => {
+            println!("exprsaa: {:?}", exprs);
+            None
         }
         _ => None,
     }

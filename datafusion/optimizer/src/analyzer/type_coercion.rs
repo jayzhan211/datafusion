@@ -181,13 +181,16 @@ impl<'a> TypeCoercionRewriter<'a> {
             let expr_type = expr.get_type(self.schema)?;
             let (left_type, right_type) = get_input_types(&data_type, &op, &expr_type)?;
             if left_type != right_type {
-                return internal_err!("coerced types should be the same")
+                return internal_err!("coerced types should be the same");
             }
 
             data_type = right_type
         }
 
-        exprs.into_iter().map(|expr| expr.cast_to(&data_type, self.schema)).collect()
+        exprs
+            .into_iter()
+            .map(|expr| expr.cast_to(&data_type, self.schema))
+            .collect()
     }
 }
 
@@ -307,7 +310,9 @@ impl<'a> TreeNodeRewriter for TypeCoercionRewriter<'a> {
             }
             Expr::CommutativeExpr(CommutativeExpr { exprs, op }) => {
                 let exprs = self.coerce_commutative_exprs_op(exprs, op)?;
-                Ok(Transformed::yes(Expr::CommutativeExpr(CommutativeExpr::new(exprs, op)?)))
+                Ok(Transformed::yes(Expr::CommutativeExpr(
+                    CommutativeExpr::new(exprs, op)?,
+                )))
             }
             Expr::Between(Between {
                 expr,

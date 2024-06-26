@@ -15,7 +15,7 @@
 // specific language governing permissions and limitations
 // under the License.
 
-mod kernels;
+pub(crate) mod kernels;
 
 use std::hash::{Hash, Hasher};
 use std::{any::Any, sync::Arc};

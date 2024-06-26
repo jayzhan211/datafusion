@@ -201,6 +201,19 @@ pub fn get_result_type(
     signature(lhs, op, rhs).map(|sig| sig.ret)
 }
 
+/// returns the result type from commutative expression data types
+pub fn get_result_type_from_commutative(
+    data_types: Vec<DataType>,
+    op: &Operator,
+) -> Result<DataType> {
+    data_types
+        .iter()
+        .skip(1)
+        .try_fold(data_types[0].clone(), |acc, rhs_type| {
+            signature(&acc, op, rhs_type).map(|sig| sig.ret)
+        })
+}
+
 /// Returns the coerced input types for a binary expression evaluating the `op` with the left and right hand types
 pub fn get_input_types(
     lhs: &DataType,

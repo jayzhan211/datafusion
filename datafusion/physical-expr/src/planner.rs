@@ -23,11 +23,12 @@ use datafusion_common::{
     exec_err, not_impl_err, plan_err, DFSchema, Result, ScalarValue,
 };
 use datafusion_expr::execution_props::ExecutionProps;
-use datafusion_expr::expr::{Alias, Cast, InList, ScalarFunction};
+use datafusion_expr::expr::{Alias, Cast, CommutativeExpr, InList, ScalarFunction};
 use datafusion_expr::var_provider::is_system_variables;
 use datafusion_expr::var_provider::VarType;
 use datafusion_expr::{binary_expr, Between, BinaryExpr, Expr, Like, Operator, TryCast};
 
+use crate::expressions::create_commutative_expr;
 use crate::scalar_function;
 use crate::{
     expressions::{self, binary, like, Column, Literal},
@@ -197,6 +198,13 @@ pub fn create_physical_expr(
             // There should be no coercion during physical
             // planning.
             binary(lhs, *op, rhs, input_schema)
+        }
+        Expr::CommutativeExpr(CommutativeExpr { exprs, op }) => {
+            let exprs = exprs
+                .iter()
+                .map(|e| create_physical_expr(e, input_dfschema, execution_props))
+                .collect::<Result<Vec<_>>>()?;
+            create_commutative_expr(exprs, *op)
         }
         Expr::Like(Like {
             negated,

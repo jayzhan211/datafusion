@@ -83,7 +83,7 @@ use datafusion_common::{
 use datafusion_expr::dml::CopyTo;
 use datafusion_expr::expr::{
     self, AggregateFunction, AggregateFunctionDefinition, Alias, Between, BinaryExpr,
-    Cast, GroupingSet, InList, Like, TryCast, WindowFunction,
+    Cast, CommutativeExpr, GroupingSet, InList, Like, TryCast, WindowFunction,
 };
 use datafusion_expr::expr_rewriter::unnormalize_cols;
 use datafusion_expr::expr_vec_fmt;
@@ -153,7 +153,14 @@ fn create_physical_name(e: &Expr, is_first_expr: bool) -> Result<String> {
             let right = create_physical_name(right, false)?;
             Ok(format!("{left} {op} {right}"))
         }
-        Expr::CommutativeExpr(expr) => todo!("123"),
+        Expr::CommutativeExpr(CommutativeExpr { exprs, op }) => {
+            let exprs = exprs
+                .iter()
+                .map(|e| create_physical_name(e, false))
+                .collect::<Result<Vec<_>>>()?;
+            let op = format!(" {op} ");
+            Ok(exprs.join(&op))
+        }
         Expr::Case(case) => {
             let mut name = "CASE ".to_string();
             if let Some(e) = &case.expr {

@@ -335,31 +335,33 @@ impl<'a, S: ContextProvider> SqlToRel<'a, S> {
 
             Statement::CreateView {
                 or_replace,
-                name,
-                columns,
-                query,
+                ref name,
+                ref columns,
+                ref query,
                 options: CreateTableOptions::None,
                 ..
             } => {
                 let columns = columns
                     .into_iter()
                     .map(|view_column_def| {
-                        if let Some(options) = view_column_def.options {
+                        if let Some(options) = &view_column_def.options {
                             plan_err!(
                                 "Options not supported for view columns: {options:?}"
                             )
                         } else {
-                            Ok(view_column_def.name)
+                            Ok(view_column_def.name.clone())
                         }
                     })
                     .collect::<Result<Vec<_>>>()?;
 
+                let query = query.clone();
                 let mut plan = self.query_to_plan(*query, &mut PlannerContext::new())?;
                 plan = self.apply_expr_alias(plan, columns)?;
 
-                let sql = Some(String::from("1"));
+                // TODO: handle large or list for Display for SQLExpr so we can avoid clone()
+                let sql = Some(statement.to_string());
                 Ok(LogicalPlan::Ddl(DdlStatement::CreateView(CreateView {
-                    name: self.object_name_to_table_reference(name)?,
+                    name: self.object_name_to_table_reference(name.clone())?,
                     input: Arc::new(plan),
                     or_replace,
                     definition: sql,
