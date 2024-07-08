@@ -57,6 +57,7 @@ use datafusion_common::{
     DFSchema, SchemaReference, TableReference,
 };
 use datafusion_execution::registry::SerializerRegistry;
+use datafusion_expr::logical_plan::tree_node::unwrap_arc;
 use datafusion_expr::{
     expr_rewriter::FunctionRewrite,
     logical_plan::{DdlStatement, Statement},
@@ -641,8 +642,8 @@ impl SessionContext {
             column_defaults,
         } = cmd;
 
-        let input = Arc::try_unwrap(input).unwrap_or_else(|e| e.as_ref().clone());
-        let input = self.state().optimize(&input)?;
+        let input = unwrap_arc(input);
+        let input = self.state().optimize(input)?;
         let table = self.table(name.clone()).await;
         match (if_not_exists, or_replace, table) {
             (true, false, Ok(_)) => self.return_empty_dataframe(),

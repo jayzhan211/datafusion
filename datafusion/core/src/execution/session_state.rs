@@ -60,13 +60,13 @@ use datafusion_execution::runtime_env::RuntimeEnv;
 use datafusion_execution::TaskContext;
 use datafusion_expr::execution_props::ExecutionProps;
 use datafusion_expr::expr_rewriter::FunctionRewrite;
+use datafusion_expr::logical_plan::tree_node::unwrap_arc;
 use datafusion_expr::planner::UserDefinedSQLPlanner;
 use datafusion_expr::registry::{FunctionRegistry, SerializerRegistry};
 use datafusion_expr::simplify::SimplifyInfo;
 use datafusion_expr::var_provider::{is_system_variables, VarType};
 use datafusion_expr::{
-    AggregateUDF, Explain, Expr, ExprSchemable, LogicalPlan, ScalarUDF, TableSource,
-    WindowUDF,
+    AggregateUDF, Explain, Expr, ExprSchemable, LogicalPlan, ScalarUDF, TableSource, WindowUDF
 };
 use datafusion_optimizer::simplify_expressions::ExprSimplifier;
 use datafusion_optimizer::{
@@ -681,13 +681,13 @@ impl SessionState {
     }
 
     /// Optimizes the logical plan by applying optimizer rules.
-    pub fn optimize(&self, plan: &LogicalPlan) -> datafusion_common::Result<LogicalPlan> {
+    pub fn optimize(&self, plan: LogicalPlan) -> datafusion_common::Result<LogicalPlan> {
         if let LogicalPlan::Explain(e) = plan {
             let mut stringified_plans = e.stringified_plans.clone();
 
             // analyze & capture output of each rule
             let analyzer_result = self.analyzer.execute_and_check(
-                e.plan.as_ref().clone(),
+                unwrap_arc(e.plan),
                 self.options(),
                 |analyzed_plan, analyzer| {
                     let analyzer_name = analyzer.name().to_string();
@@ -704,7 +704,7 @@ impl SessionState {
 
                     return Ok(LogicalPlan::Explain(Explain {
                         verbose: e.verbose,
-                        plan: e.plan.clone(),
+                        plan: Arc::new(LogicalPlan::default()),
                         stringified_plans,
                         schema: e.schema.clone(),
                         logical_optimization_succeeded: false,
@@ -733,7 +733,7 @@ impl SessionState {
                     let plan_type = PlanType::OptimizedLogicalPlan { optimizer_name };
                     stringified_plans
                         .push(StringifiedPlan::new(plan_type, err.to_string()));
-                    (e.plan.clone(), false)
+                    (Arc::new(LogicalPlan::default()), false)
                 }
                 Err(e) => return Err(e),
             };
@@ -747,7 +747,7 @@ impl SessionState {
             }))
         } else {
             let analyzed_plan = self.analyzer.execute_and_check(
-                plan.clone(),
+                plan,
                 self.options(),
                 |_, _| {},
             )?;
@@ -767,7 +767,7 @@ impl SessionState {
     /// [`SessionContext`]: crate::execution::context::SessionContext
     pub async fn create_physical_plan(
         &self,
-        logical_plan: &LogicalPlan,
+        logical_plan: LogicalPlan,
     ) -> datafusion_common::Result<Arc<dyn ExecutionPlan>> {
         let logical_plan = self.optimize(logical_plan)?;
         self.query_planner

@@ -376,10 +376,11 @@ impl Optimizer {
             for rule in &self.rules {
                 // If skipping failed rules, copy plan before attempting to rewrite
                 // as rewriting is destructive
-                let prev_plan = options
-                    .optimizer
-                    .skip_failed_rules
-                    .then(|| new_plan.clone());
+                // let prev_plan = options
+                //     .optimizer
+                //     .skip_failed_rules
+                //     .then(|| new_plan.clone());
+                let prev_plan = None;
 
                 let starting_schema = new_plan.schema().clone();
 

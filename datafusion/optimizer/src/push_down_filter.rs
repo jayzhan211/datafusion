@@ -1020,7 +1020,7 @@ impl OptimizerRule for PushDownFilter {
 /// ```
 fn rewrite_projection(
     predicates: Vec<Expr>,
-    projection: Projection,
+    mut projection: Projection,
 ) -> Result<(Transformed<LogicalPlan>, Option<Expr>)> {
     // A projection is filter-commutable if it do not contain volatile predicates or contain volatile
     // predicates that are not used in the filter. However, we should re-writes all predicate expressions.
@@ -1051,13 +1051,17 @@ fn rewrite_projection(
         Some(expr) => {
             // re-write all filters based on this projection
             // E.g. in `Filter: b\n  Projection: a > 1 as b`, we can swap them, but the filter must be "a > 1"
+
             let new_filter = LogicalPlan::Filter(Filter::try_new(
                 replace_cols_by_name(expr, &non_volatile_map)?,
-                Arc::clone(&projection.input),
+                std::mem::take(&mut projection.input)
             )?);
 
+            projection.input = Arc::new(new_filter);
+
             Ok((
-                insert_below(LogicalPlan::Projection(projection), new_filter)?,
+                // insert_below(LogicalPlan::Projection(projection), new_filter)?,
+                Transformed::yes(LogicalPlan::Projection(projection)),
                 conjunction(keep_predicates),
             ))
         }

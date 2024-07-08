@@ -375,7 +375,10 @@ pub fn unwrap_arc(plan: Arc<LogicalPlan>) -> LogicalPlan {
     Arc::try_unwrap(plan)
         // if None is returned, there is another reference to this
         // LogicalPlan, so we can not own it, and must clone instead
-        .unwrap_or_else(|node| node.as_ref().clone())
+        .unwrap_or_else(|node| {
+            println!("node: {:?}", node);
+            node.as_ref().clone()
+        })
 }
 
 /// Applies `f` to rewrite a `Arc<LogicalPlan>` without copying, if possible
