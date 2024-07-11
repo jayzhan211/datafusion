@@ -336,6 +336,135 @@ physical_plan
 09)----------------RepartitionExec: partitioning=RoundRobinBatch(4), input_partitions=1
 10)------------------CsvExec: file_groups={1 group: [[WORKSPACE_ROOT/testing/data/csv/aggregate_test_100.csv]]}, projection=[c5], has_header=true
 
+query I
+SELECT bit_xor(c5 % 2) FROM aggregate_test_100 group by (c5 % 2);
+----
+0
+1
+0
+
+query I
+SELECT bit_xor(c5 % 2) FROM aggregate_test_100 group by c5;
+----
+0
+0
+0
+0
+0
+0
+1
+0
+-1
+0
+-1
+0
+0
+-1
+1
+-1
+1
+-1
+0
+0
+0
+0
+0
+0
+0
+1
+1
+1
+0
+0
+0
+0
+0
+1
+0
+0
+-1
+0
+0
+1
+0
+0
+-1
+0
+-1
+1
+0
+-1
+0
+0
+1
+0
+0
+0
+1
+1
+-1
+0
+0
+0
+-1
+-1
+-1
+0
+0
+0
+1
+0
+0
+0
+1
+0
+0
+-1
+-1
+0
+1
+-1
+0
+0
+0
+0
+0
+0
+-1
+0
+0
+0
+1
+0
+0
+0
+1
+0
+-1
+1
+-1
+-1
+1
+0
+
+query TT
+explain SELECT bit_xor(c5 % 2) FROM aggregate_test_100 group by (c5 % 2);
+----
+logical_plan
+01)Projection: bit_xor(aggregate_test_100.c5 % Int64(2))
+02)--Aggregate: groupBy=[[__common_expr_1 AS aggregate_test_100.c5 % Int64(2)]], aggr=[[bit_xor(__common_expr_1 AS aggregate_test_100.c5 % Int64(2))]]
+03)----Projection: CAST(aggregate_test_100.c5 AS Int64) % Int64(2) AS __common_expr_1
+04)------TableScan: aggregate_test_100 projection=[c5]
+physical_plan
+01)ProjectionExec: expr=[bit_xor(aggregate_test_100.c5 % Int64(2))@1 as bit_xor(aggregate_test_100.c5 % Int64(2))]
+02)--AggregateExec: mode=FinalPartitioned, gby=[aggregate_test_100.c5 % Int64(2)@0 as aggregate_test_100.c5 % Int64(2)], aggr=[bit_xor(aggregate_test_100.c5 % Int64(2))]
+03)----CoalesceBatchesExec: target_batch_size=8192
+04)------RepartitionExec: partitioning=Hash([aggregate_test_100.c5 % Int64(2)@0], 4), input_partitions=4
+05)--------AggregateExec: mode=Partial, gby=[__common_expr_1@0 as aggregate_test_100.c5 % Int64(2)], aggr=[bit_xor(aggregate_test_100.c5 % Int64(2))]
+06)----------ProjectionExec: expr=[CAST(c5@0 AS Int64) % 2 as __common_expr_1]
+07)------------RepartitionExec: partitioning=RoundRobinBatch(4), input_partitions=1
+08)--------------CsvExec: file_groups={1 group: [[WORKSPACE_ROOT/testing/data/csv/aggregate_test_100.csv]]}, projection=[c5], has_header=true
+
 # csv_query_covariance_1
 query R
 SELECT covar_pop(c2, c12) FROM aggregate_test_100
