@@ -351,7 +351,7 @@ impl<'a, S: ContextProvider> SqlToRel<'a, S> {
                     .transpose()?
                     .map(Box::new);
 
-                let raw_aggregate_function = RawAggregateUDF {
+                let mut raw_aggregate_function = RawAggregateUDF {
                     udf,
                     args,
                     distinct,
@@ -361,10 +361,11 @@ impl<'a, S: ContextProvider> SqlToRel<'a, S> {
                 };
 
                 for planner in self.planners.iter() {
-                    if let PlannerResult::Planned(aggregate_function) =
-                        planner.plan_aggregate_udf(raw_aggregate_function.clone())?
-                    {
-                        return Ok(aggregate_function);
+                    match planner.plan_aggregate_udf(raw_aggregate_function)? {
+                        PlannerResult::Planned(e) => return Ok(e),
+                        PlannerResult::Original(e) => {
+                            raw_aggregate_function = e;
+                        }
                     }
                 }
 

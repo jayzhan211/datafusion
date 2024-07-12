@@ -169,7 +169,7 @@ pub trait ExprPlanner: Send + Sync {
     fn plan_overlay(&self, args: Vec<Expr>) -> Result<PlannerResult<Vec<Expr>>> {
         Ok(PlannerResult::Original(args))
     }
-    
+
     /// Plans a `RawAggregateUDF` based on the given input expressions.
     ///
     /// Returns a `PlannerResult` containing either the planned aggregate function or the original

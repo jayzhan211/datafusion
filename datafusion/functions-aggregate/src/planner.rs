@@ -15,7 +15,13 @@
 // specific language governing permissions and limitations
 // under the License.
 
-use datafusion_expr::planner::{ExprPlanner, PlannerResult, RawAggregateUDF};
+use datafusion_common::Result;
+use datafusion_expr::{
+    expr::{AggregateFunction, AggregateFunctionDefinition},
+    planner::{ExprPlanner, PlannerResult, RawAggregateUDF},
+    utils::COUNT_STAR_EXPANSION,
+    Expr,
+};
 
 pub struct AggregateUDFPlanner;
 
@@ -23,7 +29,43 @@ impl ExprPlanner for AggregateUDFPlanner {
     fn plan_aggregate_udf(
         &self,
         aggregate_function: RawAggregateUDF,
-    ) -> datafusion_common::Result<PlannerResult<RawAggregateUDF>> {
-        Ok(PlannerResult::Original(aggregate_function))
+    ) -> Result<PlannerResult<RawAggregateUDF>> {
+        let RawAggregateUDF {
+            udf,
+            args,
+            distinct,
+            filter,
+            order_by,
+            null_treatment,
+        } = aggregate_function;
+
+        if udf.name() == "count" && args.len() == 1 && is_wildcard(&args[0]) {
+            Ok(PlannerResult::Planned(Expr::AggregateFunction(
+                AggregateFunction {
+                    func_def: AggregateFunctionDefinition::UDF(udf),
+                    args: vec![Expr::Literal(COUNT_STAR_EXPANSION)],
+                    distinct,
+                    filter,
+                    order_by,
+                    null_treatment,
+                },
+            )))
+        } else {
+            Ok(PlannerResult::Original(RawAggregateUDF {
+                udf,
+                args,
+                distinct,
+                filter,
+                order_by,
+                null_treatment,
+            }))
+        }
     }
+}
+
+fn is_wildcard(expr: &Expr) -> bool {
+    if let Expr::Wildcard { qualifier: _ } = expr {
+        return true;
+    }
+    false
 }
