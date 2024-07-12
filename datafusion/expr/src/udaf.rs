@@ -28,14 +28,14 @@ use sqlparser::ast::NullTreatment;
 
 use datafusion_common::{exec_err, not_impl_err, plan_err, Result};
 
-use crate::expr::AggregateFunction;
+use crate::expr::{create_name, AggregateFunction};
 use crate::function::{
     AccumulatorArgs, AggregateFunctionSimplification, StateFieldsArgs,
 };
 use crate::groups_accumulator::GroupsAccumulator;
 use crate::utils::format_state_name;
 use crate::utils::AggregateOrderSensitivity;
-use crate::{Accumulator, Expr};
+use crate::{expr_vec_fmt, Accumulator, Expr};
 use crate::{AccumulatorFactoryFunction, ReturnTypeFunction, Signature};
 
 /// Logical representation of a user-defined [aggregate function] (UDAF).
@@ -162,6 +162,10 @@ impl AggregateUDF {
     /// See [`AggregateUDFImpl::name`] for more details.
     pub fn name(&self) -> &str {
         self.inner.name()
+    }
+
+    pub fn display_name(&self, args: AggregateFunctionArgs) -> Result<String>{
+        self.inner.display_name(args)
     }
 
     /// Returns the aliases for this function.
@@ -326,6 +330,34 @@ pub trait AggregateUDFImpl: Debug + Send + Sync {
 
     /// Returns this function's name
     fn name(&self) -> &str;
+
+    /// Returns the user-defined display name of the UDF given the arguments
+    fn display_name(&self, args: AggregateFunctionArgs) -> Result<String> {
+        let AggregateFunctionArgs { args, distinct, filter, order_by, null_treatment } = args;
+
+        let args_name: Vec<String> = args.iter().map(create_name).collect::<Result<_>>()?;
+
+        let mut res = if distinct {
+            format!("{}(DISTINCT {})", self.name(), args_name.join(", "))
+        } else {
+            format!("{}({})", self.name(), args_name.join(", "))
+        };
+
+        if let Some(fe) = filter {
+            res = format!("{res} FILTER (WHERE {fe})");
+        }
+
+        if let Some(order_by) = order_by {
+            let order_by_str = expr_vec_fmt!(order_by);
+            res = format!("{res} ORDER BY [{}]", order_by_str);
+        }
+
+        if let Some(nt) = null_treatment {
+            res = format!("{res} {}", nt);
+        }
+
+        Ok(res)
+    }
 
     /// Returns the function's [`Signature`] for information about what input
     /// types are accepted and the function's Volatility.
@@ -546,6 +578,18 @@ pub enum ReversedUDAF {
     NotSupported,
     /// The expression is different from the original expression
     Reversed(Arc<AggregateUDF>),
+}
+
+pub struct AggregateFunctionArgs<'a> {
+    /// List of expressions to feed to the functions as arguments
+    pub args: &'a Vec<Expr>,
+    /// Whether this is a DISTINCT aggregation or not
+    pub distinct: bool,
+    /// Optional filter
+    pub filter: &'a Option<Box<Expr>>,
+    /// Optional ordering
+    pub order_by: &'a Option<Vec<Expr>>,
+    pub null_treatment: &'a Option<NullTreatment>,
 }
 
 /// AggregateUDF that adds an alias to the underlying function. It is better to

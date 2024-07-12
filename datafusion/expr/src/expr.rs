@@ -26,10 +26,10 @@ use std::sync::Arc;
 
 use crate::expr_fn::binary_expr;
 use crate::logical_plan::Subquery;
+use crate::udaf::AggregateFunctionArgs;
 use crate::utils::expr_to_columns;
 use crate::{
-    aggregate_function, built_in_window_function, udaf, ExprSchemable, Operator,
-    Signature,
+    aggregate_function, built_in_window_function, udaf, ExprSchemable, Operator, Signature
 };
 use crate::{window_frame, Volatility};
 
@@ -1852,16 +1852,35 @@ impl fmt::Display for Expr {
                 null_treatment,
                 ..
             }) => {
-                fmt_function(f, func_def.name(), *distinct, args, true)?;
-                if let Some(nt) = null_treatment {
-                    write!(f, " {}", nt)?;
+
+                if let AggregateFunctionDefinition::UDF(udf) = func_def {
+                    let res = udf.display_name(AggregateFunctionArgs {args, distinct: *distinct, filter, order_by, null_treatment}).unwrap();
+                    write!(f, "{}", res)?;
+                } else {
+                    // TODO: Remove if all agg are UDF
+                    fmt_function(f, func_def.name(), *distinct, args, true)?;
+                    if let Some(nt) = null_treatment {
+                        write!(f, " {}", nt)?;
+                    }
+                    if let Some(fe) = filter {
+                        write!(f, " FILTER (WHERE {fe})")?;
+                    }
+                    if let Some(ob) = order_by {
+                        write!(f, " ORDER BY [{}]", expr_vec_fmt!(ob))?;
+                    }
                 }
-                if let Some(fe) = filter {
-                    write!(f, " FILTER (WHERE {fe})")?;
-                }
-                if let Some(ob) = order_by {
-                    write!(f, " ORDER BY [{}]", expr_vec_fmt!(ob))?;
-                }
+
+
+                // fmt_function(f, func_def.name(), *distinct, args, true)?;
+                // if let Some(nt) = null_treatment {
+                //     write!(f, " {}", nt)?;
+                // }
+                // if let Some(fe) = filter {
+                //     write!(f, " FILTER (WHERE {fe})")?;
+                // }
+                // if let Some(ob) = order_by {
+                //     write!(f, " ORDER BY [{}]", expr_vec_fmt!(ob))?;
+                // }
                 Ok(())
             }
             Expr::Between(Between {
@@ -1993,7 +2012,7 @@ fn write_function_name<W: Write>(
 
 /// Returns a readable name of an expression based on the input schema.
 /// This function recursively transverses the expression for names such as "CAST(a > 2)".
-pub(crate) fn create_name(e: &Expr) -> Result<String> {
+pub fn create_name(e: &Expr) -> Result<String> {
     let mut s = String::new();
     write_name(&mut s, e)?;
     Ok(s)
@@ -2171,16 +2190,22 @@ fn write_name<W: Write>(w: &mut W, e: &Expr) -> Result<()> {
             order_by,
             null_treatment,
         }) => {
-            write_function_name(w, func_def.name(), *distinct, args)?;
-            if let Some(fe) = filter {
-                write!(w, " FILTER (WHERE {fe})")?;
-            };
-            if let Some(order_by) = order_by {
-                write!(w, " ORDER BY [{}]", expr_vec_fmt!(order_by))?;
-            };
-            if let Some(nt) = null_treatment {
-                write!(w, " {}", nt)?;
+            if let AggregateFunctionDefinition::UDF(udf) = func_def {
+                let res = udf.display_name(AggregateFunctionArgs {args, distinct: *distinct, filter, order_by, null_treatment})?;
+                write!(w, "{}", res)?;
+            } else {
+                write_function_name(w, func_def.name(), *distinct, args)?;
+                if let Some(fe) = filter {
+                    write!(w, " FILTER (WHERE {fe})")?;
+                };
+                if let Some(order_by) = order_by {
+                    write!(w, " ORDER BY [{}]", expr_vec_fmt!(order_by))?;
+                };
+                if let Some(nt) = null_treatment {
+                    write!(w, " {}", nt)?;
+                }
             }
+
         }
         Expr::GroupingSet(grouping_set) => match grouping_set {
             GroupingSet::Rollup(exprs) => {

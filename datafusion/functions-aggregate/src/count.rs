@@ -16,6 +16,8 @@
 // under the License.
 
 use ahash::RandomState;
+use datafusion_expr::expr::create_name;
+use datafusion_expr::utils::COUNT_STAR_EXPANSION;
 use std::collections::HashSet;
 use std::ops::BitAnd;
 use std::{fmt::Debug, sync::Arc};
@@ -44,7 +46,7 @@ use datafusion_expr::{
     function::AccumulatorArgs, utils::format_state_name, Accumulator, AggregateUDFImpl,
     EmitTo, GroupsAccumulator, Signature, Volatility,
 };
-use datafusion_expr::{Expr, ReversedUDAF};
+use datafusion_expr::{expr_vec_fmt, AggregateFunctionArgs, Expr, ReversedUDAF};
 use datafusion_physical_expr_common::aggregate::groups_accumulator::accumulate::accumulate_indices;
 use datafusion_physical_expr_common::{
     aggregate::count_distinct::{
@@ -107,6 +109,37 @@ impl AggregateUDFImpl for Count {
 
     fn name(&self) -> &str {
         "count"
+    }
+
+    fn display_name(&self, args: AggregateFunctionArgs) -> Result<String> {
+        let AggregateFunctionArgs { args, distinct, filter, order_by, null_treatment } = args;
+
+        // Rename count star expression including `count(*)`, `count(1)` to count_star
+        let mut res: String = if args.len() == 1 && is_count_star(&args[0]) {
+            format!("count_star()")
+        } else {
+            let args_name: Vec<_> = args.iter().map(create_name).collect::<Result<_>>()?;
+            if distinct {
+                format!("{}(DISTINCT {})", self.name(), args_name.join(", "))
+            } else {
+                format!("{}({})", self.name(), args_name.join(", "))
+            }
+        };
+
+        if let Some(fe) = filter {
+            res = format!("{res} FILTER (WHERE {fe})");
+        }
+
+        if let Some(order_by) = order_by {
+            let order_by_str = expr_vec_fmt!(order_by);
+            res = format!("{res} ORDER BY [{}]", order_by_str);
+        }
+
+        if let Some(nt) = null_treatment {
+            res = format!("{res} {}", nt);
+        }
+
+        Ok(res)
     }
 
     fn signature(&self) -> &Signature {
@@ -272,6 +305,16 @@ impl AggregateUDFImpl for Count {
     fn reverse_expr(&self) -> ReversedUDAF {
         ReversedUDAF::Identical
     }
+}
+
+fn is_count_star(e: &Expr) -> bool{
+    if let Expr::Literal(s) = e {
+        if *s == COUNT_STAR_EXPANSION {
+            return true
+        }
+        return false
+    }
+    false
 }
 
 #[derive(Debug)]
