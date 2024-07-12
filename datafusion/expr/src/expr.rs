@@ -29,7 +29,8 @@ use crate::logical_plan::Subquery;
 use crate::udaf::AggregateFunctionArgs;
 use crate::utils::expr_to_columns;
 use crate::{
-    aggregate_function, built_in_window_function, udaf, ExprSchemable, Operator, Signature
+    aggregate_function, built_in_window_function, udaf, ExprSchemable, Operator,
+    Signature,
 };
 use crate::{window_frame, Volatility};
 
@@ -1852,9 +1853,16 @@ impl fmt::Display for Expr {
                 null_treatment,
                 ..
             }) => {
-
                 if let AggregateFunctionDefinition::UDF(udf) = func_def {
-                    let res = udf.display_name(AggregateFunctionArgs {args, distinct: *distinct, filter, order_by, null_treatment}).unwrap();
+                    let res = udf
+                        .display_name(AggregateFunctionArgs {
+                            args,
+                            distinct: *distinct,
+                            filter,
+                            order_by,
+                            null_treatment,
+                        })
+                        .unwrap();
                     write!(f, "{}", res)?;
                 } else {
                     // TODO: Remove if all agg are UDF
@@ -1869,7 +1877,6 @@ impl fmt::Display for Expr {
                         write!(f, " ORDER BY [{}]", expr_vec_fmt!(ob))?;
                     }
                 }
-
 
                 // fmt_function(f, func_def.name(), *distinct, args, true)?;
                 // if let Some(nt) = null_treatment {
@@ -2191,7 +2198,13 @@ fn write_name<W: Write>(w: &mut W, e: &Expr) -> Result<()> {
             null_treatment,
         }) => {
             if let AggregateFunctionDefinition::UDF(udf) = func_def {
-                let res = udf.display_name(AggregateFunctionArgs {args, distinct: *distinct, filter, order_by, null_treatment})?;
+                let res = udf.display_name(AggregateFunctionArgs {
+                    args,
+                    distinct: *distinct,
+                    filter,
+                    order_by,
+                    null_treatment,
+                })?;
                 write!(w, "{}", res)?;
             } else {
                 write_function_name(w, func_def.name(), *distinct, args)?;
@@ -2205,7 +2218,6 @@ fn write_name<W: Write>(w: &mut W, e: &Expr) -> Result<()> {
                     write!(w, " {}", nt)?;
                 }
             }
-
         }
         Expr::GroupingSet(grouping_set) => match grouping_set {
             GroupingSet::Rollup(exprs) => {

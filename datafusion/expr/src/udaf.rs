@@ -164,7 +164,7 @@ impl AggregateUDF {
         self.inner.name()
     }
 
-    pub fn display_name(&self, args: AggregateFunctionArgs) -> Result<String>{
+    pub fn display_name(&self, args: AggregateFunctionArgs) -> Result<String> {
         self.inner.display_name(args)
     }
 
@@ -333,9 +333,16 @@ pub trait AggregateUDFImpl: Debug + Send + Sync {
 
     /// Returns the user-defined display name of the UDF given the arguments
     fn display_name(&self, args: AggregateFunctionArgs) -> Result<String> {
-        let AggregateFunctionArgs { args, distinct, filter, order_by, null_treatment } = args;
+        let AggregateFunctionArgs {
+            args,
+            distinct,
+            filter,
+            order_by,
+            null_treatment,
+        } = args;
 
-        let args_name: Vec<String> = args.iter().map(create_name).collect::<Result<_>>()?;
+        let args_name: Vec<String> =
+            args.iter().map(create_name).collect::<Result<_>>()?;
 
         let mut res = if distinct {
             format!("{}(DISTINCT {})", self.name(), args_name.join(", "))

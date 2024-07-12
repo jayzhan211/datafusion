@@ -42,11 +42,11 @@ use datafusion_common::{
     downcast_value, internal_err, not_impl_err, DataFusionError, Result, ScalarValue,
 };
 use datafusion_expr::function::StateFieldsArgs;
+use datafusion_expr::{expr_vec_fmt, AggregateFunctionArgs, Expr, ReversedUDAF};
 use datafusion_expr::{
     function::AccumulatorArgs, utils::format_state_name, Accumulator, AggregateUDFImpl,
     EmitTo, GroupsAccumulator, Signature, Volatility,
 };
-use datafusion_expr::{expr_vec_fmt, AggregateFunctionArgs, Expr, ReversedUDAF};
 use datafusion_physical_expr_common::aggregate::groups_accumulator::accumulate::accumulate_indices;
 use datafusion_physical_expr_common::{
     aggregate::count_distinct::{
@@ -112,13 +112,20 @@ impl AggregateUDFImpl for Count {
     }
 
     fn display_name(&self, args: AggregateFunctionArgs) -> Result<String> {
-        let AggregateFunctionArgs { args, distinct, filter, order_by, null_treatment } = args;
+        let AggregateFunctionArgs {
+            args,
+            distinct,
+            filter,
+            order_by,
+            null_treatment,
+        } = args;
 
         // Rename count star expression including `count(*)`, `count(1)` to count_star
         let mut res: String = if args.len() == 1 && is_count_star(&args[0]) {
-            format!("count_star()")
+            "count_star()".to_string()
         } else {
-            let args_name: Vec<_> = args.iter().map(create_name).collect::<Result<_>>()?;
+            let args_name: Vec<_> =
+                args.iter().map(create_name).collect::<Result<_>>()?;
             if distinct {
                 format!("{}(DISTINCT {})", self.name(), args_name.join(", "))
             } else {
@@ -307,12 +314,12 @@ impl AggregateUDFImpl for Count {
     }
 }
 
-fn is_count_star(e: &Expr) -> bool{
+fn is_count_star(e: &Expr) -> bool {
     if let Expr::Literal(s) = e {
         if *s == COUNT_STAR_EXPANSION {
-            return true
+            return true;
         }
-        return false
+        return false;
     }
     false
 }
