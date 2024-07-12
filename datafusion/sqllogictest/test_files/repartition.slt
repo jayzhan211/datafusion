@@ -40,7 +40,7 @@ query TT
 EXPLAIN SELECT column1, SUM(column2) FROM parquet_table GROUP BY column1;
 ----
 logical_plan
-01)Aggregate: groupBy=[[parquet_table.column1]], aggr=[[sum(CAST(parquet_table.column2 AS Int64))]]
+01)Aggregate: groupBy=[[parquet_table.column1]], aggr=[[sum(parquet_table.column2)]]
 02)--TableScan: parquet_table projection=[column1, column2]
 physical_plan
 01)AggregateExec: mode=FinalPartitioned, gby=[column1@0 as column1], aggr=[sum(parquet_table.column2)]
@@ -58,7 +58,7 @@ query TT
 EXPLAIN SELECT column1, SUM(column2) FROM parquet_table GROUP BY column1;
 ----
 logical_plan
-01)Aggregate: groupBy=[[parquet_table.column1]], aggr=[[sum(CAST(parquet_table.column2 AS Int64))]]
+01)Aggregate: groupBy=[[parquet_table.column1]], aggr=[[sum(parquet_table.column2)]]
 02)--TableScan: parquet_table projection=[column1, column2]
 physical_plan
 01)AggregateExec: mode=FinalPartitioned, gby=[column1@0 as column1], aggr=[sum(parquet_table.column2)]
