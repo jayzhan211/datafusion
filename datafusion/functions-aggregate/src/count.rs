@@ -56,13 +56,41 @@ use datafusion_physical_expr_common::{
     binary_map::OutputType,
 };
 
-make_udaf_expr_and_func!(
-    Count,
-    count,
-    expr,
-    "Count the number of non-null values in the column",
-    count_udaf
-);
+// make_udaf_expr_and_func!(
+//     Count,
+//     count,
+//     expr,
+//     "Count the number of non-null values in the column",
+//     count_udaf
+// );
+create_func!(Count, count_udaf);
+
+pub fn count_star() -> Expr {
+    Expr::AggregateFunction(datafusion_expr::expr::AggregateFunction::new_udf(
+        count_udaf(),
+        vec![Expr::Literal(COUNT_STAR_EXPANSION)],
+        false,
+        None,
+        None,
+        None,
+    ))
+}
+
+pub fn count(expr: Expr) -> Expr {
+    // For backward compatility, could use count_star instead
+    if let Expr::Wildcard { qualifier: _ } = expr {
+        count_star()
+    } else {
+        Expr::AggregateFunction(datafusion_expr::expr::AggregateFunction::new_udf(
+            count_udaf(),
+            vec![expr],
+            false,
+            None,
+            None,
+            None,
+        ))
+    }
+}
 
 pub fn count_distinct(expr: Expr) -> Expr {
     Expr::AggregateFunction(datafusion_expr::expr::AggregateFunction::new_udf(

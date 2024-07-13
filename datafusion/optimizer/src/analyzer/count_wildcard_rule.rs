@@ -21,9 +21,7 @@ use crate::utils::NamePreserver;
 use datafusion_common::config::ConfigOptions;
 use datafusion_common::tree_node::{Transformed, TransformedResult, TreeNode};
 use datafusion_common::Result;
-use datafusion_expr::expr::{
-    AggregateFunction, AggregateFunctionDefinition, WindowFunction,
-};
+use datafusion_expr::expr::WindowFunction;
 use datafusion_expr::utils::COUNT_STAR_EXPANSION;
 use datafusion_expr::{lit, Expr, LogicalPlan, WindowFunctionDefinition};
 
@@ -53,15 +51,6 @@ fn is_wildcard(expr: &Expr) -> bool {
     matches!(expr, Expr::Wildcard { qualifier: None })
 }
 
-fn is_count_star_aggregate(aggregate_function: &AggregateFunction) -> bool {
-    matches!(aggregate_function,
-        AggregateFunction {
-            func_def: AggregateFunctionDefinition::UDF(udf),
-            args,
-            ..
-        } if udf.name() == "count" && args.len() == 1 && is_wildcard(&args[0]))
-}
-
 fn is_count_star_window_aggregate(window_function: &WindowFunction) -> bool {
     let args = &window_function.args;
     matches!(window_function.fun,
@@ -79,14 +68,6 @@ fn analyze_internal(plan: LogicalPlan) -> Result<Transformed<LogicalPlan>> {
             {
                 window_function.args = vec![lit(COUNT_STAR_EXPANSION)];
                 Ok(Transformed::yes(Expr::WindowFunction(window_function)))
-            }
-            Expr::AggregateFunction(mut aggregate_function)
-                if is_count_star_aggregate(&aggregate_function) =>
-            {
-                aggregate_function.args = vec![lit(COUNT_STAR_EXPANSION)];
-                Ok(Transformed::yes(Expr::AggregateFunction(
-                    aggregate_function,
-                )))
             }
             _ => Ok(Transformed::no(expr)),
         })?;
@@ -127,9 +108,9 @@ mod tests {
             .project(vec![count(wildcard())])?
             .sort(vec![count(wildcard()).sort(true, false)])?
             .build()?;
-        let expected = "Sort: count(*) ASC NULLS LAST [count(*):Int64]\
-        \n  Projection: count(*) [count(*):Int64]\
-        \n    Aggregate: groupBy=[[test.b]], aggr=[[count(Int64(1)) AS count(*)]] [b:UInt32, count(*):Int64]\
+        let expected = "Sort: count_star() ASC NULLS LAST [count_star():Int64]\
+        \n  Projection: count_star() [count_star():Int64]\
+        \n    Aggregate: groupBy=[[test.b]], aggr=[[count_star()]] [b:UInt32, count_star():Int64]\
         \n      TableScan: test [a:UInt32, b:UInt32, c:UInt32]";
         assert_plan_eq(plan, expected)
     }
@@ -206,13 +187,12 @@ mod tests {
             .build()?;
 
         let expected = "Projection: t1.a, t1.b [a:UInt32, b:UInt32]\
-              \n  Filter: (<subquery>) > UInt8(0) [a:UInt32, b:UInt32, c:UInt32]\
-              \n    Subquery: [count(Int64(1)):Int64]\
-              \n      Projection: count(Int64(1)) [count(Int64(1)):Int64]\
-              \n        Aggregate: groupBy=[[]], aggr=[[count(Int64(1))]] [count(Int64(1)):Int64]\
-              \n          Filter: outer_ref(t1.a) = t2.a [a:UInt32, b:UInt32, c:UInt32]\
-              \n            TableScan: t2 [a:UInt32, b:UInt32, c:UInt32]\
-              \n    TableScan: t1 [a:UInt32, b:UInt32, c:UInt32]";
+        \n  Filter: (<subquery>) > UInt8(0) [a:UInt32, b:UInt32, c:UInt32]\
+        \n    Subquery: [count_star():Int64]\n      Projection: count_star() [count_star():Int64]\
+        \n        Aggregate: groupBy=[[]], aggr=[[count_star()]] [count_star():Int64]\
+        \n          Filter: outer_ref(t1.a) = t2.a [a:UInt32, b:UInt32, c:UInt32]\
+        \n            TableScan: t2 [a:UInt32, b:UInt32, c:UInt32]\
+        \n    TableScan: t1 [a:UInt32, b:UInt32, c:UInt32]";
         assert_plan_eq(plan, expected)
     }
     #[test]
@@ -235,7 +215,7 @@ mod tests {
             .project(vec![count(wildcard())])?
             .build()?;
 
-        let expected = "Projection: count(Int64(1)) AS count(*) [count(*):Int64]\
+        let expected = "Projection: count_star() [count_star():Int64]\
         \n  WindowAggr: windowExpr=[[count(Int64(1)) ORDER BY [test.a DESC NULLS FIRST] RANGE BETWEEN 6 PRECEDING AND 2 FOLLOWING AS count(*) ORDER BY [test.a DESC NULLS FIRST] RANGE BETWEEN 6 PRECEDING AND 2 FOLLOWING]] [a:UInt32, b:UInt32, c:UInt32, count(*) ORDER BY [test.a DESC NULLS FIRST] RANGE BETWEEN 6 PRECEDING AND 2 FOLLOWING:Int64;N]\
         \n    TableScan: test [a:UInt32, b:UInt32, c:UInt32]";
         assert_plan_eq(plan, expected)
@@ -249,8 +229,8 @@ mod tests {
             .project(vec![count(wildcard())])?
             .build()?;
 
-        let expected = "Projection: count(*) [count(*):Int64]\
-        \n  Aggregate: groupBy=[[]], aggr=[[count(Int64(1)) AS count(*)]] [count(*):Int64]\
+        let expected = "Projection: count_star() [count_star():Int64]\
+        \n  Aggregate: groupBy=[[]], aggr=[[count_star()]] [count_star():Int64]\
         \n    TableScan: test [a:UInt32, b:UInt32, c:UInt32]";
         assert_plan_eq(plan, expected)
     }
@@ -272,8 +252,8 @@ mod tests {
             .project(vec![count(wildcard())])?
             .build()?;
 
-        let expected = "Projection: count(Int64(1)) AS count(*) [count(*):Int64]\
-        \n  Aggregate: groupBy=[[]], aggr=[[MAX(count(Int64(1))) AS MAX(count(*))]] [MAX(count(*)):Int64;N]\
+        let expected = "Projection: count_star() [count_star():Int64]\
+        \n  Aggregate: groupBy=[[]], aggr=[[MAX(count_star())]] [MAX(count_star()):Int64;N]\
         \n    TableScan: test [a:UInt32, b:UInt32, c:UInt32]";
         assert_plan_eq(plan, expected)
     }
