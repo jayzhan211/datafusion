@@ -1,0 +1,11 @@
+query error
+select
+  arrow_typeof(min(column1)), min(column1), max(column1)
+from values
+  (interval '1 month'),
+  (interval '2 months'),
+  (interval '2 month 15 days'),
+  (interval '-2 month');
+----
+DataFusion error: Internal error: Min/Max accumulator not implemented for type Interval(MonthDayNano).
+This was likely caused by a bug in DataFusion's code and we would welcome that you file an bug report in our issue tracker

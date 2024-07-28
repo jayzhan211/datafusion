@@ -33,7 +33,7 @@ use datafusion_common::{
 };
 use datafusion_common::{internal_err, DFSchema, DataFusionError, Result, ScalarValue};
 use datafusion_expr::expr::{
-    AggregateFunctionDefinition, InList, InSubquery, WindowFunction,
+    AggregateFunction, AggregateFunctionDefinition, InList, InSubquery, WindowFunction,
 };
 use datafusion_expr::simplify::ExprSimplifyResult;
 use datafusion_expr::{
@@ -718,6 +718,8 @@ impl<'a, S: SimplifyInfo> TreeNodeRewriter for Simplifier<'a, S> {
             Divide, Eq, Modulo, Multiply, NotEq, Or, RegexIMatch, RegexMatch,
             RegexNotIMatch, RegexNotMatch,
         };
+
+        println!("expr: {:?}", expr);
 
         let info = self.info;
         Ok(match expr {
@@ -1657,6 +1659,25 @@ impl<'a, S: SimplifyInfo> TreeNodeRewriter for Simplifier<'a, S> {
                     // Matched previously once
                     _ => unreachable!(),
                 }
+            }
+
+            Expr::AggregateFunction(AggregateFunction {
+                func_def: AggregateFunctionDefinition::BuiltIn(udaf),
+                args,
+                distinct,
+                filter,
+                order_by,
+                null_treatment,
+            }) if matches!(udaf.name(), "MIN" | "MAX") && distinct => {
+                return Ok(Expr::AggregateFunction(AggregateFunction {
+                    func_def: AggregateFunctionDefinition::BuiltIn(udaf),
+                    args,
+                    distinct: false,
+                    filter,
+                    order_by,
+                    null_treatment,
+                }))
+                .map(Transformed::yes);
             }
 
             // no additional rewrites possible

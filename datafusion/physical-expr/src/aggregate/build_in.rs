@@ -30,7 +30,7 @@ use std::sync::Arc;
 
 use arrow::datatypes::Schema;
 
-use datafusion_common::Result;
+use datafusion_common::{internal_err, Result};
 use datafusion_expr::AggregateFunction;
 
 use crate::expressions::{self};
@@ -55,6 +55,11 @@ pub fn create_aggregate_expr(
         .collect::<Result<Vec<_>>>()?;
     let data_type = input_phy_types[0].clone();
     let input_phy_exprs = input_phy_exprs.to_vec();
+
+    if distinct {
+        return internal_err!("distinct is not supported for min/max")
+    }
+
     Ok(match (fun, distinct) {
         (AggregateFunction::Min, _) => Arc::new(expressions::Min::new(
             Arc::clone(&input_phy_exprs[0]),
