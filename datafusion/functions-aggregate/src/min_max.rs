@@ -955,19 +955,16 @@ impl AggregateUDFImpl for Min {
     }
 
     fn return_type(&self, arg_types: &[DataType]) -> Result<DataType> {
-        type_coercion::aggregates::get_min_max_result_type(arg_types)?
-            .into_iter()
-            .next()
-            .ok_or_else(|| {
-                DataFusionError::Internal(
-                    "Expected at one input type for MIN aggregate function".to_string(),
-                )
-            })
+        Ok(arg_types[0].to_owned())
+    }
+
+    fn coerce_types(&self, arg_types: &[DataType]) -> Result<Vec<DataType>> {
+        let data_type = min_max_aggregate_data_type(&arg_types[0]);
+        Ok(vec![data_type.to_owned()])
     }
 
     fn accumulator(&self, acc_args: AccumulatorArgs) -> Result<Box<dyn Accumulator>> {
-        let data_type = min_max_aggregate_data_type(acc_args.data_type);
-        Ok(Box::new(MinAccumulator::try_new(data_type)?))
+        Ok(Box::new(MinAccumulator::try_new(acc_args.data_type)?))
     }
 
     fn aliases(&self) -> &[String] {
@@ -976,9 +973,8 @@ impl AggregateUDFImpl for Min {
 
     fn groups_accumulator_supported(&self, args: AccumulatorArgs) -> bool {
         use DataType::*;
-        let data_type = min_max_aggregate_data_type(args.data_type);
         matches!(
-            data_type,
+            args.data_type,
             Int8 | Int16
                 | Int32
                 | Int64
@@ -1004,7 +1000,7 @@ impl AggregateUDFImpl for Min {
     ) -> Result<Box<dyn GroupsAccumulator>> {
         use DataType::*;
         use TimeUnit::*;
-        let data_type = min_max_aggregate_data_type(args.data_type);
+        let data_type = args.data_type;
         match data_type {
             Int8 => instantiate_min_accumulator!(data_type, i8, Int8Type),
             Int16 => instantiate_min_accumulator!(data_type, i16, Int16Type),
@@ -1065,8 +1061,7 @@ impl AggregateUDFImpl for Min {
         &self,
         args: AccumulatorArgs,
     ) -> Result<Box<dyn Accumulator>> {
-        let data_type = min_max_aggregate_data_type(args.data_type);
-        Ok(Box::new(SlidingMinAccumulator::try_new(data_type)?))
+        Ok(Box::new(SlidingMinAccumulator::try_new(args.data_type)?))
     }
 
     fn is_descending(&self) -> Option<bool> {
@@ -1075,10 +1070,6 @@ impl AggregateUDFImpl for Min {
 
     fn order_sensitivity(&self) -> datafusion_expr::utils::AggregateOrderSensitivity {
         datafusion_expr::utils::AggregateOrderSensitivity::Insensitive
-    }
-
-    fn coerce_types(&self, arg_types: &[DataType]) -> Result<Vec<DataType>> {
-        type_coercion::aggregates::get_min_max_result_type(arg_types)
     }
 
     fn reverse_expr(&self) -> datafusion_expr::ReversedUDAF {
