@@ -30,7 +30,6 @@ use arrow::{
 use datafusion_common::{downcast_value, plan_err, unwrap_or_internal_err, ScalarValue};
 use datafusion_common::{DataFusionError, Result};
 use datafusion_expr::function::{AccumulatorArgs, StateFieldsArgs};
-use datafusion_expr::type_coercion::aggregates::NUMERICS;
 use datafusion_expr::utils::format_state_name;
 use datafusion_expr::{Accumulator, AggregateUDFImpl, Signature, Volatility};
 
@@ -69,7 +68,7 @@ impl Debug for Regr {
 impl Regr {
     pub fn new(regr_type: RegrType, func_name: &'static str) -> Self {
         Self {
-            signature: Signature::uniform(2, NUMERICS.to_vec(), Volatility::Immutable),
+            signature: Signature::numeric(2, Volatility::Immutable),
             regr_type,
             func_name,
         }

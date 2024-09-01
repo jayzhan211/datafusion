@@ -28,12 +28,9 @@ use datafusion_expr::simplify::{ExprSimplifyResult, SimplifyInfo};
 use datafusion_expr::{ColumnarValue, Expr, ScalarUDF};
 
 use arrow::array::{ArrayRef, Float64Array, Int64Array};
-use datafusion_expr::TypeSignature::*;
 use datafusion_expr::{ScalarUDFImpl, Signature, Volatility};
 use std::any::Any;
 use std::sync::Arc;
-
-use super::log::LogFunc;
 
 #[derive(Debug)]
 pub struct PowerFunc {
@@ -51,10 +48,7 @@ impl PowerFunc {
     pub fn new() -> Self {
         use DataType::*;
         Self {
-            signature: Signature::one_of(
-                vec![Exact(vec![Int64, Int64]), Exact(vec![Float64, Float64])],
-                Volatility::Immutable,
-            ),
+            signature: Signature::coericble(vec![Float64; 2], Volatility::Immutable),
             aliases: vec![String::from("pow")],
         }
     }
@@ -166,7 +160,7 @@ impl ScalarUDFImpl for PowerFunc {
 
 /// Return true if this function call is a call to `Log`
 fn is_log(func: &ScalarUDF) -> bool {
-    func.inner().as_any().downcast_ref::<LogFunc>().is_some()
+    func.name() == "log"
 }
 
 #[cfg(test)]

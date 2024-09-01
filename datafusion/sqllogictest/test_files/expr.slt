@@ -22,7 +22,7 @@ SELECT true, false, false = false, true = false
 true false true false
 
 # test_mathematical_expressions_with_null
-query RRRRRRRRRRRRRRRRRR?RRRRRIIIRRRRRRBB
+query RRRRRRRRRRRRRRRRRR?RRRRRRRRRRRRRRBB
 SELECT
     sqrt(NULL),
     cbrt(NULL),
@@ -2051,22 +2051,30 @@ SELECT substring('alphabet' for 1);
 ----
 a
 
-# The 'from' and 'for' parameters don't support string types, because they should be treated as
-# regular expressions, which we have not implemented yet.
-query error
+query T
 SELECT substring('alphabet' FROM '3')
+----
+phabet
 
-query error
+query T
 SELECT substring('alphabet' FROM '3' FOR '2')
+----
+ph
 
-query error
+query T
 SELECT substring('alphabet' FROM '3' FOR 2)
+----
+ph
 
-query error
+query T
 SELECT substring('alphabet' FROM 3 FOR '2')
+----
+ph
 
-query error
+query T
 SELECT substring('alphabet' FOR '2')
+----
+al
 
 ##### csv_query_nullif_divide_by_0
 

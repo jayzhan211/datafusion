@@ -27,7 +27,7 @@ use arrow::datatypes::{
 
 use datafusion_common::{exec_err, not_impl_err, Result};
 
-use crate::type_coercion::aggregates::{avg_return_type, coerce_avg_type, NUMERICS};
+use crate::type_coercion::aggregates::{avg_return_type, coerce_avg_type};
 use crate::Volatility::Immutable;
 use crate::{
     expr::AggregateFunction,
@@ -463,7 +463,7 @@ impl Avg {
     pub fn new() -> Self {
         Self {
             aliases: vec![String::from("mean")],
-            signature: Signature::uniform(1, NUMERICS.to_vec(), Immutable),
+            signature: Signature::numeric(1, Immutable),
         }
     }
 }

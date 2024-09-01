@@ -50,12 +50,7 @@ impl LogFunc {
         use DataType::*;
         Self {
             signature: Signature::one_of(
-                vec![
-                    Exact(vec![Float32]),
-                    Exact(vec![Float64]),
-                    Exact(vec![Float32, Float32]),
-                    Exact(vec![Float64, Float64]),
-                ],
+                vec![Exact(vec![Float64]), Exact(vec![Float64, Float64])],
                 Volatility::Immutable,
             ),
         }

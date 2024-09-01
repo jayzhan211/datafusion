@@ -19,8 +19,10 @@ use arrow::array::Array;
 use arrow::compute::is_not_null;
 use arrow::compute::kernels::zip::zip;
 use arrow::datatypes::DataType;
-use datafusion_common::{internal_err, Result};
-use datafusion_expr::{ColumnarValue, ScalarUDFImpl, Signature, Volatility};
+use datafusion_common::{exec_err, internal_err, Result};
+use datafusion_expr::{
+    binary::type_union_resolution, ColumnarValue, ScalarUDFImpl, Signature, Volatility,
+};
 use std::sync::Arc;
 
 #[derive(Debug)]
@@ -28,25 +30,6 @@ pub struct NVLFunc {
     signature: Signature,
     aliases: Vec<String>,
 }
-
-/// Currently supported types by the nvl/ifnull function.
-/// The order of these types correspond to the order on which coercion applies
-/// This should thus be from least informative to most informative
-static SUPPORTED_NVL_TYPES: &[DataType] = &[
-    DataType::Boolean,
-    DataType::UInt8,
-    DataType::UInt16,
-    DataType::UInt32,
-    DataType::UInt64,
-    DataType::Int8,
-    DataType::Int16,
-    DataType::Int32,
-    DataType::Int64,
-    DataType::Float32,
-    DataType::Float64,
-    DataType::Utf8,
-    DataType::LargeUtf8,
-];
 
 impl Default for NVLFunc {
     fn default() -> Self {
@@ -57,11 +40,7 @@ impl Default for NVLFunc {
 impl NVLFunc {
     pub fn new() -> Self {
         Self {
-            signature: Signature::uniform(
-                2,
-                SUPPORTED_NVL_TYPES.to_vec(),
-                Volatility::Immutable,
-            ),
+            signature: Signature::user_defined(Volatility::Immutable),
             aliases: vec![String::from("ifnull")],
         }
     }
@@ -90,6 +69,15 @@ impl ScalarUDFImpl for NVLFunc {
 
     fn aliases(&self) -> &[String] {
         &self.aliases
+    }
+
+    fn coerce_types(&self, arg_types: &[DataType]) -> Result<Vec<DataType>> {
+        if arg_types.is_empty() {
+            return exec_err!("nvl must have at least one argument");
+        }
+        let new_type = type_union_resolution(arg_types)
+            .unwrap_or(arg_types.first().unwrap().clone());
+        Ok(vec![new_type; arg_types.len()])
     }
 }
 

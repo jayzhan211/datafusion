@@ -672,9 +672,10 @@ select lcm(1, -9223372036854775808);
 query error DataFusion error: Arrow error: Compute error: Signed integer overflow in LCM\(2, 9223372036854775803\)
 select lcm(2, 9223372036854775803);
 
-
-query error DataFusion error: Arrow error: Compute error: Overflow happened on: 2107754225 \^ 1221660777
+query R
 select power(2107754225, 1221660777);
+----
+Infinity
 
 # factorial overflow
 query error DataFusion error: Arrow error: Compute error: Overflow happened on FACTORIAL\(350943270\)

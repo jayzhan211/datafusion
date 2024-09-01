@@ -29,10 +29,9 @@ use arrow::{
 
 use crate::covariance::CovarianceAccumulator;
 use crate::stddev::StddevAccumulator;
-use datafusion_common::{plan_err, Result, ScalarValue};
+use datafusion_common::{Result, ScalarValue};
 use datafusion_expr::{
     function::{AccumulatorArgs, StateFieldsArgs},
-    type_coercion::aggregates::NUMERICS,
     utils::format_state_name,
     Accumulator, AggregateUDFImpl, Signature, Volatility,
 };
@@ -61,7 +60,7 @@ impl Correlation {
     /// Create a new COVAR_POP aggregate function
     pub fn new() -> Self {
         Self {
-            signature: Signature::uniform(2, NUMERICS.to_vec(), Volatility::Immutable),
+            signature: Signature::numeric(2, Volatility::Immutable),
         }
     }
 }
@@ -80,11 +79,7 @@ impl AggregateUDFImpl for Correlation {
         &self.signature
     }
 
-    fn return_type(&self, arg_types: &[DataType]) -> Result<DataType> {
-        if !arg_types[0].is_numeric() {
-            return plan_err!("Correlation requires numeric input types");
-        }
-
+    fn return_type(&self, _arg_types: &[DataType]) -> Result<DataType> {
         Ok(DataType::Float64)
     }
 

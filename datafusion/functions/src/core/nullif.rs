@@ -17,7 +17,7 @@
 
 use arrow::datatypes::DataType;
 use datafusion_common::{exec_err, Result};
-use datafusion_expr::ColumnarValue;
+use datafusion_expr::{binary::type_union_resolution, ColumnarValue};
 
 use arrow::compute::kernels::cmp::eq;
 use arrow::compute::kernels::nullif::nullif;
@@ -30,25 +30,6 @@ pub struct NullIfFunc {
     signature: Signature,
 }
 
-/// Currently supported types by the nullif function.
-/// The order of these types correspond to the order on which coercion applies
-/// This should thus be from least informative to most informative
-static SUPPORTED_NULLIF_TYPES: &[DataType] = &[
-    DataType::Boolean,
-    DataType::UInt8,
-    DataType::UInt16,
-    DataType::UInt32,
-    DataType::UInt64,
-    DataType::Int8,
-    DataType::Int16,
-    DataType::Int32,
-    DataType::Int64,
-    DataType::Float32,
-    DataType::Float64,
-    DataType::Utf8,
-    DataType::LargeUtf8,
-];
-
 impl Default for NullIfFunc {
     fn default() -> Self {
         Self::new()
@@ -58,11 +39,7 @@ impl Default for NullIfFunc {
 impl NullIfFunc {
     pub fn new() -> Self {
         Self {
-            signature: Signature::uniform(
-                2,
-                SUPPORTED_NULLIF_TYPES.to_vec(),
-                Volatility::Immutable,
-            ),
+            signature: Signature::user_defined(Volatility::Immutable),
         }
     }
 }
@@ -80,18 +57,20 @@ impl ScalarUDFImpl for NullIfFunc {
     }
 
     fn return_type(&self, arg_types: &[DataType]) -> Result<DataType> {
-        // NULLIF has two args and they might get coerced, get a preview of this
-        let coerced_types = datafusion_expr::type_coercion::functions::data_types(
-            arg_types,
-            &self.signature,
-        );
-        coerced_types
-            .map(|typs| typs[0].clone())
-            .map_err(|e| e.context("Failed to coerce arguments for NULLIF"))
+        Ok(arg_types[0].to_owned())
     }
 
     fn invoke(&self, args: &[ColumnarValue]) -> Result<ColumnarValue> {
         nullif_func(args)
+    }
+
+    fn coerce_types(&self, arg_types: &[DataType]) -> Result<Vec<DataType>> {
+        if arg_types.is_empty() {
+            return exec_err!("nullif must have at least one argument");
+        }
+        let new_type = type_union_resolution(arg_types)
+            .unwrap_or(arg_types.first().unwrap().clone());
+        Ok(vec![new_type; arg_types.len()])
     }
 }
 

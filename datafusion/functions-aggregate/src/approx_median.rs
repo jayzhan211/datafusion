@@ -23,9 +23,8 @@ use std::fmt::Debug;
 use arrow::{datatypes::DataType, datatypes::Field};
 use arrow_schema::DataType::{Float64, UInt64};
 
-use datafusion_common::{not_impl_err, plan_err, Result};
+use datafusion_common::{not_impl_err, Result};
 use datafusion_expr::function::{AccumulatorArgs, StateFieldsArgs};
-use datafusion_expr::type_coercion::aggregates::NUMERICS;
 use datafusion_expr::utils::format_state_name;
 use datafusion_expr::{Accumulator, AggregateUDFImpl, Signature, Volatility};
 
@@ -63,7 +62,7 @@ impl ApproxMedian {
     /// Create a new APPROX_MEDIAN aggregate function
     pub fn new() -> Self {
         Self {
-            signature: Signature::uniform(1, NUMERICS.to_vec(), Volatility::Immutable),
+            signature: Signature::coericble(vec![Float64], Volatility::Immutable),
         }
     }
 }
@@ -98,9 +97,6 @@ impl AggregateUDFImpl for ApproxMedian {
     }
 
     fn return_type(&self, arg_types: &[DataType]) -> Result<DataType> {
-        if !arg_types[0].is_numeric() {
-            return plan_err!("ApproxMedian requires numeric input types");
-        }
         Ok(arg_types[0].clone())
     }
 

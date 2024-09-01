@@ -105,6 +105,7 @@ pub enum TypeSignature {
     Uniform(usize, Vec<DataType>),
     /// Exact number of arguments of the target coerce type
     Exact(Vec<DataType>),
+    Coercible(Vec<DataType>),
     /// Fixed number of arguments of arbitrary types
     /// If a function takes 0 argument, its `TypeSignature` should be `Any(0)`
     Any(usize),
@@ -191,6 +192,9 @@ impl TypeSignature {
             TypeSignature::Exact(types) => {
                 vec![Self::join_types(types, ", ")]
             }
+            TypeSignature::Coercible(types) => {
+                vec![Self::join_types(types, ", ")]
+            }
             TypeSignature::Any(arg_count) => {
                 vec![std::iter::repeat("Any")
                     .take(*arg_count)
@@ -222,7 +226,7 @@ impl TypeSignature {
     /// Check whether 0 input argument is valid for given `TypeSignature`
     pub fn supports_zero_argument(&self) -> bool {
         match &self {
-            TypeSignature::Exact(vec) => vec.is_empty(),
+            TypeSignature::Exact(vec) | TypeSignature::Coercible(vec) => vec.is_empty(),
             TypeSignature::Uniform(0, _) | TypeSignature::Any(0) => true,
             TypeSignature::OneOf(types) => types
                 .iter()
@@ -300,6 +304,15 @@ impl Signature {
             volatility,
         }
     }
+    
+    /// Exactly matches the types in `exact_types`, in order.
+    pub fn coericble(target_types: Vec<DataType>, volatility: Volatility) -> Self {
+        Signature {
+            type_signature: TypeSignature::Coercible(target_types),
+            volatility,
+        }
+    }
+
     /// A specified number of arguments of any type
     pub fn any(arg_count: usize, volatility: Volatility) -> Self {
         Signature {

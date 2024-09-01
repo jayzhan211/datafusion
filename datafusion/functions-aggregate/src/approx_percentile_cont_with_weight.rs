@@ -19,17 +19,17 @@ use std::any::Any;
 use std::fmt::{Debug, Formatter};
 use std::sync::Arc;
 
+use arrow::compute::can_cast_types;
 use arrow::{
     array::ArrayRef,
     datatypes::{DataType, Field},
 };
 
-use datafusion_common::ScalarValue;
+use datafusion_common::{exec_err, ScalarValue};
 use datafusion_common::{not_impl_err, plan_err, Result};
 use datafusion_expr::function::{AccumulatorArgs, StateFieldsArgs};
-use datafusion_expr::type_coercion::aggregates::NUMERICS;
 use datafusion_expr::Volatility::Immutable;
-use datafusion_expr::{Accumulator, AggregateUDFImpl, Signature, TypeSignature};
+use datafusion_expr::{Accumulator, AggregateUDFImpl, Signature};
 use datafusion_functions_aggregate_common::tdigest::{
     Centroid, TDigest, DEFAULT_MAX_SIZE,
 };
@@ -68,20 +68,7 @@ impl ApproxPercentileContWithWeight {
     /// Create a new [`ApproxPercentileContWithWeight`] aggregate function.
     pub fn new() -> Self {
         Self {
-            signature: Signature::one_of(
-                // Accept any numeric value paired with a float64 percentile
-                NUMERICS
-                    .iter()
-                    .map(|t| {
-                        TypeSignature::Exact(vec![
-                            t.clone(),
-                            t.clone(),
-                            DataType::Float64,
-                        ])
-                    })
-                    .collect(),
-                Immutable,
-            ),
+            signature: Signature::user_defined(Immutable),
             approx_percentile_cont: ApproxPercentileCont::new(),
         }
     }
@@ -150,6 +137,26 @@ impl AggregateUDFImpl for ApproxPercentileContWithWeight {
     /// state.
     fn state_fields(&self, args: StateFieldsArgs) -> Result<Vec<Field>> {
         self.approx_percentile_cont.state_fields(args)
+    }
+
+    fn coerce_types(&self, arg_types: &[DataType]) -> Result<Vec<DataType>> {
+        if arg_types.len() != 3 {
+            return exec_err!("Expect to get 3 args")
+        }
+
+        if !can_cast_types(&arg_types[0],&DataType::Float64) {
+            return exec_err!("1st arguemnt {} is not coercible to f64", arg_types[0])
+        } 
+
+        if !can_cast_types(&arg_types[1],&DataType::Float64) {
+            return exec_err!("2nd arguemnt {} is not coercible to f64", arg_types[1])
+        } 
+
+        if arg_types[2] != DataType::Float64 {
+            return exec_err!("3rd arguemnt should be f64 but got {}", arg_types[2])
+        } 
+
+        Ok(vec![DataType::Float64; 3])
     }
 }
 

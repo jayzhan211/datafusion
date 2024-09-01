@@ -20,7 +20,7 @@ use std::fmt::{Debug, Formatter};
 use std::sync::Arc;
 
 use arrow::array::{Array, RecordBatch};
-use arrow::compute::{filter, is_not_null};
+use arrow::compute::{can_cast_types, filter, is_not_null};
 use arrow::{
     array::{
         ArrayRef, Float32Array, Float64Array, Int16Array, Int32Array, Int64Array,
@@ -31,14 +31,12 @@ use arrow::{
 use arrow_schema::{Field, Schema};
 
 use datafusion_common::{
-    downcast_value, internal_err, not_impl_datafusion_err, not_impl_err, plan_err,
-    DataFusionError, Result, ScalarValue,
+    downcast_value, exec_err, internal_err, not_impl_datafusion_err, not_impl_err, plan_err, DataFusionError, Result, ScalarValue
 };
 use datafusion_expr::function::{AccumulatorArgs, StateFieldsArgs};
-use datafusion_expr::type_coercion::aggregates::{INTEGERS, NUMERICS};
 use datafusion_expr::utils::format_state_name;
 use datafusion_expr::{
-    Accumulator, AggregateUDFImpl, ColumnarValue, Expr, Signature, TypeSignature,
+    Accumulator, AggregateUDFImpl, ColumnarValue, Expr, Signature,
     Volatility,
 };
 use datafusion_functions_aggregate_common::tdigest::{
@@ -84,21 +82,8 @@ impl Default for ApproxPercentileCont {
 impl ApproxPercentileCont {
     /// Create a new [`ApproxPercentileCont`] aggregate function.
     pub fn new() -> Self {
-        let mut variants = Vec::with_capacity(NUMERICS.len() * (INTEGERS.len() + 1));
-        // Accept any numeric value paired with a float64 percentile
-        for num in NUMERICS {
-            variants.push(TypeSignature::Exact(vec![num.clone(), DataType::Float64]));
-            // Additionally accept an integer number of centroids for T-Digest
-            for int in INTEGERS {
-                variants.push(TypeSignature::Exact(vec![
-                    num.clone(),
-                    DataType::Float64,
-                    int.clone(),
-                ]))
-            }
-        }
         Self {
-            signature: Signature::one_of(variants, Volatility::Immutable),
+            signature: Signature::user_defined(Volatility::Immutable),
         }
     }
 
@@ -141,6 +126,7 @@ impl ApproxPercentileCont {
 
         Ok(accumulator)
     }
+
 }
 
 fn get_scalar_value(expr: &Arc<dyn PhysicalExpr>) -> Result<ScalarValue> {
@@ -258,15 +244,39 @@ impl AggregateUDFImpl for ApproxPercentileCont {
     }
 
     fn return_type(&self, arg_types: &[DataType]) -> Result<DataType> {
-        if !arg_types[0].is_numeric() {
-            return plan_err!("approx_percentile_cont requires numeric input types");
-        }
-        if arg_types.len() == 3 && !arg_types[2].is_integer() {
-            return plan_err!(
-                "approx_percentile_cont requires integer max_size input types"
-            );
-        }
+        // if !arg_types[0].is_numeric() {
+        //     return plan_err!("approx_percentile_cont requires numeric input types");
+        // }
+        // if arg_types.len() == 3 && !arg_types[2].is_integer() {
+        //     return plan_err!(
+        //         "approx_percentile_cont requires integer max_size input types"
+        //     );
+        // }
         Ok(arg_types[0].clone())
+    }
+
+    fn coerce_types(&self, arg_types: &[DataType]) -> Result<Vec<DataType>> {
+        if arg_types.len() != 2 && arg_types.len() != 3 {
+            return exec_err!("Expect to get 2 or 3 args")
+        }
+
+        if !can_cast_types(&arg_types[0],&DataType::Float64) {
+            return exec_err!("1st argument {} is not coercible to f64", arg_types[0])
+        } 
+
+        if arg_types[1] != DataType::Float64 {
+            return exec_err!("Expect f64 for 2nd argument but got {}", arg_types[1])
+        } 
+
+        if arg_types.len() == 3 && !arg_types[2].is_integer() {
+            return exec_err!("Expect integer for 3rd argument but got {}", arg_types[2])
+        } 
+
+        if arg_types.len() == 2 {
+            Ok(vec![DataType::Float64; 2])
+        } else {
+            Ok(vec![DataType::Float64, DataType::Float64, DataType::UInt64])
+        }
     }
 }
 

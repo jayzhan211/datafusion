@@ -175,7 +175,15 @@ fn try_coerce_types(
     let mut valid_types = valid_types;
 
     // Well-supported signature that returns exact valid types.
-    if !valid_types.is_empty() && matches!(type_signature, TypeSignature::UserDefined | TypeSignature::Exact(..) | TypeSignature::Numeric(_)) {
+    if !valid_types.is_empty()
+        && matches!(
+            type_signature,
+            TypeSignature::UserDefined
+                | TypeSignature::Exact(_)
+                | TypeSignature::Coercible(_)
+                | TypeSignature::Numeric(_)
+        )
+    {
         // exact valid types
         assert_eq!(valid_types.len(), 1);
         let valid_types = valid_types.swap_remove(0);
@@ -410,15 +418,18 @@ fn get_valid_types(
             vec![current_types.to_vec()]
         }
         TypeSignature::Exact(valid_types) => {
-            for (t, valid_type) in current_types.iter().zip(valid_types.iter()) {
+            vec![valid_types.to_owned()]
+        }
+        TypeSignature::Coercible(target_types) => {
+            for (t, valid_type) in current_types.iter().zip(target_types.iter()) {
                 if !can_cast_types(t, valid_type) {
-                    return plan_err!("{t} is not coercible to {valid_type}")
+                    return plan_err!("{t} is not coercible to {valid_type}");
                 }
             }
 
-            vec![valid_types.to_owned()]
+            vec![target_types.to_owned()]
         }
-        
+
         TypeSignature::ArraySignature(ref function_signature) => match function_signature
         {
             ArrayFunctionSignature::ArrayAndElement => {
@@ -499,15 +510,21 @@ fn maybe_data_types(
         if current_type == valid_type {
             new_type.push(current_type.clone())
         } else {
-            // attempt to coerce.
-            // TODO: Replace with `can_cast_types` after failing cases are resolved
-            // (they need new signature that returns exactly valid types instead of list of possible valid types).
-            if let Some(coerced_type) = coerced_from(valid_type, current_type) {
-                new_type.push(coerced_type)
+            if can_cast_types(current_type, valid_type) {
+                new_type.push(valid_type.to_owned());
             } else {
-                // not possible
                 return None;
             }
+
+            // // attempt to coerce.
+            // // TODO: Replace with `can_cast_types` after failing cases are resolved
+            // // (they need new signature that returns exactly valid types instead of list of possible valid types).
+            // if let Some(coerced_type) = coerced_from(valid_type, current_type) {
+            //     new_type.push(coerced_type)
+            // } else {
+            //     // not possible
+            //     return None;
+            // }
         }
     }
     Some(new_type)

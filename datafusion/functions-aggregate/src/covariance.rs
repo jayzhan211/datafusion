@@ -26,12 +26,11 @@ use arrow::{
 };
 
 use datafusion_common::{
-    downcast_value, plan_err, unwrap_or_internal_err, DataFusionError, Result,
+    downcast_value, unwrap_or_internal_err, DataFusionError, Result,
     ScalarValue,
 };
 use datafusion_expr::{
     function::{AccumulatorArgs, StateFieldsArgs},
-    type_coercion::aggregates::NUMERICS,
     utils::format_state_name,
     Accumulator, AggregateUDFImpl, Signature, Volatility,
 };
@@ -77,7 +76,7 @@ impl CovarianceSample {
     pub fn new() -> Self {
         Self {
             aliases: vec![String::from("covar")],
-            signature: Signature::uniform(2, NUMERICS.to_vec(), Volatility::Immutable),
+            signature: Signature::numeric(2, Volatility::Immutable),
         }
     }
 }
@@ -95,11 +94,7 @@ impl AggregateUDFImpl for CovarianceSample {
         &self.signature
     }
 
-    fn return_type(&self, arg_types: &[DataType]) -> Result<DataType> {
-        if !arg_types[0].is_numeric() {
-            return plan_err!("Covariance requires numeric input types");
-        }
-
+    fn return_type(&self, _arg_types: &[DataType]) -> Result<DataType> {
         Ok(DataType::Float64)
     }
 
@@ -148,7 +143,7 @@ impl Default for CovariancePopulation {
 impl CovariancePopulation {
     pub fn new() -> Self {
         Self {
-            signature: Signature::uniform(2, NUMERICS.to_vec(), Volatility::Immutable),
+            signature: Signature::numeric(2, Volatility::Immutable),
         }
     }
 }
@@ -166,11 +161,7 @@ impl AggregateUDFImpl for CovariancePopulation {
         &self.signature
     }
 
-    fn return_type(&self, arg_types: &[DataType]) -> Result<DataType> {
-        if !arg_types[0].is_numeric() {
-            return plan_err!("Covariance requires numeric input types");
-        }
-
+    fn return_type(&self, _arg_types: &[DataType]) -> Result<DataType> {
         Ok(DataType::Float64)
     }
 

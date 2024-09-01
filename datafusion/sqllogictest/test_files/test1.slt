@@ -1,0 +1,15 @@
+statement ok
+create table t(a int, b int) as values (1, 2);
+
+query R
+select power(1.1, 2.1);
+----
+1.22158766516
+
+query R
+select power(2107754225, 1221660777);
+----
+Infinity
+
+query
+select covar()

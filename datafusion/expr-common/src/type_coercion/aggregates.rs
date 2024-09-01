@@ -101,7 +101,7 @@ pub fn check_arg_count(
                 );
             }
         }
-        TypeSignature::Exact(types) => {
+        TypeSignature::Exact(types) | TypeSignature::Coercible(types) => {
             if types.len() != input_types.len() {
                 return plan_err!(
                     "The function {func_name} expects {:?} arguments, but {:?} were provided",
