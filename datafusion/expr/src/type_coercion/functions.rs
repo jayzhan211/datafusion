@@ -175,7 +175,7 @@ fn try_coerce_types(
     let mut valid_types = valid_types;
 
     // Well-supported signature that returns exact valid types.
-    if !valid_types.is_empty() && matches!(type_signature, TypeSignature::UserDefined) {
+    if !valid_types.is_empty() && matches!(type_signature, TypeSignature::UserDefined | TypeSignature::Exact(..) | TypeSignature::Numeric(_)) {
         // exact valid types
         assert_eq!(valid_types.len(), 1);
         let valid_types = valid_types.swap_remove(0);
@@ -409,7 +409,16 @@ fn get_valid_types(
         TypeSignature::VariadicAny => {
             vec![current_types.to_vec()]
         }
-        TypeSignature::Exact(valid_types) => vec![valid_types.clone()],
+        TypeSignature::Exact(valid_types) => {
+            for (t, valid_type) in current_types.iter().zip(valid_types.iter()) {
+                if !can_cast_types(t, valid_type) {
+                    return plan_err!("{t} is not coercible to {valid_type}")
+                }
+            }
+
+            vec![valid_types.to_owned()]
+        }
+        
         TypeSignature::ArraySignature(ref function_signature) => match function_signature
         {
             ArrayFunctionSignature::ArrayAndElement => {
