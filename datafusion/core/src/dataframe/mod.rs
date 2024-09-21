@@ -1720,6 +1720,9 @@ mod tests {
     use crate::test_util::{register_aggregate_csv, test_table, test_table_with_name};
 
     use arrow::array::{self, Int32Array};
+    use arrow::datatypes::Int32Type;
+    use arrow_array::{DictionaryArray, StructArray};
+    use arrow_schema::Fields;
     use datafusion_common::{assert_batches_eq, Constraint, Constraints, ScalarValue};
     use datafusion_common_runtime::SpawnedTask;
     use datafusion_expr::expr::WindowFunction;
@@ -2098,6 +2101,94 @@ mod tests {
         );
 
         Ok(())
+    }
+
+
+    #[tokio::test]
+    async fn test123() {
+        let batch = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![
+                    Field::new(
+                        "labels",
+                        DataType::Struct(Fields::from(vec![
+                                Field::new_dict(
+                                    "a".to_string(),
+                                    DataType::Dictionary(Box::new(DataType::Int32), Box::new(DataType::Utf8)),
+                                    true,
+                                    0,
+                                    false,
+                                ),
+                                Field::new_dict(
+                                    "b".to_string(),
+                                    DataType::Dictionary(Box::new(DataType::Int32), Box::new(DataType::Utf8)),
+                                    true,
+                                    0,
+                                    false,
+                                ),
+                        ])),
+                        false,
+                    ),
+            ])),
+            vec![
+            Arc::new(StructArray::from(vec![
+                    (
+                        Arc::new(
+                            Field::new_dict(
+                                "a".to_string(),
+                                DataType::Dictionary(Box::new(DataType::Int32), Box::new(DataType::Utf8)),
+                                true,
+                                0,
+                                false,
+                            ),
+                        ),
+                        Arc::new(
+                            vec![Some("a"), None, Some("a")]
+                            .into_iter()
+                            .collect::<DictionaryArray<Int32Type>>()) as ArrayRef,
+                    ),
+                    (
+                        Arc::new(
+                            Field::new_dict(
+                                "b".to_string(),
+                                DataType::Dictionary(Box::new(DataType::Int32), Box::new(DataType::Utf8)),
+                                true,
+                                0,
+                                false,
+                            ),
+                        ),
+                        Arc::new(
+                            vec![Some("b"), Some("c"), Some("b")]
+                            .into_iter()
+                            .collect::<DictionaryArray<Int32Type>>()) as ArrayRef,
+                    ),
+            ])),
+            ],
+            )
+                .expect("Failed to create RecordBatch");
+    
+            // create the dataframe
+            // let config = SessionConfig::new().with_target_partitions(1);
+            let config = SessionConfig::new();
+            let ctx = SessionContext::new_with_config(config);
+            // let ctx = SessionContext::new();
+            ctx.register_table("testtable", Arc::new(
+                    MemTable::try_new(batch.schema(), vec![vec![batch]])
+                    .expect("Failed to create MemTable")
+            )).expect("Failed to register table");
+        
+            let result = ctx
+                .table("testtable")
+                
+
+                .await
+                .expect("Failed to get table")
+                .aggregate(vec![col("labels")], vec![count_distinct(col("labels"))])
+                .expect("Failed to execute query")
+                .collect()
+                .await
+                .expect("Failed to collect results");
+        
+            pretty::print_batches(&result).expect("Failed to print results");
     }
 
     #[tokio::test]

@@ -304,7 +304,13 @@ impl BatchPartitioner {
                                 .columns()
                                 .iter()
                                 .map(|c| {
-                                    arrow::compute::take(c.as_ref(), &indices, None)
+
+                                    println!("c: {:?}", c);
+                                    println!("indices: {:?}", indices);
+
+                                    let res = arrow::compute::take(c.as_ref(), &indices, None);
+                                    println!("res: {:?}", res);
+                                    res
                                         .map_err(|e| arrow_datafusion_err!(e))
                                 })
                                 .collect::<Result<Vec<ArrayRef>>>()?;
@@ -1029,11 +1035,27 @@ mod tests {
 
     use arrow::array::{StringArray, UInt32Array};
     use arrow::datatypes::{DataType, Field, Schema};
+    use arrow_array::{StructArray, UInt64Array};
+    use arrow_schema::Fields;
     use datafusion_common::cast::as_string_array;
     use datafusion_common::{assert_batches_sorted_eq, exec_err};
     use datafusion_execution::runtime_env::RuntimeEnvBuilder;
 
     use tokio::task::JoinSet;
+
+    #[test]
+    fn test123() {
+        let f1 = Field::new("a", DataType::Dictionary(Box::new(DataType::Int32), Box::new(DataType::Utf8)), true);
+        let f2 = Field::new("b", DataType::Dictionary(Box::new(DataType::Int32), Box::new(DataType::Utf8)), true);
+        let a1 = Arc::new(StringArray::from(vec![Some("a"), None])) as ArrayRef;
+        let b1 = Arc::new(StringArray::from(vec![Some("b"), Some("c")])) as ArrayRef;
+        let c = Arc::new(StructArray::new(Fields::from(vec![f1, f2]), vec![a1, b1], None)) as ArrayRef;
+        println!("c: {:?}", c);
+        let indices = UInt64Array::from(vec![1]);
+        let res = arrow::compute::take(c.as_ref(), &indices, None);
+        println!("res: {:?}", res);
+
+    }
 
     #[tokio::test]
     async fn one_to_many_round_robin() -> Result<()> {
