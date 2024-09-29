@@ -1,0 +1,23 @@
+statement ok
+create table t(a int, b varchar) as values (1, 'a'), (2, 'b'), (1, 'a'), (3, 'c');
+
+query ITI
+select a, b, count(*) from t group by a, b;
+----
+2 b 1
+3 c 1
+1 a 2
+
+query TT
+explain select a, b, count(*) from t group by a, b;
+----
+logical_plan
+01)Aggregate: groupBy=[[t.a, t.b]], aggr=[[count(Int64(1)) AS count(*)]]
+02)--TableScan: t projection=[a, b]
+physical_plan
+01)AggregateExec: mode=FinalPartitioned, gby=[a@0 as a, b@1 as b], aggr=[count(*)]
+02)--CoalesceBatchesExec: target_batch_size=8192
+03)----RepartitionExec: partitioning=Hash([a@0, b@1], 4), input_partitions=4
+04)------RepartitionExec: partitioning=RoundRobinBatch(4), input_partitions=1
+05)--------AggregateExec: mode=Partial, gby=[a@0 as a, b@1 as b], aggr=[count(*)]
+06)----------MemoryExec: partitions=1, partition_sizes=[1]

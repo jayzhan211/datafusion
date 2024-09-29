@@ -264,10 +264,16 @@ impl BatchPartitioner {
                     // Tracking time required for distributing indexes across output partitions
                     let timer = self.timer.timer();
 
+
+                    // println!("partitions: {:?}", partitions);
+                    // println!("row size: {:?}", batch.num_rows());
+
                     let arrays = exprs
                         .iter()
                         .map(|expr| expr.evaluate(&batch)?.into_array(batch.num_rows()))
                         .collect::<Result<Vec<_>>>()?;
+
+                    // println!("arrays: {:?}", arrays[0].len());
 
                     hash_buffer.clear();
                     hash_buffer.resize(batch.num_rows(), 0);
@@ -298,6 +304,7 @@ impl BatchPartitioner {
                             // Tracking time required for repartitioned batches construction
                             let _timer = partitioner_timer.timer();
 
+                            // println!("indices len: {:?}", indices.len());
                             // Produce batches based on indices
                             let columns = take_arrays(batch.columns(), &indices)?;
 
@@ -310,6 +317,7 @@ impl BatchPartitioner {
                             )
                             .unwrap();
 
+                            // println!("row2 len: {:?}", batch.num_rows());
                             Ok((partition, batch))
                         });
 

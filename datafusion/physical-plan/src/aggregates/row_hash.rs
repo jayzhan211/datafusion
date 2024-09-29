@@ -796,6 +796,8 @@ impl GroupedHashAggregateStream {
         };
 
         for group_values in &group_by_values {
+            // println!("mode: {:?} group_values len: {:?}", self.mode, group_values[0].len());
+
             // calculate the group indices for each input row
             let starting_num_groups = self.group_values.len();
             self.group_values
