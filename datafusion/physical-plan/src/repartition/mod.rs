@@ -54,11 +54,13 @@ use hashbrown::HashMap;
 use log::trace;
 use parking_lot::Mutex;
 
-mod distributor_channels;
+pub(crate) mod distributor_channels;
 
-type MaybeBatch = Option<Result<RecordBatch>>;
-type InputPartitionsToCurrentPartitionSender = Vec<DistributionSender<MaybeBatch>>;
-type InputPartitionsToCurrentPartitionReceiver = Vec<DistributionReceiver<MaybeBatch>>;
+pub(crate) type MaybeBatch = Option<Result<RecordBatch>>;
+pub(crate) type InputPartitionsToCurrentPartitionSender =
+    Vec<DistributionSender<MaybeBatch>>;
+pub(crate) type InputPartitionsToCurrentPartitionReceiver =
+    Vec<DistributionReceiver<MaybeBatch>>;
 
 /// Inner state of [`RepartitionExec`].
 #[derive(Debug)]
@@ -171,7 +173,7 @@ impl RepartitionExecState {
 ///
 /// Uses a parking_lot `Mutex` to control other accesses as they are very short duration
 ///  (e.g. removing channels on completion) where the overhead of `await` is not warranted.
-type LazyState = Arc<tokio::sync::OnceCell<Mutex<RepartitionExecState>>>;
+pub(crate) type LazyState = Arc<tokio::sync::OnceCell<Mutex<RepartitionExecState>>>;
 
 /// A utility that can be used to partition batches based on [`Partitioning`]
 pub struct BatchPartitioner {
@@ -264,7 +266,6 @@ impl BatchPartitioner {
                     // Tracking time required for distributing indexes across output partitions
                     let timer = self.timer.timer();
 
-
                     // println!("partitions: {:?}", partitions);
                     // println!("row size: {:?}", batch.num_rows());
 
@@ -274,6 +275,7 @@ impl BatchPartitioner {
                         .collect::<Result<Vec<_>>>()?;
 
                     // println!("arrays: {:?}", arrays[0].len());
+                    // println!("arrays: {:?}", arrays);
 
                     hash_buffer.clear();
                     hash_buffer.resize(batch.num_rows(), 0);
@@ -287,6 +289,8 @@ impl BatchPartitioner {
                     for (index, hash) in hash_buffer.iter().enumerate() {
                         indices[(*hash % *partitions as u64) as usize].push(index as u32);
                     }
+
+                    println!("indices: {:?}", indices);
 
                     // Finished building index-arrays for output partitions
                     timer.done();
@@ -305,8 +309,10 @@ impl BatchPartitioner {
                             let _timer = partitioner_timer.timer();
 
                             // println!("indices len: {:?}", indices.len());
+                            // println!("indices: {:?}", indices);
                             // Produce batches based on indices
                             let columns = take_arrays(batch.columns(), &indices)?;
+                            // println!("columns: {:?}", columns);
 
                             let mut options = RecordBatchOptions::new();
                             options = options.with_row_count(Some(indices.len()));
@@ -316,6 +322,7 @@ impl BatchPartitioner {
                                 &options,
                             )
                             .unwrap();
+                            println!("{:?} repartitioned batch: {:?}", partition, batch);
 
                             // println!("row2 len: {:?}", batch.num_rows());
                             Ok((partition, batch))
@@ -420,7 +427,7 @@ pub struct RepartitionExec {
 }
 
 #[derive(Debug, Clone)]
-struct RepartitionMetrics {
+pub struct RepartitionMetrics {
     /// Time in nanos to execute child operator and fetch batches
     fetch_time: metrics::Time,
     /// Repartitioning elapsed time in nanos
@@ -806,8 +813,11 @@ impl RepartitionExec {
                 None => break,
             };
 
+            // println!("repartition batch: {:?}", batch);
+
             for res in partitioner.partition_iter(batch)? {
                 let (partition, batch) = res?;
+                // println!("partition: {:?} batch: {:?}", partition, batch);
                 let size = batch.get_array_memory_size();
 
                 let timer = metrics.send_time[partition].timer();
@@ -929,6 +939,7 @@ impl Stream for RepartitionStream {
             match self.input.recv().poll_unpin(cx) {
                 Poll::Ready(Some(Some(v))) => {
                     if let Ok(batch) = &v {
+                        // println!("repa fin batch: {:?}", batch);
                         self.reservation
                             .lock()
                             .shrink(batch.get_array_memory_size());

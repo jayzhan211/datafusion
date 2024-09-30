@@ -35,6 +35,7 @@ use datafusion_expr::EmitTo;
 use datafusion_physical_expr::binary_map::OutputType;
 
 use hashbrown::raw::RawTable;
+use itertools::Itertools;
 
 /// Compare GroupValue Rows column by column
 pub struct GroupValuesColumn {
@@ -64,11 +65,15 @@ pub struct GroupValuesColumn {
 
     /// Random state for creating hashes
     random_state: RandomState,
+
+    num_partitions: Option<usize>,
+    partitioned_index: Vec<Vec<u32>>,
 }
 
 impl GroupValuesColumn {
     /// Create a new instance of GroupValuesColumn if supported for the specified schema
-    pub fn try_new(schema: SchemaRef) -> Result<Self> {
+    pub fn try_new(schema: SchemaRef, num_partitions: Option<usize>) -> Result<Self> {
+        // println!("num_partitions: {:?}", num_partitions);
         let map = RawTable::with_capacity(0);
         Ok(Self {
             schema,
@@ -76,7 +81,10 @@ impl GroupValuesColumn {
             map_size: 0,
             group_values: vec![],
             hashes_buffer: Default::default(),
-            random_state: Default::default(),
+            // random_state: Default::default(),
+            random_state: RandomState::with_seeds(0, 0, 0, 0),
+            num_partitions,
+            partitioned_index: Default::default(),
         })
     }
 
@@ -207,6 +215,8 @@ impl GroupValues for GroupValuesColumn {
         batch_hashes.resize(n_rows, 0);
         create_hashes(cols, &self.random_state, batch_hashes)?;
 
+        let mut max_group_index = 0;
+
         for (row, &target_hash) in batch_hashes.iter().enumerate() {
             let entry = self.map.get_mut(target_hash, |(exist_hash, group_idx)| {
                 // Somewhat surprisingly, this closure can be called even if the
@@ -266,9 +276,33 @@ impl GroupValues for GroupValuesColumn {
                 }
             };
             groups.push(group_idx);
+            if group_idx > max_group_index {
+                max_group_index = group_idx;
+            }
+        }
+
+        if let Some(num_partitions) = self.num_partitions {
+            let mut indices: Vec<_> = (0..num_partitions)
+                .map(|_| Vec::with_capacity(groups.len()))
+                .collect();
+
+            for group_index in groups.iter().sorted().dedup() {
+                let index = batch_hashes[*group_index] as usize % num_partitions;
+                indices[index].push(*group_index as u32);
+            }
+
+            self.partitioned_index = indices;
+
+            // println!("cols: {:?}", cols);
+            // println!("groups: {:?}", groups);
+            // println!("final indices: {:?}", self.partitioned_index);
         }
 
         Ok(())
+    }
+
+    fn get_partitioned_index(&self) -> Vec<Vec<u32>> {
+        self.partitioned_index.clone()
     }
 
     fn size(&self) -> usize {

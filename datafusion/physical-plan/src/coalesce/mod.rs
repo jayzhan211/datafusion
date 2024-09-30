@@ -115,13 +115,17 @@ impl BatchCoalescer {
     /// state of the buffer.
     pub fn push_batch(&mut self, batch: RecordBatch) -> CoalescerState {
         let batch = gc_string_view_batch(&batch);
-        if self.limit_reached(&batch) {
+        println!("push batch: {:?}", batch);
+        let s = if self.limit_reached(&batch) {
             CoalescerState::LimitReached
         } else if self.target_reached(batch) {
             CoalescerState::TargetReached
         } else {
             CoalescerState::Continue
-        }
+        };
+
+        println!("state: {:?}", s);
+        s
     }
 
     /// Return true if the there is no data buffered
@@ -181,6 +185,7 @@ impl BatchCoalescer {
 /// [`BatchCoalescer::push_batch()`] operation.
 ///
 /// The caller should take diferent actions, depending on the variant returned.
+#[derive(Debug)]
 pub enum CoalescerState {
     /// Neither the limit nor the target batch size is reached.
     ///

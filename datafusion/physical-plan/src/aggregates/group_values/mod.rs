@@ -56,9 +56,16 @@ pub trait GroupValues: Send {
 
     /// Clear the contents and shrink the capacity to the size of the batch (free up memory usage)
     fn clear_shrink(&mut self, batch: &RecordBatch);
+
+    fn get_partitioned_index(&self) -> Vec<Vec<u32>> {
+        Vec::default()
+    }
 }
 
-pub fn new_group_values(schema: SchemaRef) -> Result<Box<dyn GroupValues>> {
+pub fn new_group_values(
+    schema: SchemaRef,
+    num_partitions: Option<usize>,
+) -> Result<Box<dyn GroupValues>> {
     if schema.fields.len() == 1 {
         let d = schema.fields[0].data_type();
 
@@ -97,7 +104,10 @@ pub fn new_group_values(schema: SchemaRef) -> Result<Box<dyn GroupValues>> {
     }
 
     if GroupValuesColumn::supported_schema(schema.as_ref()) {
-        Ok(Box::new(GroupValuesColumn::try_new(schema)?))
+        Ok(Box::new(GroupValuesColumn::try_new(
+            schema,
+            num_partitions,
+        )?))
     } else {
         Ok(Box::new(GroupValuesRows::try_new(schema)?))
     }

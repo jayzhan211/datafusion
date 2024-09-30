@@ -25,7 +25,14 @@ use crate::aggregates::{
     no_grouping::AggregateStream, row_hash::GroupedHashAggregateStream,
     topk_stream::GroupedTopKAggregateStream,
 };
+use crate::common::SharedMemoryReservation;
 use crate::metrics::{ExecutionPlanMetricsSet, MetricsSet};
+use crate::repartition::distributor_channels::{channels, DistributionSender};
+use crate::repartition::{
+    InputPartitionsToCurrentPartitionReceiver, InputPartitionsToCurrentPartitionSender,
+    MaybeBatch, RepartitionExec, RepartitionMetrics,
+};
+use crate::stream::RecordBatchStreamAdapter;
 use crate::windows::get_ordered_partition_by_indices;
 use crate::{
     DisplayFormatType, Distribution, ExecutionPlan, InputOrderMode,
@@ -36,9 +43,12 @@ use arrow::array::ArrayRef;
 use arrow::datatypes::{Field, Schema, SchemaRef};
 use arrow::record_batch::RecordBatch;
 use datafusion_common::stats::Precision;
-use datafusion_common::{internal_err, not_impl_err, Result};
+use datafusion_common::{internal_err, not_impl_err, DataFusionError, Result};
+use datafusion_common_runtime::SpawnedTask;
+use datafusion_execution::memory_pool::MemoryConsumer;
 use datafusion_execution::TaskContext;
 use datafusion_expr::Accumulator;
+use datafusion_physical_expr::Partitioning;
 use datafusion_physical_expr::{
     equivalence::{collapse_lex_req, ProjectionMapping},
     expressions::Column,
@@ -47,7 +57,10 @@ use datafusion_physical_expr::{
 };
 
 use datafusion_physical_expr::aggregate::AggregateFunctionExpr;
+use futures::{StreamExt, TryStreamExt};
+use hashbrown::HashMap;
 use itertools::Itertools;
+use parking_lot::Mutex;
 
 pub mod group_values;
 mod no_grouping;
@@ -92,6 +105,7 @@ pub enum AggregateMode {
     /// This mode requires that the input is partitioned by group key (like
     /// FinalPartitioned)
     SinglePartitioned,
+    SinglePartitionedV2,
 }
 
 impl AggregateMode {
@@ -103,6 +117,7 @@ impl AggregateMode {
             AggregateMode::Partial
             | AggregateMode::Single
             | AggregateMode::SinglePartitioned => true,
+            AggregateMode::SinglePartitionedV2 => true,
             AggregateMode::Final | AggregateMode::FinalPartitioned => false,
         }
     }
@@ -254,6 +269,105 @@ impl From<StreamType> for SendableRecordBatchStream {
     }
 }
 
+type LazyState = Arc<tokio::sync::OnceCell<Mutex<GroupRepartitionExecState>>>;
+
+/// Inner state of [`RepartitionExec`].
+#[derive(Debug)]
+struct GroupRepartitionExecState {
+    /// Channels for sending batches from input partitions to output partitions.
+    /// Key is the partition number.
+    channels: HashMap<
+        usize,
+        (
+            InputPartitionsToCurrentPartitionSender,
+            InputPartitionsToCurrentPartitionReceiver,
+            SharedMemoryReservation,
+        ),
+    >,
+
+    /// Helper that ensures that that background job is killed once it is no longer needed.
+    abort_helper: Arc<Vec<SpawnedTask<()>>>,
+}
+
+impl GroupRepartitionExecState {
+    fn new(
+        input: Arc<dyn ExecutionPlan>,
+        // partitioning: Partitioning,
+        metrics: ExecutionPlanMetricsSet,
+        // preserve_order: bool,
+        name: String,
+        context: Arc<TaskContext>,
+    ) -> Self {
+        let num_input_partitions = input.output_partitioning().partition_count();
+        // let num_output_partitions = partitioning.partition_count();
+        let num_output_partitions = 4;
+
+        let preserve_order = false;
+        let (txs, rxs) = if preserve_order {
+            todo!("")
+        } else {
+            // create one channel per *output* partition
+            // note we use a custom channel that ensures there is always data for each receiver
+            // but limits the amount of buffering if required.
+            let (txs, rxs) = channels(num_output_partitions);
+            // Clone sender for each input partitions
+            let txs = txs
+                .into_iter()
+                .map(|item| vec![item; num_input_partitions])
+                .collect::<Vec<_>>();
+            let rxs = rxs.into_iter().map(|item| vec![item]).collect::<Vec<_>>();
+            (txs, rxs)
+        };
+
+        let mut channels = HashMap::with_capacity(txs.len());
+        for (partition, (tx, rx)) in txs.into_iter().zip(rxs).enumerate() {
+            let reservation = Arc::new(Mutex::new(
+                MemoryConsumer::new(format!("{}[{partition}]", name))
+                    .register(context.memory_pool()),
+            ));
+            channels.insert(partition, (tx, rx, reservation));
+        }
+
+        // launch one async task per *input* partition
+        let mut spawned_tasks = Vec::with_capacity(num_input_partitions);
+        for i in 0..num_input_partitions {
+            let txs: HashMap<_, _> = channels
+                .iter()
+                .map(|(partition, (tx, _rx, reservation))| {
+                    (*partition, (tx[i].clone(), Arc::clone(reservation)))
+                })
+                .collect();
+
+            let r_metrics = RepartitionMetrics::new(i, num_output_partitions, &metrics);
+
+            let input_task =
+                SpawnedTask::spawn(AggregateExec::pull_from_input_for_group_partitioned(
+                    Arc::clone(&input),
+                    i,
+                    txs.clone(),
+                    // partitioning.clone(),
+                    r_metrics,
+                    Arc::clone(&context),
+                ));
+
+            // In a separate task, wait for each input to be done
+            // (and pass along any errors, including panic!s)
+            let wait_for_task = SpawnedTask::spawn(AggregateExec::wait_for_task(
+                input_task,
+                txs.into_iter()
+                    .map(|(partition, (tx, _reservation))| (partition, tx))
+                    .collect(),
+            ));
+            spawned_tasks.push(wait_for_task);
+        }
+
+        Self {
+            channels,
+            abort_helper: Arc::new(spawned_tasks),
+        }
+    }
+}
+
 /// Hash aggregate execution plan
 #[derive(Debug)]
 pub struct AggregateExec {
@@ -283,6 +397,7 @@ pub struct AggregateExec {
     /// Describes how the input is ordered relative to the group by columns
     input_order_mode: InputOrderMode,
     cache: PlanProperties,
+    state: LazyState,
 }
 
 impl AggregateExec {
@@ -304,6 +419,7 @@ impl AggregateExec {
             input: Arc::clone(&self.input),
             schema: Arc::clone(&self.schema),
             input_schema: Arc::clone(&self.input_schema),
+            state: Default::default(),
         }
     }
 
@@ -438,6 +554,7 @@ impl AggregateExec {
             limit: None,
             input_order_mode,
             cache,
+            state: Default::default(),
         })
     }
 
@@ -507,10 +624,74 @@ impl AggregateExec {
             }
         }
 
-        // grouping by something else and we need to just materialize all results
-        Ok(StreamType::GroupedHash(GroupedHashAggregateStream::new(
-            self, context, partition,
-        )?))
+        todo!("")
+    }
+
+    async fn pull_from_input_for_group_partitioned(
+        input: Arc<dyn ExecutionPlan>,
+        partition: usize,
+        mut output_channels: HashMap<
+            usize,
+            (DistributionSender<MaybeBatch>, SharedMemoryReservation),
+        >,
+        // partitioning: Partitioning,
+        metrics: RepartitionMetrics,
+        context: Arc<TaskContext>,
+    ) -> Result<()> {
+        let mut stream = input.execute(partition, context)?;
+
+        let mut batches_until_yield = 4;
+        while !output_channels.is_empty() {
+            let result = stream.next().await;
+            // Input is done
+            let batch = match result {
+                Some(result) => result?,
+                None => break,
+            };
+        }
+
+        Ok(())
+    }
+
+    // TODO: Resue from RepartitionExec
+    async fn wait_for_task(
+        input_task: SpawnedTask<Result<()>>,
+        txs: HashMap<usize, DistributionSender<MaybeBatch>>,
+    ) {
+        // wait for completion, and propagate error
+        // note we ignore errors on send (.ok) as that means the receiver has already shutdown.
+
+        match input_task.join().await {
+            // Error in joining task
+            Err(e) => {
+                let e = Arc::new(e);
+
+                for (_, tx) in txs {
+                    let err = Err(DataFusionError::Context(
+                        "Join Error".to_string(),
+                        Box::new(DataFusionError::External(Box::new(Arc::clone(&e)))),
+                    ));
+                    tx.send(Some(err)).await.ok();
+                }
+            }
+            // Error from running input task
+            Ok(Err(e)) => {
+                let e = Arc::new(e);
+
+                for (_, tx) in txs {
+                    // wrap it because need to send error to all output partitions
+                    let err = Err(DataFusionError::External(Box::new(Arc::clone(&e))));
+                    tx.send(Some(err)).await.ok();
+                }
+            }
+            // Input task completed successfully
+            Ok(Ok(())) => {
+                // notify each output partition that this input partition has no more data
+                for (_, tx) in txs {
+                    tx.send(None).await.ok();
+                }
+            }
+        }
     }
 
     /// Finds the DataType and SortDirection for this Aggregate, if there is one
@@ -690,6 +871,10 @@ impl ExecutionPlan for AggregateExec {
             AggregateMode::Partial => {
                 vec![Distribution::UnspecifiedDistribution]
             }
+            AggregateMode::SinglePartitionedV2 => {
+                // vec![Distribution::HashPartitioned(self.group_by.input_exprs())]
+                vec![Distribution::SinglePartition]
+            }
             AggregateMode::FinalPartitioned | AggregateMode::SinglePartitioned => {
                 vec![Distribution::HashPartitioned(self.group_by.input_exprs())]
             }
@@ -730,8 +915,110 @@ impl ExecutionPlan for AggregateExec {
         partition: usize,
         context: Arc<TaskContext>,
     ) -> Result<SendableRecordBatchStream> {
-        self.execute_typed(partition, context)
-            .map(|stream| stream.into())
+        // no group by at all
+        if self.group_by.expr.is_empty() {
+            return Ok(StreamType::AggregateStream(AggregateStream::new(
+                self, context, partition,
+            )?))
+            .map(|a| a.into());
+        }
+
+        // grouping by an expression that has a sort/limit upstream
+        if let Some(limit) = self.limit {
+            if !self.is_unordered_unfiltered_group_by_distinct() {
+                return Ok(StreamType::GroupedPriorityQueue(
+                    GroupedTopKAggregateStream::new(self, context, partition, limit)?,
+                ))
+                .map(|a| a.into());
+            }
+        }
+
+        // GroupPartition Singleton
+        // Create for all the partition
+        // Do grouping and repartition
+        // Run stream for reading channel
+
+        let lazy_state = Arc::clone(&self.state);
+        let input = Arc::clone(&self.input);
+        let metrics = self.metrics.clone();
+        let name = self.name().to_owned();
+        // let partitioning = Partitioning::Hash((), ());
+        let schema = self.schema();
+
+        let agg = self.clone();
+
+        let num_input_partitions = input.output_partitioning().partition_count();
+
+        let stream = futures::stream::once(async move {
+            let input_captured = Arc::clone(&input);
+            let metrics_captured = metrics.clone();
+            let name_captured = name.clone();
+            let context_captured = Arc::clone(&context);
+
+            let state = lazy_state
+                .get_or_init(|| async move {
+                    Mutex::new(GroupRepartitionExecState::new(
+                        input_captured,
+                        // partitioning,
+                        metrics_captured,
+                        // preserve_order,
+                        name_captured,
+                        context_captured,
+                    ))
+                })
+                .await;
+
+            // lock scope
+            let (mut rx, reservation, abort_helper) = {
+                // lock mutexes
+                let mut state = state.lock();
+
+                // now return stream for the specified *output* partition which will
+                // read from the channel
+                let (_tx, rx, reservation) = state
+                    .channels
+                    .remove(&partition)
+                    .expect("partition not used yet");
+
+                (rx, reservation, Arc::clone(&state.abort_helper))
+            };
+
+            GroupedHashAggregateStream::new_stream(
+                &agg.group_by,
+                agg.schema(),
+                agg.input(),
+                agg.filter_expr(),
+                agg.aggr_expr(),
+                agg.mode(),
+                &agg.metrics,
+                
+                // agg,
+                context, partition)
+
+            // Ok(
+            //     Box::pin(GroupedHashAggregateStream::new(agg, context, partition)?)
+            //         as SendableRecordBatchStream,
+            // )
+            // let s = Box::pin(RepartitionStream {
+            //     num_input_partitions,
+            //         num_input_partitions_processed: 0,
+            //         schema: input.schema(),
+            //         input: rx.swap_remove(0),
+            //         drop_helper: abort_helper,
+            //         reservation,
+            // })
+        })
+        .try_flatten();
+
+        // let s = stream;
+
+        let stream = RecordBatchStreamAdapter::new(schema, stream);
+        Ok(Box::pin(stream))
+
+        // // grouping by something else and we need to just materialize all results
+        // Ok(StreamType::GroupedHash(GroupedHashAggregateStream::new(
+        //     self, context, partition,
+        // )?))
     }
 
     fn metrics(&self) -> Option<MetricsSet> {
@@ -815,6 +1102,7 @@ fn create_schema(
         AggregateMode::Final
         | AggregateMode::FinalPartitioned
         | AggregateMode::Single
+        | AggregateMode::SinglePartitionedV2
         | AggregateMode::SinglePartitioned => {
             // in final mode, the field with the final result of the accumulator
             for expr in aggr_expr {
@@ -1008,6 +1296,7 @@ pub fn aggregate_expressions(
     match mode {
         AggregateMode::Partial
         | AggregateMode::Single
+        | AggregateMode::SinglePartitionedV2
         | AggregateMode::SinglePartitioned => Ok(aggr_expr
             .iter()
             .map(|agg| {
@@ -1088,6 +1377,7 @@ pub fn finalize_aggregation(
         AggregateMode::Final
         | AggregateMode::FinalPartitioned
         | AggregateMode::Single
+        | AggregateMode::SinglePartitionedV2
         | AggregateMode::SinglePartitioned => {
             // Merge the state to the final value
             accumulators

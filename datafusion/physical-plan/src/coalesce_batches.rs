@@ -322,6 +322,7 @@ impl CoalesceBatchesStream {
                     } else {
                         // If the buffer still contains batches, prepare to return them.
                         let batch = self.coalescer.finish_batch()?;
+                        println!("returned batch: {:?}", batch);
                         Poll::Ready(Some(Ok(batch)))
                     };
                 }
