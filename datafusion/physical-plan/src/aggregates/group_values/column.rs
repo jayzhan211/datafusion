@@ -28,8 +28,6 @@ use arrow::record_batch::RecordBatch;
 use arrow_array::{Array, ArrayRef};
 use arrow_schema::{DataType, Schema, SchemaRef};
 use datafusion_common::hash_utils::create_hashes;
-use datafusion_common::instant::Instant;
-use datafusion_common::utils::proxy::RawTableAllocExt;
 use datafusion_common::{not_impl_err, DataFusionError, Result};
 use datafusion_execution::memory_pool::proxy::VecAllocExt;
 use datafusion_expr::EmitTo;
@@ -184,21 +182,39 @@ impl GroupValues for GroupValuesColumn {
                     &DataType::Int8 => {
                         instantiate_primitive!(v, v2, nullable, Int8Type);
                     }
-                    &DataType::Int16 => instantiate_primitive!(v, v2, nullable, Int16Type),
-                    &DataType::Int32 => instantiate_primitive!(v, v2, nullable, Int32Type),
-                    &DataType::Int64 => instantiate_primitive!(v, v2, nullable, Int64Type),
-                    &DataType::UInt8 => instantiate_primitive!(v, v2, nullable, UInt8Type),
-                    &DataType::UInt16 => instantiate_primitive!(v, v2, nullable, UInt16Type),
-                    &DataType::UInt32 => instantiate_primitive!(v, v2, nullable, UInt32Type),
-                    &DataType::UInt64 => instantiate_primitive!(v, v2, nullable, UInt64Type),
+                    &DataType::Int16 => {
+                        instantiate_primitive!(v, v2, nullable, Int16Type)
+                    }
+                    &DataType::Int32 => {
+                        instantiate_primitive!(v, v2, nullable, Int32Type)
+                    }
+                    &DataType::Int64 => {
+                        instantiate_primitive!(v, v2, nullable, Int64Type)
+                    }
+                    &DataType::UInt8 => {
+                        instantiate_primitive!(v, v2, nullable, UInt8Type)
+                    }
+                    &DataType::UInt16 => {
+                        instantiate_primitive!(v, v2, nullable, UInt16Type)
+                    }
+                    &DataType::UInt32 => {
+                        instantiate_primitive!(v, v2, nullable, UInt32Type)
+                    }
+                    &DataType::UInt64 => {
+                        instantiate_primitive!(v, v2, nullable, UInt64Type)
+                    }
                     &DataType::Float32 => {
                         instantiate_primitive!(v, v2, nullable, Float32Type)
                     }
                     &DataType::Float64 => {
                         instantiate_primitive!(v, v2, nullable, Float64Type)
                     }
-                    &DataType::Date32 => instantiate_primitive!(v, v2, nullable, Date32Type),
-                    &DataType::Date64 => instantiate_primitive!(v, v2, nullable, Date64Type),
+                    &DataType::Date32 => {
+                        instantiate_primitive!(v, v2, nullable, Date32Type)
+                    }
+                    &DataType::Date64 => {
+                        instantiate_primitive!(v, v2, nullable, Date64Type)
+                    }
                     &DataType::Utf8 => {
                         let b = ByteGroupValueBuilder::<i32>::new(OutputType::Utf8);
                         v.push(Box::new(b) as _);
@@ -228,7 +244,7 @@ impl GroupValues for GroupValuesColumn {
                     }
                 }
             }
-            
+
             self.group_values = v;
             self.group_values_v2 = v2;
         }
@@ -241,76 +257,6 @@ impl GroupValues for GroupValuesColumn {
         batch_hashes.clear();
         batch_hashes.resize(n_rows, 0);
         create_hashes(cols, &self.random_state, batch_hashes)?;
-
-        let mut start = Instant::now();
-        for (row, &target_hash) in batch_hashes.iter().enumerate() {
-            let entry = self.map.get_mut(target_hash, |(exist_hash, group_idx)| {
-                // Somewhat surprisingly, this closure can be called even if the
-                // hash doesn't match, so check the hash first with an integer
-                // comparison first avoid the more expensive comparison with
-                // group value. https://github.com/apache/datafusion/pull/11718
-                if target_hash != *exist_hash {
-                    return false;
-                }
-
-                fn check_row_equal(
-                    array_row: &dyn GroupColumn,
-                    lhs_row: usize,
-                    array: &ArrayRef,
-                    rhs_row: usize,
-                ) -> bool {
-                    array_row.equal_to(lhs_row, array, rhs_row)
-                }
-
-                for (i, group_val) in self.group_values_v2.iter().enumerate() {
-                    if !check_row_equal(group_val.as_ref(), *group_idx, &cols[i], row) {
-                        return false;
-                    }
-                }
-
-                true
-            });
-
-            let group_idx = match entry {
-                // Existing group_index for this group value
-                Some((_hash, group_idx)) => *group_idx,
-                //  1.2 Need to create new entry for the group
-                None => {
-                    // Add new entry to aggr_state and save newly created index
-                    // let group_idx = group_values.num_rows();
-                    // group_values.push(group_rows.row(row));
-
-                    let mut checklen = 0;
-                    let group_idx = self.group_values_v2[0].len();
-                    for (i, group_value) in self.group_values_v2.iter_mut().enumerate() {
-                        group_value.append_val(&cols[i], row);
-                        let len = group_value.len();
-                        if i == 0 {
-                            checklen = len;
-                        } else {
-                            debug_assert_eq!(checklen, len);
-                        }
-                    }
-
-                    // for hasher function, use precomputed hash value
-                    self.map.insert_accounted(
-                        (target_hash, group_idx),
-                        |(hash, _group_index)| *hash,
-                        &mut self.map_size,
-                    );
-                    group_idx
-                }
-            };
-            groups.push(group_idx);
-        }
-
-        // let duration = start.elapsed();
-        // println!("duration1: {:?}", duration);
-
-        groups.clear();
-        self.map.clear();
-
-        // start = Instant::now();
 
         // rehash if necessary
         let current_n_rows = self.hashes.len();
@@ -347,7 +293,6 @@ impl GroupValues for GroupValuesColumn {
             self.capacity = new_capacity;
         }
 
-
         let bit_mask = self.capacity - 1;
         self.current_offsets.resize(n_rows, 0);
         for row_idx in 0..n_rows {
@@ -364,7 +309,6 @@ impl GroupValues for GroupValuesColumn {
         self.no_match.resize(n_rows, 0);
         let mut num_iter = 1;
 
-        
         while remaining_entries > 0 {
             assert!(self.hashes.len() + remaining_entries <= self.capacity);
 
@@ -381,8 +325,6 @@ impl GroupValues for GroupValuesColumn {
                     let offset = self.hash_table[ht_offset];
 
                     let is_empty_slot = offset == 0;
-                    let is_hash_match = !is_empty_slot && self.hashes[offset - 1] == hash;
-
                     if is_empty_slot {
                         // the slot is empty, so we can create a new entry here
                         self.new_entries[n_new_entries] = row_idx;
@@ -394,16 +336,12 @@ impl GroupValues for GroupValuesColumn {
                         self.hash_table[ht_offset] = self.hashes.len() + 1;
                         // also update hash for this slot so it can be used later
                         self.hashes.push(hash);
-                    }
-
-                    if is_hash_match {
+                    } else if self.hashes[offset - 1] == hash {
                         // slot is not empty, and hash value match, now need to do equality
                         // check
                         self.need_equality_check[n_need_equality_check] = row_idx;
                         n_need_equality_check += 1;
-                    }
-
-                    if !is_empty_slot && self.hashes[offset - 1] != hash {
+                    } else {
                         // slot is not empty, and hash value doesn't match, we have a hash
                         // collision and need to do probing
                         self.no_match[n_no_match] = row_idx;
@@ -424,9 +362,6 @@ impl GroupValues for GroupValuesColumn {
                     }
                 });
             assert_eq!(self.hashes.len(), self.group_values[0].len());
-            // let duration = start.elapsed();
-            // println!("iter: {:?}, append value: {:?}", num_iter, duration);
-            // start = Instant::now();
 
             self.need_equality_check
                 .iter()
@@ -448,7 +383,7 @@ impl GroupValues for GroupValuesColumn {
 
                     let is_equal =
                         self.group_values.iter().enumerate().all(|(i, group_val)| {
-                            group_val.equal_to(offset-1, &cols[i], row_idx)
+                            group_val.equal_to(offset - 1, &cols[i], row_idx)
                             // check_row_equal(
                             //     group_val.as_ref(),
                             //     offset - 1,
@@ -462,9 +397,6 @@ impl GroupValues for GroupValuesColumn {
                         n_no_match += 1;
                     }
                 });
-            // let duration = start.elapsed();
-            // println!("iter: {:?}, eq check: {:?}", num_iter, duration);
-            // start = Instant::now();
 
             // now we need to probing for those rows in `no_match`
             let delta = num_iter * num_iter;
@@ -474,17 +406,11 @@ impl GroupValues for GroupValuesColumn {
                 let slot_idx = self.current_offsets[row_idx] + delta;
                 self.current_offsets[row_idx] = slot_idx & bit_mask;
             });
-            // let duration = start.elapsed();
-            // println!("iter: {:?}, prepare for next: {:?}", num_iter, duration);
-            // start = Instant::now();
 
             std::mem::swap(&mut self.no_match, &mut selection_vector);
             remaining_entries = n_no_match;
             num_iter += 1;
         }
-        // let duration = start.elapsed();
-        // println!("looping: {:?}", duration);
-        // start = Instant::now();
 
         groups.extend(
             self.current_offsets
@@ -493,83 +419,7 @@ impl GroupValues for GroupValuesColumn {
                 .map(|&hash_table_offset| self.hash_table[hash_table_offset] - 1),
         );
 
-        // let duration = start.elapsed();
-        // println!("duration2: {:?}", duration);
-
-        // self.current_offsets
-        //     .iter()
-        //     .take(n_rows)
-        //     .for_each(|&hash_table_offset| {
-        //         groups.push(self.hash_table[hash_table_offset] - 1);
-        //     });
-
-        // self.group_values = Some(group_values);
-        // self.group_values_v2 = Some(group_values_v2);
-
         Ok(())
-
-        // for (row, &target_hash) in batch_hashes.iter().enumerate() {
-        //     let entry = self.map.get_mut(target_hash, |(exist_hash, group_idx)| {
-        //         // Somewhat surprisingly, this closure can be called even if the
-        //         // hash doesn't match, so check the hash first with an integer
-        //         // comparison first avoid the more expensive comparison with
-        //         // group value. https://github.com/apache/datafusion/pull/11718
-        //         if target_hash != *exist_hash {
-        //             return false;
-        //         }
-
-        //         fn check_row_equal(
-        //             array_row: &dyn GroupColumn,
-        //             lhs_row: usize,
-        //             array: &ArrayRef,
-        //             rhs_row: usize,
-        //         ) -> bool {
-        //             array_row.equal_to(lhs_row, array, rhs_row)
-        //         }
-
-        //         for (i, group_val) in self.group_values.iter().enumerate() {
-        //             if !check_row_equal(group_val.as_ref(), *group_idx, &cols[i], row) {
-        //                 return false;
-        //             }
-        //         }
-
-        //         true
-        //     });
-
-        //     let group_idx = match entry {
-        //         // Existing group_index for this group value
-        //         Some((_hash, group_idx)) => *group_idx,
-        //         //  1.2 Need to create new entry for the group
-        //         None => {
-        //             // Add new entry to aggr_state and save newly created index
-        //             // let group_idx = group_values.num_rows();
-        //             // group_values.push(group_rows.row(row));
-
-        //             let mut checklen = 0;
-        //             let group_idx = self.group_values[0].len();
-        //             for (i, group_value) in self.group_values.iter_mut().enumerate() {
-        //                 group_value.append_val(&cols[i], row);
-        //                 let len = group_value.len();
-        //                 if i == 0 {
-        //                     checklen = len;
-        //                 } else {
-        //                     debug_assert_eq!(checklen, len);
-        //                 }
-        //             }
-
-        //             // for hasher function, use precomputed hash value
-        //             self.map.insert_accounted(
-        //                 (target_hash, group_idx),
-        //                 |(hash, _group_index)| *hash,
-        //                 &mut self.map_size,
-        //             );
-        //             group_idx
-        //         }
-        //     };
-        //     groups.push(group_idx);
-        // }
-
-        // Ok(())
     }
 
     fn size(&self) -> usize {
@@ -606,18 +456,6 @@ impl GroupValues for GroupValuesColumn {
                     .iter_mut()
                     .map(|v| v.take_n(n))
                     .collect::<Vec<_>>();
-
-                unsafe {
-                    for bucket in self.map.iter() {
-                        // Decrement group index by n
-                        match bucket.as_ref().1.checked_sub(n) {
-                            // Group index was >= n, shift value down
-                            Some(sub) => bucket.as_mut().1 = sub,
-                            // Group index was < n, so remove from table
-                            None => self.map.erase(bucket),
-                        }
-                    }
-                }
 
                 self.hashes.drain(0..n);
 
