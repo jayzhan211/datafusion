@@ -372,46 +372,9 @@ impl GroupValues for GroupValuesColumn {
                 .iter()
                 .take(n_need_equality_check)
                 .collect::<Vec<_>>();
+
+
             equality_check(&mut self.no_match, &mut n_no_match, need_equality_check, &self.current_offsets, &self.hash_table, &self.group_values, cols);
-
-            // let mut chunks = need_equality_check.chunks_exact(LANES);
-            // chunks.borrow_mut().for_each(|chunk| {
-            //     // TODO: Check if it is vectorized
-            //     let mut equal_mask = vec![true; LANES];
-            //     for i in 0..LANES {
-            //         let row_idx = *chunk[i];
-            //         let ht_offset = self.current_offsets[row_idx];
-            //         let offset = self.hash_table[ht_offset];
-            //         equal_mask[i] =
-            //             self.group_values.iter().enumerate().all(|(j, group_val)| {
-            //                 group_val.equal_to(offset - 1, &cols[j], row_idx)
-            //             })
-            //     }
-
-            //     for (i, &eq) in equal_mask.iter().enumerate() {
-            //         if !eq {
-            //             let row_idx = *chunk[i];
-            //             self.no_match[n_no_match] = row_idx;
-            //             n_no_match += 1;
-            //         }
-            //     }
-            // });
-            // let remainder = chunks.remainder();
-            // for i in 0..remainder.len() {
-            //     let row_idx = *remainder[i];
-            //     let ht_offset = self.current_offsets[row_idx];
-            //     let offset = self.hash_table[ht_offset];
-
-            //     let is_equal =
-            //         self.group_values.iter().enumerate().all(|(i, group_val)| {
-            //             group_val.equal_to(offset - 1, &cols[i], row_idx)
-            //         });
-
-            //     if !is_equal {
-            //         self.no_match[n_no_match] = row_idx;
-            //         n_no_match += 1;
-            //     }
-            // }
 
             // now we need to probing for those rows in `no_match`
             let delta = num_iter * num_iter;
@@ -548,16 +511,6 @@ fn equality_check(no_match: &mut Vec<usize>, n_no_match: &mut usize, need_equali
         // TODO: Check if it is vectorized
         let mut equal_mask = [true; LANES];
         equ_vec::<LANES>(&mut equal_mask, chunk, current_offsets, hash_table, group_values, cols);
-
-        // for i in 0..LANES {
-        //     let row_idx = *chunk[i];
-        //     let ht_offset = current_offsets[row_idx];
-        //     let offset = hash_table[ht_offset];
-        //     equal_mask[i] =
-        //         group_values.iter().enumerate().all(|(j, group_val)| {
-        //             group_val.equal_to(offset - 1, &cols[j], row_idx)
-        //         })
-        // }
 
         for (i, &eq) in equal_mask.iter().enumerate() {
             if !eq {
