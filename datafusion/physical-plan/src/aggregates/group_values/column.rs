@@ -15,6 +15,8 @@
 // specific language governing permissions and limitations
 // under the License.
 
+use std::borrow::BorrowMut;
+
 use crate::aggregates::group_values::group_column::{
     ByteGroupValueBuilder, GroupColumn, PrimitiveGroupValueBuilder,
 };
@@ -144,6 +146,8 @@ impl GroupValuesColumn {
         )
     }
 }
+
+const LANES: usize = 16;
 
 /// instantiates a [`PrimitiveGroupValueBuilder`] and pushes it into $v
 ///
@@ -363,40 +367,51 @@ impl GroupValues for GroupValuesColumn {
                 });
             assert_eq!(self.hashes.len(), self.group_values[0].len());
 
-            self.need_equality_check
+            let need_equality_check = self
+                .need_equality_check
                 .iter()
                 .take(n_need_equality_check)
-                .for_each(|row_idx| {
-                    let row_idx = *row_idx;
-                    let ht_offset = self.current_offsets[row_idx];
-                    let offset = self.hash_table[ht_offset];
+                .collect::<Vec<_>>();
+            equality_check(&mut self.no_match, &mut n_no_match, need_equality_check, &self.current_offsets, &self.hash_table, &self.group_values, cols);
 
-                    // #[inline]
-                    // fn check_row_equal(
-                    //     array_row: &dyn GroupColumn,
-                    //     lhs_row: usize,
-                    //     array: &ArrayRef,
-                    //     rhs_row: usize,
-                    // ) -> bool {
-                    //     array_row.equal_to(lhs_row, array, rhs_row)
-                    // }
+            // let mut chunks = need_equality_check.chunks_exact(LANES);
+            // chunks.borrow_mut().for_each(|chunk| {
+            //     // TODO: Check if it is vectorized
+            //     let mut equal_mask = vec![true; LANES];
+            //     for i in 0..LANES {
+            //         let row_idx = *chunk[i];
+            //         let ht_offset = self.current_offsets[row_idx];
+            //         let offset = self.hash_table[ht_offset];
+            //         equal_mask[i] =
+            //             self.group_values.iter().enumerate().all(|(j, group_val)| {
+            //                 group_val.equal_to(offset - 1, &cols[j], row_idx)
+            //             })
+            //     }
 
-                    let is_equal =
-                        self.group_values.iter().enumerate().all(|(i, group_val)| {
-                            group_val.equal_to(offset - 1, &cols[i], row_idx)
-                            // check_row_equal(
-                            //     group_val.as_ref(),
-                            //     offset - 1,
-                            //     &cols[i],
-                            //     row_idx,
-                            // )
-                        });
+            //     for (i, &eq) in equal_mask.iter().enumerate() {
+            //         if !eq {
+            //             let row_idx = *chunk[i];
+            //             self.no_match[n_no_match] = row_idx;
+            //             n_no_match += 1;
+            //         }
+            //     }
+            // });
+            // let remainder = chunks.remainder();
+            // for i in 0..remainder.len() {
+            //     let row_idx = *remainder[i];
+            //     let ht_offset = self.current_offsets[row_idx];
+            //     let offset = self.hash_table[ht_offset];
 
-                    if !is_equal {
-                        self.no_match[n_no_match] = row_idx;
-                        n_no_match += 1;
-                    }
-                });
+            //     let is_equal =
+            //         self.group_values.iter().enumerate().all(|(i, group_val)| {
+            //             group_val.equal_to(offset - 1, &cols[i], row_idx)
+            //         });
+
+            //     if !is_equal {
+            //         self.no_match[n_no_match] = row_idx;
+            //         n_no_match += 1;
+            //     }
+            // }
 
             // now we need to probing for those rows in `no_match`
             let delta = num_iter * num_iter;
@@ -502,5 +517,70 @@ impl GroupValues for GroupValuesColumn {
         self.map_size = self.map.capacity() * std::mem::size_of::<(u64, usize)>();
         self.hashes_buffer.clear();
         self.hashes_buffer.shrink_to(count);
+    }
+}
+
+#[inline(always)]
+fn equ_vec<const L: usize>(
+    equal_mask: &mut [bool; L],
+    chunk: &[&usize],
+    current_offsets: &[usize],
+    hash_table: &[usize],
+    group_values: &[Box<dyn GroupColumn>],
+    cols: &[ArrayRef],
+) {
+    for i in 0..L {
+        let row_idx = *chunk[i];
+        let ht_offset = current_offsets[row_idx];
+        let offset = hash_table[ht_offset];
+        equal_mask[i] =
+            group_values.iter().enumerate().all(|(j, group_val)| {
+                group_val.equal_to(offset - 1, &cols[j], row_idx)
+            })
+    }
+}
+
+#[inline(never)]
+fn equality_check(no_match: &mut Vec<usize>, n_no_match: &mut usize, need_equality_check: Vec<&usize>, current_offsets: &[usize], hash_table: &[usize], group_values: &[Box<dyn GroupColumn>], cols: &[ArrayRef]) {
+
+    let mut chunks = need_equality_check.chunks_exact(LANES);
+    chunks.borrow_mut().for_each(|chunk| {
+        // TODO: Check if it is vectorized
+        let mut equal_mask = [true; LANES];
+        equ_vec::<LANES>(&mut equal_mask, chunk, current_offsets, hash_table, group_values, cols);
+
+        // for i in 0..LANES {
+        //     let row_idx = *chunk[i];
+        //     let ht_offset = current_offsets[row_idx];
+        //     let offset = hash_table[ht_offset];
+        //     equal_mask[i] =
+        //         group_values.iter().enumerate().all(|(j, group_val)| {
+        //             group_val.equal_to(offset - 1, &cols[j], row_idx)
+        //         })
+        // }
+
+        for (i, &eq) in equal_mask.iter().enumerate() {
+            if !eq {
+                let row_idx = *chunk[i];
+                no_match[*n_no_match] = row_idx;
+                *n_no_match += 1;
+            }
+        }
+    });
+    let remainder = chunks.remainder();
+    for i in 0..remainder.len() {
+        let row_idx = *remainder[i];
+        let ht_offset = current_offsets[row_idx];
+        let offset = hash_table[ht_offset];
+
+        let is_equal =
+            group_values.iter().enumerate().all(|(i, group_val)| {
+                group_val.equal_to(offset - 1, &cols[i], row_idx)
+            });
+
+        if !is_equal {
+            no_match[*n_no_match] = row_idx;
+            *n_no_match += 1;
+        }
     }
 }
