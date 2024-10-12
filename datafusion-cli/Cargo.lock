@@ -1455,6 +1455,7 @@ name = "datafusion-functions-window-common"
 version = "42.0.0"
 dependencies = [
  "datafusion-common",
+ "datafusion-physical-expr-common",
 ]
 
 [[package]]
@@ -1486,23 +1487,19 @@ dependencies = [
  "arrow-ord",
  "arrow-schema",
  "arrow-string",
- "base64 0.22.1",
  "chrono",
  "datafusion-common",
- "datafusion-execution",
  "datafusion-expr",
  "datafusion-expr-common",
  "datafusion-functions-aggregate-common",
  "datafusion-physical-expr-common",
  "half",
  "hashbrown 0.14.5",
- "hex",
  "indexmap",
  "itertools",
  "log",
  "paste",
  "petgraph",
- "regex",
 ]
 
 [[package]]
@@ -1547,7 +1544,6 @@ dependencies = [
  "datafusion-common-runtime",
  "datafusion-execution",
  "datafusion-expr",
- "datafusion-functions-aggregate",
  "datafusion-functions-aggregate-common",
  "datafusion-functions-window-common",
  "datafusion-physical-expr",
