@@ -46,6 +46,17 @@ impl MaybeNullBufferBuilder {
         }
     }
 
+    pub fn is_null_vec(&self, rows: &[usize]) -> Vec<bool> {
+        let n = rows.len();
+        match self {
+            Self::NoNulls { .. } => vec![false;n],
+            // validity mask means a unset bit is NULL
+            Self::Nulls(builder) => {
+                rows.iter().map(|r|!builder.get_bit(*r)).collect()
+            }
+        }
+    }
+
     /// Set the nullness of the next row to `is_null`
     ///
     /// num_values is the current length of the rows being tracked

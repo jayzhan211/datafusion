@@ -26,11 +26,15 @@ use arrow::buffer::ScalarBuffer;
 use arrow::datatypes::ByteArrayType;
 use arrow::datatypes::DataType;
 use arrow::datatypes::GenericBinaryType;
+use arrow_buffer::ArrowNativeType;
 use datafusion_common::utils::proxy::VecAllocExt;
 
 use crate::aggregates::group_values::null_builder::MaybeNullBufferBuilder;
 use arrow_array::types::GenericStringType;
 use datafusion_physical_expr_common::binary_map::{OutputType, INITIAL_BUFFER_CAPACITY};
+use std::simd::u8x64;
+use std::simd::Mask;
+use std::simd::Simd;
 use std::sync::Arc;
 use std::vec;
 
@@ -47,6 +51,7 @@ pub trait GroupColumn: Send + Sync {
     ///
     /// Note that this comparison returns true if both elements are NULL
     fn equal_to(&self, lhs_row: usize, array: &ArrayRef, rhs_row: usize) -> bool;
+    fn equal_to_vectorize(&self, lhs_rows: &[usize], array: &ArrayRef, rhs_rows: &[usize]) -> Vec<bool>;
     /// Appends the row at `row` in `array` to this builder
     fn append_val(&mut self, array: &ArrayRef, row: usize);
     /// Returns the number of rows stored in this builder
@@ -102,6 +107,10 @@ impl<T: ArrowPrimitiveType, const NULLABLE: bool> GroupColumn
         }
 
         self.group_values[lhs_row] == array.as_primitive::<T>().value(rhs_row)
+    }
+    
+    fn equal_to_vectorize(&self, lhs_rows: &[usize], array: &ArrayRef, rhs_rows: &[usize]) -> Vec<bool> {
+        todo!("1")
     }
 
     fn append_val(&mut self, array: &ArrayRef, row: usize) {
@@ -219,6 +228,7 @@ where
         if let Some(result) = nulls_equal_to(exist_null, input_null) {
             return result;
         }
+
         // Otherwise, we need to check their values
         self.value(lhs_row) == (array.value(rhs_row).as_ref() as &[u8])
     }
@@ -255,6 +265,10 @@ where
             }
             _ => unreachable!("View types should use `ArrowBytesViewMap`"),
         }
+    }
+
+    fn equal_to_vectorize(&self, lhs_rows: &[usize], array: &ArrayRef, rhs_rows: &[usize]) -> Vec<bool> {
+        todo!("1")
     }
 
     fn append_val(&mut self, column: &ArrayRef, row: usize) {

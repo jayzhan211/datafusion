@@ -29,6 +29,7 @@ use primitive::GroupValuesPrimitive;
 
 mod column;
 mod row;
+pub use column::my_sum;
 use column::GroupValuesColumn;
 use row::GroupValuesRows;
 

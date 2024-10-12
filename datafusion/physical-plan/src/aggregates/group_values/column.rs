@@ -16,6 +16,7 @@
 // under the License.
 
 use std::borrow::BorrowMut;
+use std::simd::i32x4;
 
 use crate::aggregates::group_values::group_column::{
     ByteGroupValueBuilder, GroupColumn, PrimitiveGroupValueBuilder,
@@ -27,7 +28,7 @@ use arrow::datatypes::{
     Int8Type, UInt16Type, UInt32Type, UInt64Type, UInt8Type,
 };
 use arrow::record_batch::RecordBatch;
-use arrow_array::{Array, ArrayRef};
+use arrow_array::{Array, ArrayRef, Int32Array};
 use arrow_schema::{DataType, Schema, SchemaRef};
 use datafusion_common::hash_utils::create_hashes;
 use datafusion_common::{not_impl_err, DataFusionError, Result};
@@ -37,7 +38,7 @@ use datafusion_physical_expr::binary_map::OutputType;
 
 use hashbrown::raw::RawTable;
 
-use super::GroupValues;
+use super::{row, GroupValues};
 
 const INITIAL_CAPACITY: usize = 8192;
 
@@ -373,8 +374,38 @@ impl GroupValues for GroupValuesColumn {
                 .take(n_need_equality_check)
                 .collect::<Vec<_>>();
 
+            let equal_check_lhs_indexes = self
+                .need_equality_check
+                .iter()
+                .take(n_need_equality_check)
+                .map(|row_idx| {
+                    let ht_offset = self.current_offsets[*row_idx];
+                    self.hash_table[ht_offset]
+                })
+                .collect::<Vec<_>>();
+            let equal_check_rhs_indexes = self
+                .need_equality_check
+                .iter()
+                .take(n_need_equality_check)
+                .map(|row_idx| *row_idx)
+                .collect::<Vec<_>>();
 
-            equality_check(&mut self.no_match, &mut n_no_match, need_equality_check, &self.current_offsets, &self.hash_table, &self.group_values, cols);
+            for (lhs_row, rhs_row) in equal_check_lhs_indexes
+                .into_iter()
+                .zip(equal_check_rhs_indexes.into_iter())
+            {
+                let is_equal = self
+                    .group_values
+                    .iter()
+                    .enumerate()
+                    .any(|(j, g)| g.equal_to(lhs_row, &cols[j], rhs_row));
+                if !is_equal {
+                    self.no_match[n_no_match] = rhs_row;
+                    n_no_match += 1;
+                }
+            }
+
+            // equality_check(&mut self.no_match, &mut n_no_match, need_equality_check, &self.current_offsets, &self.hash_table, &self.group_values, cols);
 
             // now we need to probing for those rows in `no_match`
             let delta = num_iter * num_iter;
@@ -496,21 +527,36 @@ fn equ_vec<const L: usize>(
         let row_idx = *chunk[i];
         let ht_offset = current_offsets[row_idx];
         let offset = hash_table[ht_offset];
-        equal_mask[i] =
-            group_values.iter().enumerate().all(|(j, group_val)| {
-                group_val.equal_to(offset - 1, &cols[j], row_idx)
-            })
+
+        equal_mask[i] = group_values
+            .iter()
+            .enumerate()
+            .all(|(j, group_val)| group_val.equal_to(offset - 1, &cols[j], row_idx))
     }
 }
 
 #[inline(never)]
-fn equality_check(no_match: &mut Vec<usize>, n_no_match: &mut usize, need_equality_check: Vec<&usize>, current_offsets: &[usize], hash_table: &[usize], group_values: &[Box<dyn GroupColumn>], cols: &[ArrayRef]) {
-
+fn equality_check(
+    no_match: &mut Vec<usize>,
+    n_no_match: &mut usize,
+    need_equality_check: Vec<&usize>,
+    current_offsets: &[usize],
+    hash_table: &[usize],
+    group_values: &[Box<dyn GroupColumn>],
+    cols: &[ArrayRef],
+) {
     let mut chunks = need_equality_check.chunks_exact(LANES);
     chunks.borrow_mut().for_each(|chunk| {
         // TODO: Check if it is vectorized
         let mut equal_mask = [true; LANES];
-        equ_vec::<LANES>(&mut equal_mask, chunk, current_offsets, hash_table, group_values, cols);
+        equ_vec::<LANES>(
+            &mut equal_mask,
+            chunk,
+            current_offsets,
+            hash_table,
+            group_values,
+            cols,
+        );
 
         for (i, &eq) in equal_mask.iter().enumerate() {
             if !eq {
@@ -526,14 +572,42 @@ fn equality_check(no_match: &mut Vec<usize>, n_no_match: &mut usize, need_equali
         let ht_offset = current_offsets[row_idx];
         let offset = hash_table[ht_offset];
 
-        let is_equal =
-            group_values.iter().enumerate().all(|(i, group_val)| {
-                group_val.equal_to(offset - 1, &cols[i], row_idx)
-            });
+        let is_equal = group_values
+            .iter()
+            .enumerate()
+            .all(|(i, group_val)| group_val.equal_to(offset - 1, &cols[i], row_idx));
 
         if !is_equal {
             no_match[*n_no_match] = row_idx;
             *n_no_match += 1;
         }
+    }
+}
+
+#[inline(never)]
+pub fn my_sum() {
+    // let array = Int32Array::from(vec![10, 102, 30, 343]);
+    // let values = array.values().as_ref();
+    // let r = values.iter().fold(0, |mut is_eq, v| {
+    //     // is_eq &= (*v).gt(&3);
+    //     is_eq += *v;
+    //     is_eq
+    // });
+    // println!("r: {:?}", r);
+    let a = vec![1, 2, 3, 4];
+    let a = i32x4::from_slice(&a);
+    let b = vec![5, 6, 7, 8];
+    let b = i32x4::from_slice(&b);
+    let r = a + b;
+    println!("r: {:?}", r);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::my_sum;
+
+    #[test]
+    fn test234() {
+        my_sum();
     }
 }
