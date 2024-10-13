@@ -31,7 +31,7 @@ use arrow::record_batch::RecordBatch;
 use arrow_array::{Array, ArrayRef};
 use arrow_schema::{DataType, Schema, SchemaRef};
 use datafusion_common::hash_utils::create_hashes;
-use datafusion_common::{not_impl_err, DataFusionError, Result};
+use datafusion_common::{internal_err, not_impl_err, DataFusionError, Result};
 use datafusion_execution::memory_pool::proxy::VecAllocExt;
 use datafusion_expr::EmitTo;
 use datafusion_physical_expr::binary_map::OutputType;
@@ -168,6 +168,13 @@ macro_rules! instantiate_primitive {
 impl GroupValues for GroupValuesColumn {
     fn intern(&mut self, cols: &[ArrayRef], groups: &mut Vec<usize>) -> Result<()> {
         let n_rows = cols[0].len();
+        println!("n_rows: {:?}", n_rows);
+
+        for c in cols {
+            if c.len() != n_rows {
+                return internal_err!("length mismatch {} and {}", c.len(), n_rows)
+            }
+        }
 
         if self.group_values.is_empty() {
             let mut v = Vec::with_capacity(cols.len());
@@ -248,6 +255,7 @@ impl GroupValues for GroupValuesColumn {
         // rehash if necessary
         let current_n_rows = self.hashes.len();
         if current_n_rows + n_rows > (self.hash_table.capacity() as f64 / 1.5) as usize {
+            println!("start rehash");
             let new_capacity = current_n_rows + n_rows;
             let new_capacity = std::cmp::max(new_capacity, 2 * self.capacity);
             let new_capacity = new_capacity.next_power_of_two();
@@ -335,6 +343,17 @@ impl GroupValues for GroupValuesColumn {
                     }
                 });
 
+            self.new_entries
+                .iter()
+                .take(n_new_entries)
+                .for_each(|row_idx| {
+                    for (i, group_value) in self.group_values.iter_mut().enumerate() {
+                        group_value.append_val(&cols[i], *row_idx)
+                    }
+                });
+            assert_eq!(self.hashes.len(), self.group_values[0].len());
+
+
             let equal_check_lhs_indexes = self
                 .need_equality_check
                 .iter()
@@ -351,10 +370,17 @@ impl GroupValues for GroupValuesColumn {
                 .map(|row_idx| *row_idx)
                 .collect::<Vec<_>>();
 
+            assert_eq!(self.hashes.len(), self.group_values[0].len());
+            let len = self.hashes.len();
             for (lhs_row, rhs_row) in equal_check_lhs_indexes
                 .into_iter()
                 .zip(equal_check_rhs_indexes.into_iter())
             {
+                assert!(lhs_row <= len);
+                // if rhs_row > cols[0].len() {
+                //     println!("rhs_row: {:?}", rhs_row);
+                //     println!("len: {:?}", cols[0].len());
+                // }
                 let is_equal = self
                     .group_values
                     .iter()
@@ -366,16 +392,7 @@ impl GroupValues for GroupValuesColumn {
                 }
             }
 
-            self.new_entries
-                .iter()
-                .take(n_new_entries)
-                .for_each(|row_idx| {
-                    for (i, group_value) in self.group_values.iter_mut().enumerate() {
-                        group_value.append_val(&cols[i], *row_idx)
-                    }
-                });
-            assert_eq!(self.hashes.len(), self.group_values[0].len());
-
+            
             // equality_check(&mut self.no_match, &mut n_no_match, need_equality_check, &self.current_offsets, &self.hash_table, &self.group_values, cols);
 
             // now we need to probing for those rows in `no_match`
