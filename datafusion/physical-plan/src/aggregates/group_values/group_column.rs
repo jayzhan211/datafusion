@@ -26,15 +26,11 @@ use arrow::buffer::ScalarBuffer;
 use arrow::datatypes::ByteArrayType;
 use arrow::datatypes::DataType;
 use arrow::datatypes::GenericBinaryType;
-use arrow_buffer::ArrowNativeType;
 use datafusion_common::utils::proxy::VecAllocExt;
 
 use crate::aggregates::group_values::null_builder::MaybeNullBufferBuilder;
 use arrow_array::types::GenericStringType;
 use datafusion_physical_expr_common::binary_map::{OutputType, INITIAL_BUFFER_CAPACITY};
-use std::simd::u8x64;
-use std::simd::Mask;
-use std::simd::Simd;
 use std::sync::Arc;
 use std::vec;
 

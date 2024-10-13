@@ -15,6 +15,7 @@
 // specific language governing permissions and limitations
 // under the License.
 
+use core::task;
 use std::sync::Arc;
 
 use arrow::util::pretty::pretty_format_batches;
@@ -165,6 +166,7 @@ impl AggregationFuzzer {
 
         while let Some(join_handle) = join_set.join_next().await {
             // propagate errors
+            println!("join_handle: {:?}", join_handle);
             join_handle.unwrap();
         }
     }
@@ -238,9 +240,8 @@ struct AggregationFuzzTestTask {
 
 impl AggregationFuzzTestTask {
     async fn run(&self) {
-        let task_result = run_sql(&self.sql, &self.ctx_with_params.ctx)
-            .await
-            .expect("should success to run sql");
+        let task_result = run_sql(&self.sql, &self.ctx_with_params.ctx).await;
+        let task_result = task_result.expect("should success to run sql");
         self.check_result(&task_result, &self.expected_result);
     }
 
@@ -275,7 +276,7 @@ impl AggregationFuzzTestTask {
             );
 
             // Then we just panic
-            panic!();
+            panic!("The result mismatch");
         }
     }
 }

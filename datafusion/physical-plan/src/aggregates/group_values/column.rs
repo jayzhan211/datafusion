@@ -28,7 +28,7 @@ use arrow::datatypes::{
     Int8Type, UInt16Type, UInt32Type, UInt64Type, UInt8Type,
 };
 use arrow::record_batch::RecordBatch;
-use arrow_array::{Array, ArrayRef, Int32Array};
+use arrow_array::{Array, ArrayRef};
 use arrow_schema::{DataType, Schema, SchemaRef};
 use datafusion_common::hash_utils::create_hashes;
 use datafusion_common::{not_impl_err, DataFusionError, Result};
@@ -38,7 +38,7 @@ use datafusion_physical_expr::binary_map::OutputType;
 
 use hashbrown::raw::RawTable;
 
-use super::{row, GroupValues};
+use super::GroupValues;
 
 const INITIAL_CAPACITY: usize = 8192;
 
@@ -71,7 +71,6 @@ pub struct GroupValuesColumn {
     ///
     /// [`GroupValuesRows`]: crate::aggregates::group_values::row::GroupValuesRows
     group_values: Vec<Box<dyn GroupColumn>>,
-    group_values_v2: Vec<Box<dyn GroupColumn>>,
 
     /// reused buffer to store hashes
     hashes_buffer: Vec<u64>,
@@ -98,7 +97,6 @@ impl GroupValuesColumn {
             map,
             map_size: 0,
             group_values: vec![],
-            group_values_v2: vec![],
             hashes_buffer: Default::default(),
             random_state: Default::default(),
             current_hashes: Default::default(),
@@ -148,8 +146,6 @@ impl GroupValuesColumn {
     }
 }
 
-const LANES: usize = 16;
-
 /// instantiates a [`PrimitiveGroupValueBuilder`] and pushes it into $v
 ///
 /// Arguments:
@@ -158,17 +154,13 @@ const LANES: usize = 16;
 /// `$t`: the primitive type of the builder
 ///
 macro_rules! instantiate_primitive {
-    ($v:expr, $v2:expr, $nullable:expr, $t:ty) => {
+    ($v:expr, $nullable:expr, $t:ty) => {
         if $nullable {
             let b = PrimitiveGroupValueBuilder::<$t, true>::new();
-            $v.push(Box::new(b) as _);
-            let b = PrimitiveGroupValueBuilder::<$t, true>::new();
-            $v2.push(Box::new(b) as _)
+            $v.push(Box::new(b) as _)
         } else {
             let b = PrimitiveGroupValueBuilder::<$t, false>::new();
-            $v.push(Box::new(b) as _);
-            let b = PrimitiveGroupValueBuilder::<$t, false>::new();
-            $v2.push(Box::new(b) as _)
+            $v.push(Box::new(b) as _)
         }
     };
 }
@@ -179,70 +171,61 @@ impl GroupValues for GroupValuesColumn {
 
         if self.group_values.is_empty() {
             let mut v = Vec::with_capacity(cols.len());
-            let mut v2: Vec<Box<dyn GroupColumn>> = Vec::with_capacity(cols.len());
 
             for f in self.schema.fields().iter() {
                 let nullable = f.is_nullable();
                 match f.data_type() {
                     &DataType::Int8 => {
-                        instantiate_primitive!(v, v2, nullable, Int8Type);
+                        instantiate_primitive!(v, nullable, Int8Type)
                     }
                     &DataType::Int16 => {
-                        instantiate_primitive!(v, v2, nullable, Int16Type)
+                        instantiate_primitive!(v, nullable, Int16Type)
                     }
                     &DataType::Int32 => {
-                        instantiate_primitive!(v, v2, nullable, Int32Type)
+                        instantiate_primitive!(v, nullable, Int32Type)
                     }
                     &DataType::Int64 => {
-                        instantiate_primitive!(v, v2, nullable, Int64Type)
+                        instantiate_primitive!(v, nullable, Int64Type)
                     }
                     &DataType::UInt8 => {
-                        instantiate_primitive!(v, v2, nullable, UInt8Type)
+                        instantiate_primitive!(v, nullable, UInt8Type)
                     }
                     &DataType::UInt16 => {
-                        instantiate_primitive!(v, v2, nullable, UInt16Type)
+                        instantiate_primitive!(v, nullable, UInt16Type)
                     }
                     &DataType::UInt32 => {
-                        instantiate_primitive!(v, v2, nullable, UInt32Type)
+                        instantiate_primitive!(v, nullable, UInt32Type)
                     }
                     &DataType::UInt64 => {
-                        instantiate_primitive!(v, v2, nullable, UInt64Type)
+                        instantiate_primitive!(v, nullable, UInt64Type)
                     }
                     &DataType::Float32 => {
-                        instantiate_primitive!(v, v2, nullable, Float32Type)
+                        instantiate_primitive!(v, nullable, Float32Type)
                     }
                     &DataType::Float64 => {
-                        instantiate_primitive!(v, v2, nullable, Float64Type)
+                        instantiate_primitive!(v, nullable, Float64Type)
                     }
                     &DataType::Date32 => {
-                        instantiate_primitive!(v, v2, nullable, Date32Type)
+                        instantiate_primitive!(v, nullable, Date32Type)
                     }
                     &DataType::Date64 => {
-                        instantiate_primitive!(v, v2, nullable, Date64Type)
+                        instantiate_primitive!(v, nullable, Date64Type)
                     }
                     &DataType::Utf8 => {
                         let b = ByteGroupValueBuilder::<i32>::new(OutputType::Utf8);
-                        v.push(Box::new(b) as _);
-                        let b = ByteGroupValueBuilder::<i32>::new(OutputType::Utf8);
-                        v2.push(Box::new(b) as _)
+                        v.push(Box::new(b) as _)
                     }
                     &DataType::LargeUtf8 => {
                         let b = ByteGroupValueBuilder::<i64>::new(OutputType::Utf8);
-                        v.push(Box::new(b) as _);
-                        let b = ByteGroupValueBuilder::<i64>::new(OutputType::Utf8);
-                        v2.push(Box::new(b) as _)
+                        v.push(Box::new(b) as _)
                     }
                     &DataType::Binary => {
                         let b = ByteGroupValueBuilder::<i32>::new(OutputType::Binary);
-                        v.push(Box::new(b) as _);
-                        let b = ByteGroupValueBuilder::<i32>::new(OutputType::Binary);
-                        v2.push(Box::new(b) as _)
+                        v.push(Box::new(b) as _)
                     }
                     &DataType::LargeBinary => {
                         let b = ByteGroupValueBuilder::<i64>::new(OutputType::Binary);
-                        v.push(Box::new(b) as _);
-                        let b = ByteGroupValueBuilder::<i64>::new(OutputType::Binary);
-                        v2.push(Box::new(b) as _)
+                        v.push(Box::new(b) as _)
                     }
                     dt => {
                         return not_impl_err!("{dt} not supported in GroupValuesColumn")
@@ -251,7 +234,6 @@ impl GroupValues for GroupValuesColumn {
             }
 
             self.group_values = v;
-            self.group_values_v2 = v2;
         }
 
         // tracks to which group each of the input rows belongs
@@ -320,7 +302,6 @@ impl GroupValues for GroupValuesColumn {
             let mut n_new_entries = 0;
             let mut n_need_equality_check = 0;
             let mut n_no_match = 0;
-            // start = Instant::now();
             selection_vector
                 .iter()
                 .take(remaining_entries)
@@ -354,20 +335,6 @@ impl GroupValues for GroupValuesColumn {
                     }
                 });
 
-            // let duration = start.elapsed();
-            // println!("iter: {:?} selection: {:?}", num_iter, duration);
-            // start = Instant::now();
-
-            self.new_entries
-                .iter()
-                .take(n_new_entries)
-                .for_each(|row_idx| {
-                    for (i, group_value) in self.group_values.iter_mut().enumerate() {
-                        group_value.append_val(&cols[i], *row_idx)
-                    }
-                });
-            assert_eq!(self.hashes.len(), self.group_values[0].len());
-
             let equal_check_lhs_indexes = self
                 .need_equality_check
                 .iter()
@@ -392,12 +359,22 @@ impl GroupValues for GroupValuesColumn {
                     .group_values
                     .iter()
                     .enumerate()
-                    .any(|(j, g)| g.equal_to(lhs_row, &cols[j], rhs_row));
+                    .all(|(j, g)| g.equal_to(lhs_row, &cols[j], rhs_row));
                 if !is_equal {
                     self.no_match[n_no_match] = rhs_row;
                     n_no_match += 1;
                 }
             }
+
+            self.new_entries
+                .iter()
+                .take(n_new_entries)
+                .for_each(|row_idx| {
+                    for (i, group_value) in self.group_values.iter_mut().enumerate() {
+                        group_value.append_val(&cols[i], *row_idx)
+                    }
+                });
+            assert_eq!(self.hashes.len(), self.group_values[0].len());
 
             // equality_check(&mut self.no_match, &mut n_no_match, need_equality_check, &self.current_offsets, &self.hash_table, &self.group_values, cols);
 
@@ -499,7 +476,6 @@ impl GroupValues for GroupValuesColumn {
     fn clear_shrink(&mut self, batch: &RecordBatch) {
         let count = batch.num_rows();
         self.group_values.clear();
-        self.group_values_v2.clear();
         self.map.clear();
         self.map.shrink_to(count, |_| 0); // hasher does not matter since the map is cleared
         self.map_size = self.map.capacity() * std::mem::size_of::<(u64, usize)>();
@@ -508,75 +484,75 @@ impl GroupValues for GroupValuesColumn {
     }
 }
 
-#[inline(always)]
-fn equ_vec<const L: usize>(
-    equal_mask: &mut [bool; L],
-    chunk: &[&usize],
-    current_offsets: &[usize],
-    hash_table: &[usize],
-    group_values: &[Box<dyn GroupColumn>],
-    cols: &[ArrayRef],
-) {
-    for i in 0..L {
-        let row_idx = *chunk[i];
-        let ht_offset = current_offsets[row_idx];
-        let offset = hash_table[ht_offset];
+// #[inline(always)]
+// fn equ_vec<const L: usize>(
+//     equal_mask: &mut [bool; L],
+//     chunk: &[&usize],
+//     current_offsets: &[usize],
+//     hash_table: &[usize],
+//     group_values: &[Box<dyn GroupColumn>],
+//     cols: &[ArrayRef],
+// ) {
+//     for i in 0..L {
+//         let row_idx = *chunk[i];
+//         let ht_offset = current_offsets[row_idx];
+//         let offset = hash_table[ht_offset];
 
-        equal_mask[i] = group_values
-            .iter()
-            .enumerate()
-            .all(|(j, group_val)| group_val.equal_to(offset - 1, &cols[j], row_idx))
-    }
-}
+//         equal_mask[i] = group_values
+//             .iter()
+//             .enumerate()
+//             .all(|(j, group_val)| group_val.equal_to(offset - 1, &cols[j], row_idx))
+//     }
+// }
 
-#[inline(never)]
-fn equality_check(
-    no_match: &mut Vec<usize>,
-    n_no_match: &mut usize,
-    need_equality_check: Vec<&usize>,
-    current_offsets: &[usize],
-    hash_table: &[usize],
-    group_values: &[Box<dyn GroupColumn>],
-    cols: &[ArrayRef],
-) {
-    let mut chunks = need_equality_check.chunks_exact(LANES);
-    chunks.borrow_mut().for_each(|chunk| {
-        // TODO: Check if it is vectorized
-        let mut equal_mask = [true; LANES];
-        equ_vec::<LANES>(
-            &mut equal_mask,
-            chunk,
-            current_offsets,
-            hash_table,
-            group_values,
-            cols,
-        );
+// #[inline(never)]
+// fn equality_check(
+//     no_match: &mut Vec<usize>,
+//     n_no_match: &mut usize,
+//     need_equality_check: Vec<&usize>,
+//     current_offsets: &[usize],
+//     hash_table: &[usize],
+//     group_values: &[Box<dyn GroupColumn>],
+//     cols: &[ArrayRef],
+// ) {
+//     let mut chunks = need_equality_check.chunks_exact(LANES);
+//     chunks.borrow_mut().for_each(|chunk| {
+//         // TODO: Check if it is vectorized
+//         let mut equal_mask = [true; LANES];
+//         equ_vec::<LANES>(
+//             &mut equal_mask,
+//             chunk,
+//             current_offsets,
+//             hash_table,
+//             group_values,
+//             cols,
+//         );
 
-        for (i, &eq) in equal_mask.iter().enumerate() {
-            if !eq {
-                let row_idx = *chunk[i];
-                no_match[*n_no_match] = row_idx;
-                *n_no_match += 1;
-            }
-        }
-    });
-    let remainder = chunks.remainder();
-    for i in 0..remainder.len() {
-        let row_idx = *remainder[i];
-        let ht_offset = current_offsets[row_idx];
-        let offset = hash_table[ht_offset];
+//         for (i, &eq) in equal_mask.iter().enumerate() {
+//             if !eq {
+//                 let row_idx = *chunk[i];
+//                 no_match[*n_no_match] = row_idx;
+//                 *n_no_match += 1;
+//             }
+//         }
+//     });
+//     let remainder = chunks.remainder();
+//     for i in 0..remainder.len() {
+//         let row_idx = *remainder[i];
+//         let ht_offset = current_offsets[row_idx];
+//         let offset = hash_table[ht_offset];
 
-        let is_equal = group_values
-            .iter()
-            .enumerate()
-            .all(|(i, group_val)| group_val.equal_to(offset - 1, &cols[i], row_idx));
+//         let is_equal = group_values
+//             .iter()
+//             .enumerate()
+//             .all(|(i, group_val)| group_val.equal_to(offset - 1, &cols[i], row_idx));
 
-        if !is_equal {
-            no_match[*n_no_match] = row_idx;
-            *n_no_match += 1;
-        }
-    }
-}
+//         if !is_equal {
+//             no_match[*n_no_match] = row_idx;
+//             *n_no_match += 1;
+//         }
+//     }
+// }
 
 #[inline(never)]
 pub fn my_sum() {
