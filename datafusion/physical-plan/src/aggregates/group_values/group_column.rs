@@ -51,7 +51,12 @@ pub trait GroupColumn: Send + Sync {
     ///
     /// Note that this comparison returns true if both elements are NULL
     fn equal_to(&self, lhs_row: usize, array: &ArrayRef, rhs_row: usize) -> bool;
-    fn equal_to_vectorize(&self, lhs_rows: &[usize], array: &ArrayRef, rhs_rows: &[usize]) -> Vec<bool>;
+    fn equal_to_vectorize(
+        &self,
+        lhs_rows: &[usize],
+        array: &ArrayRef,
+        rhs_rows: &[usize],
+    ) -> Vec<bool>;
     /// Appends the row at `row` in `array` to this builder
     fn append_val(&mut self, array: &ArrayRef, row: usize);
     /// Returns the number of rows stored in this builder
@@ -108,8 +113,13 @@ impl<T: ArrowPrimitiveType, const NULLABLE: bool> GroupColumn
 
         self.group_values[lhs_row] == array.as_primitive::<T>().value(rhs_row)
     }
-    
-    fn equal_to_vectorize(&self, lhs_rows: &[usize], array: &ArrayRef, rhs_rows: &[usize]) -> Vec<bool> {
+
+    fn equal_to_vectorize(
+        &self,
+        lhs_rows: &[usize],
+        array: &ArrayRef,
+        rhs_rows: &[usize],
+    ) -> Vec<bool> {
         todo!("1")
     }
 
@@ -267,7 +277,12 @@ where
         }
     }
 
-    fn equal_to_vectorize(&self, lhs_rows: &[usize], array: &ArrayRef, rhs_rows: &[usize]) -> Vec<bool> {
+    fn equal_to_vectorize(
+        &self,
+        lhs_rows: &[usize],
+        array: &ArrayRef,
+        rhs_rows: &[usize],
+    ) -> Vec<bool> {
         todo!("1")
     }
 

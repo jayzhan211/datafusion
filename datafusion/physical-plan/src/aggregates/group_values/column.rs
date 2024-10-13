@@ -368,19 +368,13 @@ impl GroupValues for GroupValuesColumn {
                 });
             assert_eq!(self.hashes.len(), self.group_values[0].len());
 
-            let need_equality_check = self
-                .need_equality_check
-                .iter()
-                .take(n_need_equality_check)
-                .collect::<Vec<_>>();
-
             let equal_check_lhs_indexes = self
                 .need_equality_check
                 .iter()
                 .take(n_need_equality_check)
                 .map(|row_idx| {
                     let ht_offset = self.current_offsets[*row_idx];
-                    self.hash_table[ht_offset]
+                    self.hash_table[ht_offset] - 1
                 })
                 .collect::<Vec<_>>();
             let equal_check_rhs_indexes = self
