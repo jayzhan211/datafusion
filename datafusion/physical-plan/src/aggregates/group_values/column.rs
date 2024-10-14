@@ -31,6 +31,7 @@ use arrow::record_batch::RecordBatch;
 use arrow_array::{Array, ArrayRef};
 use arrow_schema::{DataType, Schema, SchemaRef};
 use datafusion_common::hash_utils::create_hashes;
+use datafusion_common::utils::proxy::RawTableAllocExt;
 use datafusion_common::{internal_err, not_impl_err, DataFusionError, Result};
 use datafusion_execution::memory_pool::proxy::VecAllocExt;
 use datafusion_expr::EmitTo;
@@ -71,6 +72,7 @@ pub struct GroupValuesColumn {
     ///
     /// [`GroupValuesRows`]: crate::aggregates::group_values::row::GroupValuesRows
     group_values: Vec<Box<dyn GroupColumn>>,
+    group_values_v2: Vec<Box<dyn GroupColumn>>,
 
     /// reused buffer to store hashes
     hashes_buffer: Vec<u64>,
@@ -78,7 +80,7 @@ pub struct GroupValuesColumn {
     /// Random state for creating hashes
     random_state: RandomState,
 
-    current_hashes: Vec<u64>,
+    // current_hashes: Vec<u64>,
     current_offsets: Vec<usize>,
     new_entries: Vec<usize>,
     need_equality_check: Vec<usize>,
@@ -97,9 +99,10 @@ impl GroupValuesColumn {
             map,
             map_size: 0,
             group_values: vec![],
+            group_values_v2: vec![],
             hashes_buffer: Default::default(),
             random_state: Default::default(),
-            current_hashes: Default::default(),
+            // current_hashes: Default::default(),
             current_offsets: Default::default(),
             new_entries: Default::default(),
             need_equality_check: Default::default(),
@@ -154,13 +157,17 @@ impl GroupValuesColumn {
 /// `$t`: the primitive type of the builder
 ///
 macro_rules! instantiate_primitive {
-    ($v:expr, $nullable:expr, $t:ty) => {
+    ($v:expr, $v2:expr, $nullable:expr, $t:ty) => {
         if $nullable {
             let b = PrimitiveGroupValueBuilder::<$t, true>::new();
-            $v.push(Box::new(b) as _)
+            $v.push(Box::new(b) as _);
+            let b = PrimitiveGroupValueBuilder::<$t, true>::new();
+            $v2.push(Box::new(b) as _)
         } else {
             let b = PrimitiveGroupValueBuilder::<$t, false>::new();
-            $v.push(Box::new(b) as _)
+            $v.push(Box::new(b) as _);
+            let b = PrimitiveGroupValueBuilder::<$t, false>::new();
+            $v2.push(Box::new(b) as _)
         }
     };
 }
@@ -168,71 +175,83 @@ macro_rules! instantiate_primitive {
 impl GroupValues for GroupValuesColumn {
     fn intern(&mut self, cols: &[ArrayRef], groups: &mut Vec<usize>) -> Result<()> {
         let n_rows = cols[0].len();
-        println!("n_rows: {:?}", n_rows);
+        if n_rows == 0 {
+            groups.clear();
+            return Ok(());
+        }
 
         for c in cols {
             if c.len() != n_rows {
-                return internal_err!("length mismatch {} and {}", c.len(), n_rows)
+                return internal_err!("length mismatch {} and {}", c.len(), n_rows);
             }
         }
 
         if self.group_values.is_empty() {
             let mut v = Vec::with_capacity(cols.len());
+            let mut v2 = Vec::with_capacity(cols.len());
 
             for f in self.schema.fields().iter() {
                 let nullable = f.is_nullable();
                 match f.data_type() {
                     &DataType::Int8 => {
-                        instantiate_primitive!(v, nullable, Int8Type)
+                        instantiate_primitive!(v, v2, nullable, Int8Type)
                     }
                     &DataType::Int16 => {
-                        instantiate_primitive!(v, nullable, Int16Type)
+                        instantiate_primitive!(v, v2, nullable, Int16Type)
                     }
                     &DataType::Int32 => {
-                        instantiate_primitive!(v, nullable, Int32Type)
+                        instantiate_primitive!(v, v2, nullable, Int32Type)
                     }
                     &DataType::Int64 => {
-                        instantiate_primitive!(v, nullable, Int64Type)
+                        instantiate_primitive!(v, v2, nullable, Int64Type)
                     }
                     &DataType::UInt8 => {
-                        instantiate_primitive!(v, nullable, UInt8Type)
+                        instantiate_primitive!(v, v2, nullable, UInt8Type)
                     }
                     &DataType::UInt16 => {
-                        instantiate_primitive!(v, nullable, UInt16Type)
+                        instantiate_primitive!(v, v2, nullable, UInt16Type)
                     }
                     &DataType::UInt32 => {
-                        instantiate_primitive!(v, nullable, UInt32Type)
+                        instantiate_primitive!(v, v2, nullable, UInt32Type)
                     }
                     &DataType::UInt64 => {
-                        instantiate_primitive!(v, nullable, UInt64Type)
+                        instantiate_primitive!(v, v2, nullable, UInt64Type)
                     }
                     &DataType::Float32 => {
-                        instantiate_primitive!(v, nullable, Float32Type)
+                        instantiate_primitive!(v, v2, nullable, Float32Type)
                     }
                     &DataType::Float64 => {
-                        instantiate_primitive!(v, nullable, Float64Type)
+                        instantiate_primitive!(v, v2, nullable, Float64Type)
                     }
                     &DataType::Date32 => {
-                        instantiate_primitive!(v, nullable, Date32Type)
+                        instantiate_primitive!(v, v2, nullable, Date32Type)
                     }
                     &DataType::Date64 => {
-                        instantiate_primitive!(v, nullable, Date64Type)
+                        instantiate_primitive!(v, v2, nullable, Date64Type)
                     }
                     &DataType::Utf8 => {
                         let b = ByteGroupValueBuilder::<i32>::new(OutputType::Utf8);
-                        v.push(Box::new(b) as _)
+                        v.push(Box::new(b) as _);
+                        let b = ByteGroupValueBuilder::<i32>::new(OutputType::Utf8);
+                        v2.push(Box::new(b) as _)
                     }
                     &DataType::LargeUtf8 => {
                         let b = ByteGroupValueBuilder::<i64>::new(OutputType::Utf8);
-                        v.push(Box::new(b) as _)
+                        v.push(Box::new(b) as _);
+                        let b = ByteGroupValueBuilder::<i64>::new(OutputType::Utf8);
+                        v2.push(Box::new(b) as _)
                     }
                     &DataType::Binary => {
                         let b = ByteGroupValueBuilder::<i32>::new(OutputType::Binary);
-                        v.push(Box::new(b) as _)
+                        v.push(Box::new(b) as _);
+                        let b = ByteGroupValueBuilder::<i32>::new(OutputType::Binary);
+                        v2.push(Box::new(b) as _)
                     }
                     &DataType::LargeBinary => {
                         let b = ByteGroupValueBuilder::<i64>::new(OutputType::Binary);
-                        v.push(Box::new(b) as _)
+                        v.push(Box::new(b) as _);
+                        let b = ByteGroupValueBuilder::<i64>::new(OutputType::Binary);
+                        v2.push(Box::new(b) as _)
                     }
                     dt => {
                         return not_impl_err!("{dt} not supported in GroupValuesColumn")
@@ -241,16 +260,215 @@ impl GroupValues for GroupValuesColumn {
             }
 
             self.group_values = v;
+            self.group_values_v2 = v2;
         }
 
         // tracks to which group each of the input rows belongs
         groups.clear();
 
         // 1.1 Calculate the group keys for the group values
-        let batch_hashes = &mut self.current_hashes;
+        let batch_hashes = &mut self.hashes_buffer;
         batch_hashes.clear();
         batch_hashes.resize(n_rows, 0);
         create_hashes(cols, &self.random_state, batch_hashes)?;
+
+        for (row, &target_hash) in batch_hashes.iter().enumerate() {
+            let entry = self.map.get_mut(target_hash, |(exist_hash, group_idx)| {
+                // Somewhat surprisingly, this closure can be called even if the
+                // hash doesn't match, so check the hash first with an integer
+                // comparison first avoid the more expensive comparison with
+                // group value. https://github.com/apache/datafusion/pull/11718
+                if target_hash != *exist_hash {
+                    return false;
+                }
+
+                fn check_row_equal(
+                    array_row: &dyn GroupColumn,
+                    lhs_row: usize,
+                    array: &ArrayRef,
+                    rhs_row: usize,
+                ) -> bool {
+                    array_row.equal_to(lhs_row, array, rhs_row)
+                }
+
+                for (i, group_val) in self.group_values_v2.iter().enumerate() {
+                    if !check_row_equal(group_val.as_ref(), *group_idx, &cols[i], row) {
+                        return false;
+                    }
+                }
+
+                true
+            });
+
+            let group_idx = match entry {
+                // Existing group_index for this group value
+                Some((_hash, group_idx)) => *group_idx,
+                //  1.2 Need to create new entry for the group
+                None => {
+                    // Add new entry to aggr_state and save newly created index
+                    // let group_idx = group_values.num_rows();
+                    // group_values.push(group_rows.row(row));
+
+                    let mut checklen = 0;
+                    let group_idx = self.group_values_v2[0].len();
+                    for (i, group_value) in self.group_values_v2.iter_mut().enumerate() {
+                        group_value.append_val(&cols[i], row);
+                        let len = group_value.len();
+                        if i == 0 {
+                            checklen = len;
+                        } else {
+                            debug_assert_eq!(checklen, len);
+                        }
+                    }
+
+                    // for hasher function, use precomputed hash value
+                    self.map.insert_accounted(
+                        (target_hash, group_idx),
+                        |(hash, _group_index)| *hash,
+                        &mut self.map_size,
+                    );
+                    group_idx
+                }
+            };
+            groups.push(group_idx);
+        }
+        let groups_true = std::mem::take(groups);
+        assert!(groups.is_empty());
+
+        // self.second_app(cols, groups);
+        // if groups_true != *groups {
+        //     println!("groups true: {:?}", groups_true);
+        //     println!("groups: {:?}", groups);
+        // }
+        // assert_eq!(groups_true.len(), groups.len());
+        groups.resize(groups_true.len(), 0);
+
+        for i in 0..groups_true.len() {
+            groups[i] = groups_true[i];
+        }
+        // println!("groups new: {:?}",groups);
+        // println!("cols: {:?}", cols);
+
+        Ok(())
+    }
+
+    
+
+    fn size(&self) -> usize {
+        let group_values_size: usize = self.group_values_v2.iter().map(|v| v.size()).sum();
+        group_values_size + self.map_size + self.hashes_buffer.allocated_size()
+    }
+
+    fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    fn len(&self) -> usize {
+        if self.group_values_v2.is_empty() {
+            return 0;
+        }
+
+        self.group_values_v2[0].len()
+    }
+
+    fn emit(&mut self, emit_to: EmitTo) -> Result<Vec<ArrayRef>> {
+        let mut output = match emit_to {
+            EmitTo::All => {
+                let group_values = std::mem::take(&mut self.group_values_v2);
+                debug_assert!(self.group_values_v2.is_empty());
+                // println!("emit all");
+                // let group_values = std::mem::take(&mut self.group_values);
+                // debug_assert!(self.group_values.is_empty());
+
+                group_values
+                    .into_iter()
+                    .map(|v| v.build())
+                    .collect::<Vec<_>>()
+            }
+            EmitTo::First(n) => {
+                // println!("emit firstn");
+                let output = self
+                    .group_values_v2
+                    .iter_mut()
+                    .map(|v| v.take_n(n))
+                    .collect::<Vec<_>>();
+
+                // let output = self
+                //     .group_values
+                //     .iter_mut()
+                //     .map(|v| v.take_n(n))
+                //     .collect::<Vec<_>>();
+
+                // self.hashes.drain(0..n);
+
+                // for i in 0..self.capacity {
+                //     if self.hash_table[i] > 0 {
+                //         self.hash_table[i] = self.hash_table[i].saturating_sub(n);
+                //     }
+                // }
+
+                // let hash_table_ptr = self.hash_table.as_mut_ptr();
+                // unsafe {
+                //     for i in 0..self.capacity {
+                //         let offset = *hash_table_ptr.add(i);
+                //         if offset != 0 {
+                //             match offset.checked_sub(n + 1) {
+                //                 Some(sub) => *hash_table_ptr.add(i) = sub + 1,
+                //                 None => *hash_table_ptr.add(i) = 0,
+                //             }
+                //         }
+                //     }
+                // }
+
+                unsafe {
+                    for bucket in self.map.iter() {
+                        // Decrement group index by n
+                        match bucket.as_ref().1.checked_sub(n) {
+                            // Group index was >= n, shift value down
+                            Some(sub) => bucket.as_mut().1 = sub,
+                            // Group index was < n, so remove from table
+                            None => self.map.erase(bucket),
+                        }
+                    }
+                }
+
+                output
+            }
+        };
+
+        // TODO: Materialize dictionaries in group keys (#7647)
+        for (field, array) in self.schema.fields.iter().zip(&mut output) {
+            let expected = field.data_type();
+            if let DataType::Dictionary(_, v) = expected {
+                let actual = array.data_type();
+                if v.as_ref() != actual {
+                    return Err(DataFusionError::Internal(format!(
+                        "Converted group rows expected dictionary of {v} got {actual}"
+                    )));
+                }
+                *array = cast(array.as_ref(), expected)?;
+            }
+        }
+
+        Ok(output)
+    }
+
+    fn clear_shrink(&mut self, batch: &RecordBatch) {
+        let count = batch.num_rows();
+        self.group_values.clear();
+        self.map.clear();
+        self.map.shrink_to(count, |_| 0); // hasher does not matter since the map is cleared
+        self.map_size = self.map.capacity() * std::mem::size_of::<(u64, usize)>();
+        self.hashes_buffer.clear();
+        self.hashes_buffer.shrink_to(count);
+        self.hash_table.clear();
+        self.hashes.clear();
+    }
+}
+
+impl GroupValuesColumn {
+    fn second_app(&mut self, cols: &[ArrayRef], groups: &mut Vec<usize>) {
+        let n_rows = cols[0].len();
 
         // rehash if necessary
         let current_n_rows = self.hashes.len();
@@ -291,7 +509,7 @@ impl GroupValues for GroupValuesColumn {
         let bit_mask = self.capacity - 1;
         self.current_offsets.resize(n_rows, 0);
         for row_idx in 0..n_rows {
-            let hash = self.current_hashes[row_idx];
+            let hash = self.hashes_buffer[row_idx];
             let hash_table_idx = (hash as usize) & bit_mask;
             self.current_offsets[row_idx] = hash_table_idx;
         }
@@ -314,7 +532,7 @@ impl GroupValues for GroupValuesColumn {
                 .iter()
                 .take(remaining_entries)
                 .for_each(|&row_idx| {
-                    let hash = self.current_hashes[row_idx];
+                    let hash = self.hashes_buffer[row_idx];
                     let ht_offset = self.current_offsets[row_idx];
                     let offset = self.hash_table[ht_offset];
 
@@ -353,46 +571,61 @@ impl GroupValues for GroupValuesColumn {
                 });
             assert_eq!(self.hashes.len(), self.group_values[0].len());
 
-
-            let equal_check_lhs_indexes = self
-                .need_equality_check
+            self.need_equality_check
                 .iter()
                 .take(n_need_equality_check)
-                .map(|row_idx| {
-                    let ht_offset = self.current_offsets[*row_idx];
-                    self.hash_table[ht_offset] - 1
-                })
-                .collect::<Vec<_>>();
-            let equal_check_rhs_indexes = self
-                .need_equality_check
-                .iter()
-                .take(n_need_equality_check)
-                .map(|row_idx| *row_idx)
-                .collect::<Vec<_>>();
+                .map(|&row_idx| {
+                    let ht_offset = self.current_offsets[row_idx];
+                    let offset = self.hash_table[ht_offset];
+                    let is_equal = self
+                        .group_values
+                        .iter()
+                        .enumerate()
+                        .all(|(j, g)| g.equal_to(offset - 1, &cols[j], row_idx));
+                    if !is_equal {
+                        self.no_match[n_no_match] = row_idx;
+                        n_no_match += 1;
+                    }
+                });
 
-            assert_eq!(self.hashes.len(), self.group_values[0].len());
-            let len = self.hashes.len();
-            for (lhs_row, rhs_row) in equal_check_lhs_indexes
-                .into_iter()
-                .zip(equal_check_rhs_indexes.into_iter())
-            {
-                assert!(lhs_row <= len);
-                // if rhs_row > cols[0].len() {
-                //     println!("rhs_row: {:?}", rhs_row);
-                //     println!("len: {:?}", cols[0].len());
-                // }
-                let is_equal = self
-                    .group_values
-                    .iter()
-                    .enumerate()
-                    .all(|(j, g)| g.equal_to(lhs_row, &cols[j], rhs_row));
-                if !is_equal {
-                    self.no_match[n_no_match] = rhs_row;
-                    n_no_match += 1;
-                }
-            }
+            // let equal_check_lhs_indexes = self
+            //     .need_equality_check
+            //     .iter()
+            //     .take(n_need_equality_check)
+            //     .map(|row_idx| {
+            //         let ht_offset = self.current_offsets[*row_idx];
+            //         self.hash_table[ht_offset] - 1
+            //     })
+            //     .collect::<Vec<_>>();
+            // let equal_check_rhs_indexes = self
+            //     .need_equality_check
+            //     .iter()
+            //     .take(n_need_equality_check)
+            //     .map(|row_idx| *row_idx)
+            //     .collect::<Vec<_>>();
 
-            
+            // assert_eq!(self.hashes.len(), self.group_values[0].len());
+            // let len = self.hashes.len();
+            // for (lhs_row, rhs_row) in equal_check_lhs_indexes
+            //     .into_iter()
+            //     .zip(equal_check_rhs_indexes.into_iter())
+            // {
+            //     assert!(lhs_row <= len);
+            //     // if rhs_row > cols[0].len() {
+            //     //     println!("rhs_row: {:?}", rhs_row);
+            //     //     println!("len: {:?}", cols[0].len());
+            //     // }
+            //     let is_equal = self
+            //         .group_values
+            //         .iter()
+            //         .enumerate()
+            //         .all(|(j, g)| g.equal_to(lhs_row, &cols[j], rhs_row));
+            //     if !is_equal {
+            //         self.no_match[n_no_match] = rhs_row;
+            //         n_no_match += 1;
+            //     }
+            // }
+
             // equality_check(&mut self.no_match, &mut n_no_match, need_equality_check, &self.current_offsets, &self.hash_table, &self.group_values, cols);
 
             // now we need to probing for those rows in `no_match`
@@ -415,89 +648,6 @@ impl GroupValues for GroupValuesColumn {
                 .take(n_rows)
                 .map(|&hash_table_offset| self.hash_table[hash_table_offset] - 1),
         );
-
-        Ok(())
-    }
-
-    fn size(&self) -> usize {
-        let group_values_size: usize = self.group_values.iter().map(|v| v.size()).sum();
-        group_values_size + self.map_size + self.hashes_buffer.allocated_size()
-    }
-
-    fn is_empty(&self) -> bool {
-        self.len() == 0
-    }
-
-    fn len(&self) -> usize {
-        if self.group_values.is_empty() {
-            return 0;
-        }
-
-        self.group_values[0].len()
-    }
-
-    fn emit(&mut self, emit_to: EmitTo) -> Result<Vec<ArrayRef>> {
-        let mut output = match emit_to {
-            EmitTo::All => {
-                let group_values = std::mem::take(&mut self.group_values);
-                debug_assert!(self.group_values.is_empty());
-
-                group_values
-                    .into_iter()
-                    .map(|v| v.build())
-                    .collect::<Vec<_>>()
-            }
-            EmitTo::First(n) => {
-                let output = self
-                    .group_values
-                    .iter_mut()
-                    .map(|v| v.take_n(n))
-                    .collect::<Vec<_>>();
-
-                self.hashes.drain(0..n);
-
-                let hash_table_ptr = self.hash_table.as_mut_ptr();
-                unsafe {
-                    for i in 0..self.capacity {
-                        let offset = *hash_table_ptr.add(i);
-                        if offset != 0 {
-                            match offset.checked_sub(n + 1) {
-                                Some(sub) => *hash_table_ptr.add(i) = sub + 1,
-                                None => *hash_table_ptr.add(i) = 0,
-                            }
-                        }
-                    }
-                }
-
-                output
-            }
-        };
-
-        // TODO: Materialize dictionaries in group keys (#7647)
-        for (field, array) in self.schema.fields.iter().zip(&mut output) {
-            let expected = field.data_type();
-            if let DataType::Dictionary(_, v) = expected {
-                let actual = array.data_type();
-                if v.as_ref() != actual {
-                    return Err(DataFusionError::Internal(format!(
-                        "Converted group rows expected dictionary of {v} got {actual}"
-                    )));
-                }
-                *array = cast(array.as_ref(), expected)?;
-            }
-        }
-
-        Ok(output)
-    }
-
-    fn clear_shrink(&mut self, batch: &RecordBatch) {
-        let count = batch.num_rows();
-        self.group_values.clear();
-        self.map.clear();
-        self.map.shrink_to(count, |_| 0); // hasher does not matter since the map is cleared
-        self.map_size = self.map.capacity() * std::mem::size_of::<(u64, usize)>();
-        self.hashes_buffer.clear();
-        self.hashes_buffer.shrink_to(count);
     }
 }
 
