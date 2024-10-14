@@ -81,11 +81,15 @@ pub struct GroupValuesColumn {
     random_state: RandomState,
 
     // current_hashes: Vec<u64>,
+    /// These values are used per batch, require initialization in `intern()`
+    // Reuse to avoid reallocation
     current_offsets: Vec<usize>,
     new_entries: Vec<usize>,
     need_equality_check: Vec<usize>,
     no_match: Vec<usize>,
     capacity: usize,
+
+    /// The values are shared across batches, should carefully reinitialize in `intern`
     hash_table: Vec<usize>,
     hashes: Vec<u64>,
 }
@@ -102,7 +106,6 @@ impl GroupValuesColumn {
             group_values_v2: vec![],
             hashes_buffer: Default::default(),
             random_state: Default::default(),
-            // current_hashes: Default::default(),
             current_offsets: Default::default(),
             new_entries: Default::default(),
             need_equality_check: Default::default(),
@@ -272,6 +275,11 @@ impl GroupValues for GroupValuesColumn {
         batch_hashes.resize(n_rows, 0);
         create_hashes(cols, &self.random_state, batch_hashes)?;
 
+        let prev_group_len_true = self.group_values_v2[0].len();
+        let mut row_to_append = vec![];
+
+        let ex_g = self.map.len();
+
         for (row, &target_hash) in batch_hashes.iter().enumerate() {
             let entry = self.map.get_mut(target_hash, |(exist_hash, group_idx)| {
                 // Somewhat surprisingly, this closure can be called even if the
@@ -309,6 +317,7 @@ impl GroupValues for GroupValuesColumn {
                     // let group_idx = group_values.num_rows();
                     // group_values.push(group_rows.row(row));
 
+                    row_to_append.push(row);
                     let mut checklen = 0;
                     let group_idx = self.group_values_v2[0].len();
                     for (i, group_value) in self.group_values_v2.iter_mut().enumerate() {
@@ -335,16 +344,59 @@ impl GroupValues for GroupValuesColumn {
         let groups_true = std::mem::take(groups);
         assert!(groups.is_empty());
 
-        // self.second_app(cols, groups);
-        // if groups_true != *groups {
-        //     println!("groups true: {:?}", groups_true);
-        //     println!("groups: {:?}", groups);
+        let after_group_len_true = self.group_values_v2[0].len();
+        assert_eq!(self.group_values[0].len(), self.hashes.len());
+        let prev_group_len = self.group_values[0].len();
+
+        let hash_clone = self.hashes.clone();
+        let hash_table_clone = self.hash_table.clone();
+
+        let row_toappedn = self.second_app(cols, groups);
+        assert_eq!(groups.len(), groups_true.len());
+        let after_group_len = self.group_values[0].len();
+
+        // if prev_group_len_true != prev_group_len {
+        //     println!("prev {} {}", prev_group_len_true, prev_group_len);
         // }
+        if after_group_len_true != after_group_len {
+            // return internal_err!("group mismatched {} {}", after_group_len_true, after_group_len);
+            let first_real_hash = self.hashes_buffer[0];
+            println!("first_real_hash: {:?}", first_real_hash);
+            println!("fhash: {:?}", hash_clone);
+            let bit_mask = self.capacity - 1;
+            let hashes = hash_clone
+                .iter()
+                .cloned()
+                .map(|x| x & (bit_mask as u64))
+                .collect::<Vec<_>>();
+            println!("fhashes: {:?}", hashes);
+            for (i, ht) in hash_table_clone.iter().enumerate() {
+                if *ht > 0 {
+                    println!("i {:?}, ht: {:?}", i, ht);
+                }
+            }
+            let offests = hashes
+                .iter()
+                .cloned()
+                .map(|x| hash_table_clone[x as usize])
+                .collect::<Vec<_>>();
+            println!("offests: {:?}", offests);
+            // println!("hash_table_clone: {:?}", hash_table_clone);
+            println!("after {} {}", after_group_len_true, after_group_len);
+            println!("row to append true: {:?}", row_to_append);
+            println!("row to append: {:?}", row_toappedn);
+        }
+
+        if groups_true != *groups {
+            // println!("groups true: {:?}", groups_true);
+            // println!("groups: {:?}", groups);
+            // println!("jasjhes: {:?}", self.hashes.len());
+        }
         // assert_eq!(groups_true.len(), groups.len());
         groups.resize(groups_true.len(), 0);
 
         for i in 0..groups_true.len() {
-            groups[i] = groups_true[i];
+            groups[i] = groups_true[i]; 
         }
         // println!("groups new: {:?}",groups);
         // println!("cols: {:?}", cols);
@@ -352,10 +404,10 @@ impl GroupValues for GroupValuesColumn {
         Ok(())
     }
 
-    
-
     fn size(&self) -> usize {
-        let group_values_size: usize = self.group_values_v2.iter().map(|v| v.size()).sum();
+        let group_values_size_a: usize = self.group_values.iter().map(|v| v.size()).sum();
+        let group_values_size: usize =
+            self.group_values_v2.iter().map(|v| v.size()).sum();
         group_values_size + self.map_size + self.hashes_buffer.allocated_size()
     }
 
@@ -365,47 +417,106 @@ impl GroupValues for GroupValuesColumn {
 
     fn len(&self) -> usize {
         if self.group_values_v2.is_empty() {
+            assert!(self.group_values.is_empty());
             return 0;
         }
 
+        if self.group_values_v2[0].len() != self.group_values[0].len() {
+            println!(
+                "self.group_values_v2[0].len(): {:?}",
+                self.group_values_v2[0].len()
+            );
+            println!(
+                "self.group_values[0].len(): {:?}",
+                self.group_values[0].len()
+            );
+        }
         self.group_values_v2[0].len()
     }
 
     fn emit(&mut self, emit_to: EmitTo) -> Result<Vec<ArrayRef>> {
         let mut output = match emit_to {
             EmitTo::All => {
-                let group_values = std::mem::take(&mut self.group_values_v2);
-                debug_assert!(self.group_values_v2.is_empty());
-                // println!("emit all");
-                // let group_values = std::mem::take(&mut self.group_values);
-                // debug_assert!(self.group_values.is_empty());
-
-                group_values
+                // TODO: remove
+                let group_values = std::mem::take(&mut self.group_values);
+                debug_assert!(self.group_values.is_empty());
+                let incomeing = group_values
                     .into_iter()
                     .map(|v| v.build())
-                    .collect::<Vec<_>>()
+                    .collect::<Vec<_>>();
+
+                let group_values = std::mem::take(&mut self.group_values_v2);
+                debug_assert!(self.group_values_v2.is_empty());
+
+                let res = group_values
+                    .into_iter()
+                    .map(|v| v.build())
+                    .collect::<Vec<_>>();
+
+                // if incomeing != res {
+                //     println!("incoming: {:?}", incomeing);
+                //     println!("res: {:?}", res);
+                // }
+
+                res
             }
             EmitTo::First(n) => {
-                // println!("emit firstn");
+                if self.group_values[0].len() < n {
+                    println!("value < n {} {}", self.group_values[0].len(), n);
+                }
+                if self.group_values_v2[0].len() < n {
+                    println!("valuev2 < n {} {}", self.group_values_v2[0].len(), n);
+                }
                 let output = self
                     .group_values_v2
                     .iter_mut()
                     .map(|v| v.take_n(n))
                     .collect::<Vec<_>>();
 
-                // let output = self
-                //     .group_values
-                //     .iter_mut()
-                //     .map(|v| v.take_n(n))
-                //     .collect::<Vec<_>>();
+                let output_new = self
+                    .group_values
+                    .iter_mut()
+                    .map(|v| v.take_n(n))
+                    .collect::<Vec<_>>();
 
-                // self.hashes.drain(0..n);
+                let prev_len = self.hashes.len();
+                self.hashes.drain(0..n);
+                if prev_len == 172 && n == 171 {
+                    println!("remaining hash: {:?}", self.hashes);
+                }
 
+                // let mut cnt = 0;
                 // for i in 0..self.capacity {
                 //     if self.hash_table[i] > 0 {
-                //         self.hash_table[i] = self.hash_table[i].saturating_sub(n);
+                //         let v = self.hash_table[i];
+                //         let val = v.saturating_sub(n);
+                //         self.hash_table[i] = val;
+                //         if val > 0 {
+                //             cnt += 1;
+                //         } else {
+                //             //
+                //         }
                 //     }
                 // }
+
+                // assert_eq!(cnt, self.hashes.len());
+                // self.hash_table.clear();
+                // After emitting first N value, we should rehash the remaining value to get the expected hash table
+                // self.rehash_table_with_the_same_cap();
+                // let mut new_table = vec![0; self.capacity];
+                self.hash_table.clear();
+                self.hash_table.resize(self.capacity, 0);
+                let bit_mask = self.capacity - 1;
+                for (i, hash) in self.hashes.iter().enumerate() {
+                    let mut new_idx = *hash as usize & bit_mask;
+                    let mut num_iter = 0;
+                    while self.hash_table[new_idx] != 0 {
+                        num_iter += 1;
+                        new_idx += num_iter * num_iter;
+                        new_idx &= bit_mask;
+                    }
+                    self.hash_table[new_idx] = i + 1;
+                }
 
                 // let hash_table_ptr = self.hash_table.as_mut_ptr();
                 // unsafe {
@@ -420,17 +531,29 @@ impl GroupValues for GroupValuesColumn {
                 //     }
                 // }
 
+                let prev_len_true = self.map.len();
+
                 unsafe {
                     for bucket in self.map.iter() {
                         // Decrement group index by n
                         match bucket.as_ref().1.checked_sub(n) {
                             // Group index was >= n, shift value down
-                            Some(sub) => bucket.as_mut().1 = sub,
+                            Some(sub) => {
+                                bucket.as_mut().1 = sub;
+                                if prev_len == 172 && n == 171 {
+                                    println!("real hash: {}", bucket.as_ref().0);
+                                }
+                            }
                             // Group index was < n, so remove from table
                             None => self.map.erase(bucket),
                         }
                     }
                 }
+
+                
+
+                let after_len_true = self.map.len();
+                assert_eq!(prev_len_true, after_len_true + n);
 
                 output
             }
@@ -456,6 +579,7 @@ impl GroupValues for GroupValuesColumn {
     fn clear_shrink(&mut self, batch: &RecordBatch) {
         let count = batch.num_rows();
         self.group_values.clear();
+        self.group_values_v2.clear();
         self.map.clear();
         self.map.shrink_to(count, |_| 0); // hasher does not matter since the map is cleared
         self.map_size = self.map.capacity() * std::mem::size_of::<(u64, usize)>();
@@ -467,7 +591,38 @@ impl GroupValues for GroupValuesColumn {
 }
 
 impl GroupValuesColumn {
-    fn second_app(&mut self, cols: &[ArrayRef], groups: &mut Vec<usize>) {
+    fn rehash_table_with_the_same_cap(&mut self) {
+        let mut new_table = vec![0; self.capacity];
+        let bit_mask = self.capacity - 1;
+
+        let table_ptr = self.hash_table.as_ptr();
+        let hashes_ptr = self.hashes.as_ptr();
+        let new_table_ptr = new_table.as_mut_ptr();
+
+        unsafe {
+            for i in 0..self.capacity {
+                let offset = *table_ptr.add(i);
+                if offset != 0 {
+                    let hash = *hashes_ptr.add(offset as usize - 1);
+
+                    let mut new_idx = hash as usize & bit_mask;
+                    let mut num_iter = 0;
+                    while *new_table_ptr.add(new_idx) != 0 {
+                        num_iter += 1;
+                        new_idx += num_iter * num_iter;
+                        new_idx &= bit_mask;
+                    }
+                    *new_table_ptr.add(new_idx) = offset;
+                }
+            }
+        }
+
+        self.hash_table = new_table;
+    }
+
+    fn second_app(&mut self, cols: &[ArrayRef], groups: &mut Vec<usize>) -> Vec<usize> {
+        let batch_hashes = &self.hashes_buffer;
+
         let n_rows = cols[0].len();
 
         // rehash if necessary
@@ -509,7 +664,8 @@ impl GroupValuesColumn {
         let bit_mask = self.capacity - 1;
         self.current_offsets.resize(n_rows, 0);
         for row_idx in 0..n_rows {
-            let hash = self.hashes_buffer[row_idx];
+            let hash = batch_hashes[row_idx];
+            // let hash = self.hashes_buffer[row_idx];
             let hash_table_idx = (hash as usize) & bit_mask;
             self.current_offsets[row_idx] = hash_table_idx;
         }
@@ -522,6 +678,8 @@ impl GroupValuesColumn {
         self.no_match.resize(n_rows, 0);
         let mut num_iter = 1;
 
+        let mut row_toappedn = vec![];
+
         while remaining_entries > 0 {
             assert!(self.hashes.len() + remaining_entries <= self.capacity);
 
@@ -532,12 +690,20 @@ impl GroupValuesColumn {
                 .iter()
                 .take(remaining_entries)
                 .for_each(|&row_idx| {
-                    let hash = self.hashes_buffer[row_idx];
+                    let hash = batch_hashes[row_idx];
+                    // let hash = self.hashes_buffer[row_idx];
                     let ht_offset = self.current_offsets[row_idx];
                     let offset = self.hash_table[ht_offset];
 
+                    if row_idx == 0 {
+                        println!("row0 hash: {}, ht_offset:{}, offset:{}", hash, ht_offset, offset);
+                    }
+
                     let is_empty_slot = offset == 0;
                     if is_empty_slot {
+                        // if row_idx == 0 {
+                        //     println!("hash: {:?} ht_offset: {:?}, offest: {:?}", hash, ht_offset, offset);
+                        // }
                         // the slot is empty, so we can create a new entry here
                         self.new_entries[n_new_entries] = row_idx;
                         n_new_entries += 1;
@@ -545,9 +711,16 @@ impl GroupValuesColumn {
                         // we increment the slot entry offset by 1 to reserve the special value
                         // 0 for the scenario when the slot in the
                         // hash table is unoccupied.
-                        self.hash_table[ht_offset] = self.hashes.len() + 1;
+                        let new_offset = self.hashes.len() + 1;
+
+                        self.hash_table[ht_offset] = new_offset;
+
+                        println!("hash: {} ht_offset: {} new_offset: {} iter: {}", hash, ht_offset, new_offset, num_iter);
                         // also update hash for this slot so it can be used later
                         self.hashes.push(hash);
+
+                        // 1-indexed
+                        // self.hash_table_offsets[new_offset - 1] = ht_offset;
                     } else if self.hashes[offset - 1] == hash {
                         // slot is not empty, and hash value match, now need to do equality
                         // check
@@ -561,10 +734,12 @@ impl GroupValuesColumn {
                     }
                 });
 
+            // Parallizable
             self.new_entries
                 .iter()
                 .take(n_new_entries)
                 .for_each(|row_idx| {
+                    row_toappedn.push(*row_idx);
                     for (i, group_value) in self.group_values.iter_mut().enumerate() {
                         group_value.append_val(&cols[i], *row_idx)
                     }
@@ -577,11 +752,20 @@ impl GroupValuesColumn {
                 .map(|&row_idx| {
                     let ht_offset = self.current_offsets[row_idx];
                     let offset = self.hash_table[ht_offset];
-                    let is_equal = self
-                        .group_values
-                        .iter()
-                        .enumerate()
-                        .all(|(j, g)| g.equal_to(offset - 1, &cols[j], row_idx));
+
+                    let mut is_equal = true;
+                    for (j, g) in self.group_values.iter().enumerate() {
+                        if !g.equal_to(offset - 1, &cols[j], row_idx) {
+                            is_equal = false;
+                            break;
+                        }
+                    }
+
+                    // let is_equal = self
+                    //     .group_values
+                    //     .iter()
+                    //     .enumerate()
+                    //     .all(|(j, g)| g.equal_to(offset - 1, &cols[j], row_idx));
                     if !is_equal {
                         self.no_match[n_no_match] = row_idx;
                         n_no_match += 1;
@@ -648,6 +832,8 @@ impl GroupValuesColumn {
                 .take(n_rows)
                 .map(|&hash_table_offset| self.hash_table[hash_table_offset] - 1),
         );
+
+        row_toappedn
     }
 }
 

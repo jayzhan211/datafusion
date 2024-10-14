@@ -1,0 +1,87 @@
+
+statement ok
+set datafusion.execution.target_partitions = 1;
+
+# Make sure the query run in multiple partitions
+statement ok
+set datafusion.execution.batch_size = 2;
+
+statement ok
+create table t1(a int, b varchar) as values 
+(-357113469, null),
+(null, null),
+(null, 'i'),
+(null, 'jhgbzkuiwbgwkt'),
+(-1279405755, 'jhgbzkuiwbgwkt'),
+(-444714478, 'jhgbzkuiwbgwkt'),
+(null, 'jhgbzkuiwbgwkt'),
+(1774788067, 'na'),
+(-1306952328, 'na'),
+(null, 'na'),
+(null, 'na'),
+(1770857641, 'na'),
+(1774788067, 'niihllpeeyvd'),
+(-1792070317, 'niihllpeeyvd'),
+(null, 'niihllpeeyvd');
+
+statement ok
+create table t2(a int, b varchar) as values 
+(null, 'npbbfobgibtgeeqhdn'),
+(null, 'npbbfobgibtgeeqhdn'),
+(462257437, 'spqsbsacoy'),
+(null, 'wesfsqwixzajgulo'),
+(-1337912794, 'wesfsqwixzajgulo'),
+(null, 'wesfsqwixzajgulo'),
+(null, 'wesfsqwixzajgulo');
+
+statement ok
+create table t3(a int, b varchar) as values 
+(-411706700, 'wesfsqwixzajgulo'),
+(null, 'xhazuofxdqkekigwsbgqdcetobrzb'),
+(-411706700, 'xlba'),
+(null, 'xlba');
+
+statement ok
+create table t4(a int, b varchar) as values 
+(null, 'xoyiatitmaso');
+
+statement ok
+create table t5(a int, b varchar) as values 
+(null, 'xoyiatitmaso');
+
+query TI rowsort
+With T as
+ (select * from t1 UNION ALL select * from t2 UNION ALL select * from t3 UNION ALL select * from t4 UNION ALL select * from t5)
+select b, sum(DISTINCT a) from T group by b;
+----
+NULL -357113469
+i NULL
+jhgbzkuiwbgwkt -1724120233
+na 2238693380
+niihllpeeyvd -17282250
+npbbfobgibtgeeqhdn NULL
+spqsbsacoy 462257437
+wesfsqwixzajgulo -1749619494
+xhazuofxdqkekigwsbgqdcetobrzb NULL
+xlba -411706700
+xoyiatitmaso NULL
+
+statement ok
+set datafusion.execution.batch_size = 8192;
+
+query TI rowsort
+With T as
+ (select * from t1 UNION ALL select * from t2 UNION ALL select * from t3 UNION ALL select * from t4 UNION ALL select * from t5)
+select b, sum(DISTINCT a) from T group by b;
+----
+NULL -357113469
+i NULL
+jhgbzkuiwbgwkt -1724120233
+na 2238693380
+niihllpeeyvd -17282250
+npbbfobgibtgeeqhdn NULL
+spqsbsacoy 462257437
+wesfsqwixzajgulo -1749619494
+xhazuofxdqkekigwsbgqdcetobrzb NULL
+xlba -411706700
+xoyiatitmaso NULL

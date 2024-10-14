@@ -1,0 +1,656 @@
+[RecordBatch { schema: Schema { fields: [Field { name: "a", data_type: Int32, nullable: true, dict_id: 0, dict_is_ordered: false, metadata: {} }, Field { name: "b", data_type: Utf8, nullable: true, dict_id: 0, dict_is_ordered: false, metadata: {} }, Field { name: "c", data_type: Int64, nullable: true, dict_id: 0, dict_is_ordered: false, metadata: {} }], metadata: {} }, columns: [PrimitiveArray<Int32>
+[
+], StringArray
+[
+], PrimitiveArray<Int64>
+[
+]], row_count: 0 }, RecordBatch { schema: Schema { fields: [Field { name: "a", data_type: Int32, nullable: true, dict_id: 0, dict_is_ordered: false, metadata: {} }, Field { name: "b", data_type: Utf8, nullable: true, dict_id: 0, dict_is_ordered: false, metadata: {} }, Field { name: "c", data_type: Int64, nullable: true, dict_id: 0, dict_is_ordered: false, metadata: {} }], metadata: {} }, columns: [PrimitiveArray<Int32>
+[
+  null,
+  null,
+  null,
+  2104462536,
+  11663347,
+  -620207880,
+  20063192,
+  11663347,
+  null,
+  1580798191,
+  ...115 elements...,
+  null,
+  -1560869220,
+  2104462536,
+  1580798191,
+  null,
+  null,
+  11663347,
+  11663347,
+  null,
+  -1560869220,
+], StringArray
+[
+  null,
+  null,
+  null,
+  null,
+  null,
+  null,
+  null,
+  null,
+  null,
+  null,
+  ...115 elements...,
+  "am",
+  "am",
+  "am",
+  "am",
+  "am",
+  "am",
+  "am",
+  "am",
+  "am",
+  "ap",
+], PrimitiveArray<Int64>
+[
+  null,
+  -4348034159383376037,
+  null,
+  -2663772559740694289,
+  null,
+  null,
+  -2663772559740694289,
+  5441019060555949345,
+  1663610911169767797,
+  null,
+  ...115 elements...,
+  null,
+  null,
+  -6703882251128566584,
+  1663610911169767797,
+  50093696951023963,
+  5441019060555949345,
+  null,
+  -6703882251128566584,
+  1663610911169767797,
+  50093696951023963,
+]], row_count: 135 }, RecordBatch { schema: Schema { fields: [Field { name: "a", data_type: Int32, nullable: true, dict_id: 0, dict_is_ordered: false, metadata: {} }, Field { name: "b", data_type: Utf8, nullable: true, dict_id: 0, dict_is_ordered: false, metadata: {} }, Field { name: "c", data_type: Int64, nullable: true, dict_id: 0, dict_is_ordered: false, metadata: {} }], metadata: {} }, columns: [PrimitiveArray<Int32>
+[
+], StringArray
+[
+], PrimitiveArray<Int64>
+[
+]], row_count: 0 }, RecordBatch { schema: Schema { fields: [Field { name: "a", data_type: Int32, nullable: true, dict_id: 0, dict_is_ordered: false, metadata: {} }, Field { name: "b", data_type: Utf8, nullable: true, dict_id: 0, dict_is_ordered: false, metadata: {} }, Field { name: "c", data_type: Int64, nullable: true, dict_id: 0, dict_is_ordered: false, metadata: {} }], metadata: {} }, columns: [PrimitiveArray<Int32>
+[
+  11663347,
+  20063192,
+  null,
+  null,
+  null,
+  11663347,
+  -620207880,
+  null,
+  null,
+  -620207880,
+  ...46 elements...,
+  2104462536,
+  20063192,
+  null,
+  20063192,
+  11663347,
+  null,
+  20063192,
+  null,
+  null,
+  1580798191,
+], StringArray
+[
+  "ap",
+  "ap",
+  "ap",
+  "ap",
+  "ap",
+  "ap",
+  "ast",
+  "ast",
+  "ast",
+  "ast",
+  ...46 elements...,
+  "izuy",
+  "izuy",
+  "izuy",
+  "j",
+  "j",
+  "j",
+  "j",
+  "j",
+  "j",
+  "j",
+], PrimitiveArray<Int64>
+[
+  3769477137938712786,
+  null,
+  50093696951023963,
+  1663610911169767797,
+  3769477137938712786,
+  null,
+  3769477137938712786,
+  null,
+  null,
+  -2663772559740694289,
+  ...46 elements...,
+  null,
+  3769477137938712786,
+  null,
+  1663610911169767797,
+  null,
+  null,
+  3769477137938712786,
+  null,
+  null,
+  3769477137938712786,
+]], row_count: 66 }, RecordBatch { schema: Schema { fields: [Field { name: "a", data_type: Int32, nullable: true, dict_id: 0, dict_is_ordered: false, metadata: {} }, Field { name: "b", data_type: Utf8, nullable: true, dict_id: 0, dict_is_ordered: false, metadata: {} }, Field { name: "c", data_type: Int64, nullable: true, dict_id: 0, dict_is_ordered: false, metadata: {} }], metadata: {} }, columns: [PrimitiveArray<Int32>
+[
+  -620207880,
+  null,
+  null,
+  1580798191,
+  null,
+  null,
+  null,
+  2104462536,
+  null,
+  null,
+  ...15 elements...,
+  1580798191,
+  20063192,
+  -620207880,
+  null,
+  null,
+  1580798191,
+  -620207880,
+  -620207880,
+  null,
+  null,
+], StringArray
+[
+  "j",
+  "j",
+  "j",
+  "l",
+  "l",
+  "l",
+  "l",
+  "l",
+  "l",
+  "l",
+  ...15 elements...,
+  "qt",
+  "qt",
+  "qt",
+  "qt",
+  "qt",
+  "qt",
+  "qt",
+  "qt",
+  "rcz",
+  "rcz",
+], PrimitiveArray<Int64>
+[
+  -4348034159383376037,
+  1663610911169767797,
+  1663610911169767797,
+  -4348034159383376037,
+  null,
+  null,
+  null,
+  null,
+  1663610911169767797,
+  1663610911169767797,
+  ...15 elements...,
+  null,
+  null,
+  3769477137938712786,
+  50093696951023963,
+  null,
+  null,
+  null,
+  -4348034159383376037,
+  null,
+  -6703882251128566584,
+]], row_count: 35 }, RecordBatch { schema: Schema { fields: [Field { name: "a", data_type: Int32, nullable: true, dict_id: 0, dict_is_ordered: false, metadata: {} }, Field { name: "b", data_type: Utf8, nullable: true, dict_id: 0, dict_is_ordered: false, metadata: {} }, Field { name: "c", data_type: Int64, nullable: true, dict_id: 0, dict_is_ordered: false, metadata: {} }], metadata: {} }, columns: [PrimitiveArray<Int32>
+[
+], StringArray
+[
+], PrimitiveArray<Int64>
+[
+]], row_count: 0 }, RecordBatch { schema: Schema { fields: [Field { name: "a", data_type: Int32, nullable: true, dict_id: 0, dict_is_ordered: false, metadata: {} }, Field { name: "b", data_type: Utf8, nullable: true, dict_id: 0, dict_is_ordered: false, metadata: {} }, Field { name: "c", data_type: Int64, nullable: true, dict_id: 0, dict_is_ordered: false, metadata: {} }], metadata: {} }, columns: [PrimitiveArray<Int32>
+[
+  2104462536,
+  null,
+  null,
+  11663347,
+  null,
+  null,
+  null,
+  11663347,
+], StringArray
+[
+  "rcz",
+  "rcz",
+  "rcz",
+  "rcz",
+  "rcz",
+  "rcz",
+  "rcz",
+  "rcz",
+], PrimitiveArray<Int64>
+[
+  null,
+  null,
+  null,
+  50093696951023963,
+  1663610911169767797,
+  3769477137938712786,
+  50093696951023963,
+  -2663772559740694289,
+]], row_count: 8 }, RecordBatch { schema: Schema { fields: [Field { name: "a", data_type: Int32, nullable: true, dict_id: 0, dict_is_ordered: false, metadata: {} }, Field { name: "b", data_type: Utf8, nullable: true, dict_id: 0, dict_is_ordered: false, metadata: {} }, Field { name: "c", data_type: Int64, nullable: true, dict_id: 0, dict_is_ordered: false, metadata: {} }], metadata: {} }, columns: [PrimitiveArray<Int32>
+[
+], StringArray
+[
+], PrimitiveArray<Int64>
+[
+]], row_count: 0 }, RecordBatch { schema: Schema { fields: [Field { name: "a", data_type: Int32, nullable: true, dict_id: 0, dict_is_ordered: false, metadata: {} }, Field { name: "b", data_type: Utf8, nullable: true, dict_id: 0, dict_is_ordered: false, metadata: {} }, Field { name: "c", data_type: Int64, nullable: true, dict_id: 0, dict_is_ordered: false, metadata: {} }], metadata: {} }, columns: [PrimitiveArray<Int32>
+[
+], StringArray
+[
+], PrimitiveArray<Int64>
+[
+]], row_count: 0 }, RecordBatch { schema: Schema { fields: [Field { name: "a", data_type: Int32, nullable: true, dict_id: 0, dict_is_ordered: false, metadata: {} }, Field { name: "b", data_type: Utf8, nullable: true, dict_id: 0, dict_is_ordered: false, metadata: {} }, Field { name: "c", data_type: Int64, nullable: true, dict_id: 0, dict_is_ordered: false, metadata: {} }], metadata: {} }, columns: [PrimitiveArray<Int32>
+[
+], StringArray
+[
+], PrimitiveArray<Int64>
+[
+]], row_count: 0 }, RecordBatch { schema: Schema { fields: [Field { name: "a", data_type: Int32, nullable: true, dict_id: 0, dict_is_ordered: false, metadata: {} }, Field { name: "b", data_type: Utf8, nullable: true, dict_id: 0, dict_is_ordered: false, metadata: {} }, Field { name: "c", data_type: Int64, nullable: true, dict_id: 0, dict_is_ordered: false, metadata: {} }], metadata: {} }, columns: [PrimitiveArray<Int32>
+[
+  null,
+  11663347,
+  20063192,
+  -1270843045,
+  null,
+], StringArray
+[
+  "rcz",
+  "rcz",
+  "rcz",
+  "uzr",
+  "uzr",
+], PrimitiveArray<Int64>
+[
+  -4348034159383376037,
+  null,
+  null,
+  null,
+  null,
+]], row_count: 5 }, RecordBatch { schema: Schema { fields: [Field { name: "a", data_type: Int32, nullable: true, dict_id: 0, dict_is_ordered: false, metadata: {} }, Field { name: "b", data_type: Utf8, nullable: true, dict_id: 0, dict_is_ordered: false, metadata: {} }, Field { name: "c", data_type: Int64, nullable: true, dict_id: 0, dict_is_ordered: false, metadata: {} }], metadata: {} }, columns: [PrimitiveArray<Int32>
+[
+], StringArray
+[
+], PrimitiveArray<Int64>
+[
+]], row_count: 0 }, RecordBatch { schema: Schema { fields: [Field { name: "a", data_type: Int32, nullable: true, dict_id: 0, dict_is_ordered: false, metadata: {} }, Field { name: "b", data_type: Utf8, nullable: true, dict_id: 0, dict_is_ordered: false, metadata: {} }, Field { name: "c", data_type: Int64, nullable: true, dict_id: 0, dict_is_ordered: false, metadata: {} }], metadata: {} }, columns: [PrimitiveArray<Int32>
+[
+], StringArray
+[
+], PrimitiveArray<Int64>
+[
+]], row_count: 0 }, RecordBatch { schema: Schema { fields: [Field { name: "a", data_type: Int32, nullable: true, dict_id: 0, dict_is_ordered: false, metadata: {} }, Field { name: "b", data_type: Utf8, nullable: true, dict_id: 0, dict_is_ordered: false, metadata: {} }, Field { name: "c", data_type: Int64, nullable: true, dict_id: 0, dict_is_ordered: false, metadata: {} }], metadata: {} }, columns: [PrimitiveArray<Int32>
+[
+  -1560869220,
+], StringArray
+[
+  "uzr",
+], PrimitiveArray<Int64>
+[
+  1663610911169767797,
+]], row_count: 1 }, RecordBatch { schema: Schema { fields: [Field { name: "a", data_type: Int32, nullable: true, dict_id: 0, dict_is_ordered: false, metadata: {} }, Field { name: "b", data_type: Utf8, nullable: true, dict_id: 0, dict_is_ordered: false, metadata: {} }, Field { name: "c", data_type: Int64, nullable: true, dict_id: 0, dict_is_ordered: false, metadata: {} }], metadata: {} }, columns: [PrimitiveArray<Int32>
+[
+], StringArray
+[
+], PrimitiveArray<Int64>
+[
+]], row_count: 0 }, RecordBatch { schema: Schema { fields: [Field { name: "a", data_type: Int32, nullable: true, dict_id: 0, dict_is_ordered: false, metadata: {} }, Field { name: "b", data_type: Utf8, nullable: true, dict_id: 0, dict_is_ordered: false, metadata: {} }, Field { name: "c", data_type: Int64, nullable: true, dict_id: 0, dict_is_ordered: false, metadata: {} }], metadata: {} }, columns: [PrimitiveArray<Int32>
+[
+], StringArray
+[
+], PrimitiveArray<Int64>
+[
+]], row_count: 0 }, RecordBatch { schema: Schema { fields: [Field { name: "a", data_type: Int32, nullable: true, dict_id: 0, dict_is_ordered: false, metadata: {} }, Field { name: "b", data_type: Utf8, nullable: true, dict_id: 0, dict_is_ordered: false, metadata: {} }, Field { name: "c", data_type: Int64, nullable: true, dict_id: 0, dict_is_ordered: false, metadata: {} }], metadata: {} }, columns: [PrimitiveArray<Int32>
+[
+], StringArray
+[
+], PrimitiveArray<Int64>
+[
+]], row_count: 0 }, RecordBatch { schema: Schema { fields: [Field { name: "a", data_type: Int32, nullable: true, dict_id: 0, dict_is_ordered: false, metadata: {} }, Field { name: "b", data_type: Utf8, nullable: true, dict_id: 0, dict_is_ordered: false, metadata: {} }, Field { name: "c", data_type: Int64, nullable: true, dict_id: 0, dict_is_ordered: false, metadata: {} }], metadata: {} }, columns: [PrimitiveArray<Int32>
+[
+  null,
+  -1270843045,
+  -1560869220,
+  11663347,
+  2104462536,
+  null,
+], StringArray
+[
+  "uzr",
+  "uzr",
+  "uzr",
+  "uzr",
+  "uzr",
+  "uzr",
+], PrimitiveArray<Int64>
+[
+  5441019060555949345,
+  -6703882251128566584,
+  null,
+  -6703882251128566584,
+  1663610911169767797,
+  null,
+]], row_count: 6 }]
+param: SessionContextParams { batch_size: 116, target_partitions: 1, sort_hint: true, skip_partial_params: SkipPartialParams { ratio_threshold: 1.0, rows_threshold: 18446744073709551615 } }
+expect: +------+----------------------------+
+| b    | sum(DISTINCT fuzz_table.a) |
++------+----------------------------+
+|      | 265067121                  |
+| am   | 2136054854                 |
+| ap   | -1529142681                |
+| ast  | 980653503                  |
+| bxhl | 2104462536                 |
+| etl  | 865211809                  |
+| gma  | 2434480874                 |
+| gv   | 20063192                   |
+| izuy | 233474803                  |
+| j    | 992316850                  |
+| l    | 1825936341                 |
+| qt   | 980653503                  |
+| rcz  | 2136189075                 |
+| uzr  | -715586382                 |
++------+----------------------------+
+got: +------+----------------------------+
+| b    | sum(DISTINCT fuzz_table.a) |
++------+----------------------------+
+|      | 265067121                  |
+| am   | 2136054854                 |
+| ap   | -1529142681                |
+| ast  | 980653503                  |
+| bxhl | 2104462536                 |
+| etl  | 865211809                  |
+| gma  | 2434480874                 |
+| gv   | 20063192                   |
+| izuy | 233474803                  |
+| j    | 992316850                  |
+| gv   |                            |
+| l    | 1825936341                 |
+| qt   | 980653503                  |
+| rcz  | 2136189075                 |
+| uzr  | -715586382                 |
++------+----------------------------+
+input: +-------------+------+----------------------+
+| a           | b    | c                    |
++-------------+------+----------------------+
+|             |      |                      |
+|             |      | -4348034159383376037 |
+|             |      |                      |
+| 2104462536  |      | -2663772559740694289 |
+| 11663347    |      |                      |
+| -620207880  |      |                      |
+| 20063192    |      | -2663772559740694289 |
+| 11663347    |      | 5441019060555949345  |
+|             |      | 1663610911169767797  |
+| 1580798191  |      |                      |
+|             |      |                      |
+| 20063192    |      |                      |
+|             |      |                      |
+|             |      |                      |
+|             |      |                      |
+|             |      | 3769477137938712786  |
+|             |      | -4348034159383376037 |
+|             |      |                      |
+| -1560869220 |      |                      |
+| 2104462536  |      | 3769477137938712786  |
+| -620207880  |      |                      |
+|             |      | -2663772559740694289 |
+|             |      |                      |
+| 11663347    |      | 5441019060555949345  |
+|             |      | 5441019060555949345  |
+| -1560869220 |      |                      |
+|             |      |                      |
+| -1560869220 |      |                      |
+|             |      | -2663772559740694289 |
+|             |      | 5441019060555949345  |
+| 20063192    |      |                      |
+| 2104462536  |      | 50093696951023963    |
+| 1580798191  |      |                      |
+|             |      |                      |
+| -1270843045 |      |                      |
+| -1560869220 |      | -6703882251128566584 |
+| 1580798191  |      | -4348034159383376037 |
+| -620207880  |      | -6703882251128566584 |
+| -1270843045 |      |                      |
+|             |      | -6703882251128566584 |
+| -1270843045 |      | -4348034159383376037 |
+| -1270843045 |      | -2663772559740694289 |
+| 2104462536  |      | 50093696951023963    |
+| -1270843045 |      |                      |
+| 2104462536  |      |                      |
+| 20063192    |      | -4348034159383376037 |
+| 2104462536  |      | 1663610911169767797  |
+|             |      | 50093696951023963    |
+| 20063192    |      | 5441019060555949345  |
+| 20063192    |      | 3769477137938712786  |
+| -1560869220 |      |                      |
+|             |      |                      |
+|             |      |                      |
+|             |      | 50093696951023963    |
+|             |      |                      |
+| 2104462536  |      |                      |
+| 11663347    |      | -6703882251128566584 |
+| 11663347    |      | -6703882251128566584 |
+| -1270843045 |      |                      |
+| 1580798191  |      |                      |
+| -1270843045 |      | 5441019060555949345  |
+|             |      | 1663610911169767797  |
+| -1560869220 |      | -4348034159383376037 |
+| 1580798191  |      | -6703882251128566584 |
+|             |      | -2663772559740694289 |
+| -1270843045 |      |                      |
+| -620207880  |      | -4348034159383376037 |
+| 11663347    |      | 5441019060555949345  |
+| 2104462536  |      |                      |
+| -1560869220 |      |                      |
+| 2104462536  |      | 50093696951023963    |
+|             |      |                      |
+|             |      |                      |
+| 1580798191  |      | -2663772559740694289 |
+| -620207880  |      | -4348034159383376037 |
+| 11663347    |      | 5441019060555949345  |
+| 2104462536  |      |                      |
+| -1560869220 |      |                      |
+| 1580798191  |      |                      |
+|             |      | 50093696951023963    |
+| 20063192    |      |                      |
+|             |      | 1663610911169767797  |
+| -620207880  |      |                      |
+|             |      |                      |
+| 1580798191  |      |                      |
+| -620207880  |      | -4348034159383376037 |
+| 11663347    |      | -2663772559740694289 |
+| 2104462536  |      |                      |
+| -1270843045 |      | 50093696951023963    |
+| -620207880  |      |                      |
+|             |      | -2663772559740694289 |
+|             |      |                      |
+|             |      |                      |
+| 1580798191  |      | -4348034159383376037 |
+|             |      | -6703882251128566584 |
+| 2104462536  |      | 5441019060555949345  |
+| -620207880  |      | -6703882251128566584 |
+| -1560869220 |      | -6703882251128566584 |
+| -1560869220 |      | -2663772559740694289 |
+| 11663347    |      |                      |
+| 11663347    |      | 5441019060555949345  |
+| -1560869220 |      | 3769477137938712786  |
+| 11663347    |      | -2663772559740694289 |
+|             |      | 1663610911169767797  |
+| 1580798191  |      |                      |
+| -1270843045 |      |                      |
+|             |      |                      |
+| 1580798191  |      | -2663772559740694289 |
+|             |      | -6703882251128566584 |
+|             |      | 50093696951023963    |
+| 20063192    |      | 50093696951023963    |
+|             |      | -2663772559740694289 |
+| 11663347    |      | 1663610911169767797  |
+|             |      | -2663772559740694289 |
+| 1580798191  |      | 1663610911169767797  |
+| 11663347    |      |                      |
+| -620207880  |      |                      |
+|             |      |                      |
+|             |      |                      |
+|             |      |                      |
+|             |      | -4348034159383376037 |
+|             |      |                      |
+| 2104462536  |      |                      |
+|             |      | -6703882251128566584 |
+|             |      | -2663772559740694289 |
+|             | am   |                      |
+| -1560869220 | am   |                      |
+| 2104462536  | am   | -6703882251128566584 |
+| 1580798191  | am   | 1663610911169767797  |
+|             | am   | 50093696951023963    |
+|             | am   | 5441019060555949345  |
+| 11663347    | am   |                      |
+| 11663347    | am   | -6703882251128566584 |
+|             | am   | 1663610911169767797  |
+| -1560869220 | ap   | 50093696951023963    |
+| 11663347    | ap   | 3769477137938712786  |
+| 20063192    | ap   |                      |
+|             | ap   | 50093696951023963    |
+|             | ap   | 1663610911169767797  |
+|             | ap   | 3769477137938712786  |
+| 11663347    | ap   |                      |
+| -620207880  | ast  | 3769477137938712786  |
+|             | ast  |                      |
+|             | ast  |                      |
+| -620207880  | ast  | -2663772559740694289 |
+| 20063192    | ast  | -2663772559740694289 |
+|             | ast  | 3769477137938712786  |
+|             | ast  |                      |
+| 1580798191  | ast  | -4348034159383376037 |
+|             | bxhl | 5441019060555949345  |
+| 2104462536  | bxhl | -4348034159383376037 |
+|             | bxhl | -4348034159383376037 |
+|             | bxhl | -2663772559740694289 |
+|             | bxhl | -2663772559740694289 |
+|             | bxhl |                      |
+|             | bxhl | -6703882251128566584 |
+| 11663347    | etl  |                      |
+| -1560869220 | etl  |                      |
+|             | etl  |                      |
+|             | etl  |                      |
+| -1560869220 | etl  | 3769477137938712786  |
+| 1580798191  | etl  |                      |
+|             | etl  |                      |
+| 2104462536  | etl  | -6703882251128566584 |
+|             | etl  |                      |
+| -1270843045 | etl  | -4348034159383376037 |
+|             | gma  | 50093696951023963    |
+| 1580798191  | gma  |                      |
+|             | gma  | -4348034159383376037 |
+| 20063192    | gma  |                      |
+| 2104462536  | gma  |                      |
+|             | gma  |                      |
+| 1580798191  | gma  | 5441019060555949345  |
+| -1270843045 | gma  | -2663772559740694289 |
+|             | gv   | 1663610911169767797  |
+|             | gv   | 3769477137938712786  |
+|             | gv   | 1663610911169767797  |
+|             | gv   | 3769477137938712786  |
+|             | gv   | -2663772559740694289 |
+| 20063192    | gv   |                      |
+|             | izuy | -2663772559740694289 |
+|             | izuy |                      |
+| -620207880  | izuy | 5441019060555949345  |
+|             | izuy | 50093696951023963    |
+| 2104462536  | izuy | 3769477137938712786  |
+| 2104462536  | izuy | 1663610911169767797  |
+|             | izuy | -2663772559740694289 |
+| -620207880  | izuy |                      |
+| -1270843045 | izuy | -6703882251128566584 |
+| -1270843045 | izuy | 5441019060555949345  |
+| -1270843045 | izuy | 5441019060555949345  |
+| 2104462536  | izuy |                      |
+| 20063192    | izuy | 3769477137938712786  |
+|             | izuy |                      |
+| 20063192    | j    | 1663610911169767797  |
+| 11663347    | j    |                      |
+|             | j    |                      |
+| 20063192    | j    | 3769477137938712786  |
+|             | j    |                      |
+|             | j    |                      |
+| 1580798191  | j    | 3769477137938712786  |
+| -620207880  | j    | -4348034159383376037 |
+|             | j    | 1663610911169767797  |
+|             | j    | 1663610911169767797  |
+| 1580798191  | l    | -4348034159383376037 |
+|             | l    |                      |
+|             | l    |                      |
+|             | l    |                      |
+| 2104462536  | l    |                      |
+|             | l    | 1663610911169767797  |
+|             | l    | 1663610911169767797  |
+| 20063192    | l    |                      |
+|             | l    | -4348034159383376037 |
+| -620207880  | l    | 1663610911169767797  |
+|             | l    | 3769477137938712786  |
+| -1270843045 | l    | -2663772559740694289 |
+| -1270843045 | l    |                      |
+|             | l    |                      |
+| -620207880  | l    |                      |
+|             | l    |                      |
+| 11663347    | l    |                      |
+|             | l    | -4348034159383376037 |
+|             | l    |                      |
+|             | l    | 3769477137938712786  |
+| 1580798191  | qt   | 3769477137938712786  |
+|             | qt   | -6703882251128566584 |
+| 1580798191  | qt   |                      |
+| 20063192    | qt   |                      |
+| -620207880  | qt   | 3769477137938712786  |
+|             | qt   | 50093696951023963    |
+|             | qt   |                      |
+| 1580798191  | qt   |                      |
+| -620207880  | qt   |                      |
+| -620207880  | qt   | -4348034159383376037 |
+|             | rcz  |                      |
+|             | rcz  | -6703882251128566584 |
+| 2104462536  | rcz  |                      |
+|             | rcz  |                      |
+|             | rcz  |                      |
+| 11663347    | rcz  | 50093696951023963    |
+|             | rcz  | 1663610911169767797  |
+|             | rcz  | 3769477137938712786  |
+|             | rcz  | 50093696951023963    |
+| 11663347    | rcz  | -2663772559740694289 |
+|             | rcz  | -4348034159383376037 |
+| 11663347    | rcz  |                      |
+| 20063192    | rcz  |                      |
+| -1270843045 | uzr  |                      |
+|             | uzr  |                      |
+| -1560869220 | uzr  | 1663610911169767797  |
+|             | uzr  | 5441019060555949345  |
+| -1270843045 | uzr  | -6703882251128566584 |
+| -1560869220 | uzr  |                      |
+| 11663347    | uzr  | -6703882251128566584 |
+| 2104462536  | uzr  | 1663610911169767797  |
+|             | uzr  |                      |
++-------------+------+----------------------+

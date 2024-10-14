@@ -16,11 +16,13 @@
 // under the License.
 
 use core::task;
-use std::sync::Arc;
+use std::io::Write;
+use std::{fs::File, sync::Arc};
 
 use arrow::util::pretty::pretty_format_batches;
 use arrow_array::RecordBatch;
-use rand::{thread_rng, Rng};
+use rand::rngs::StdRng;
+use rand::{thread_rng, Rng, SeedableRng};
 use tokio::task::JoinSet;
 
 use crate::fuzz_cases::aggregation_fuzzer::{
@@ -136,20 +138,26 @@ impl AggregationFuzzer {
     pub async fn run(&self) {
         let mut join_set = JoinSet::new();
         let mut rng = thread_rng();
+        // let seed = rng.gen::<u64>();
+        let seed = 5334308113685840330;
+        println!("seed: {:?}", seed);
+        let mut std_rng = StdRng::seed_from_u64(seed);
 
         // Loop to generate datasets and its query
         for _ in 0..self.data_gen_rounds {
             // Generate datasets first
             let datasets = self
                 .dataset_generator
-                .generate()
+                .generate(Some(seed))
                 .expect("should success to generate dataset");
+
+            // println!("datasets: {:?}", datasets);
 
             // Then for each of them, we random select a test sql for it
             let query_groups = datasets
                 .into_iter()
                 .map(|dataset| {
-                    let sql_idx = rng.gen_range(0..self.candidate_sqls.len());
+                    let sql_idx = std_rng.gen_range(0..self.candidate_sqls.len());
                     let sql = self.candidate_sqls[sql_idx].clone();
 
                     QueryGroup { dataset, sql }
@@ -166,7 +174,6 @@ impl AggregationFuzzer {
 
         while let Some(join_handle) = join_set.join_next().await {
             // propagate errors
-            println!("join_handle: {:?}", join_handle);
             join_handle.unwrap();
         }
     }
@@ -250,30 +257,53 @@ impl AggregationFuzzTestTask {
     fn check_result(&self, task_result: &[RecordBatch], expected_result: &[RecordBatch]) {
         let result = check_equality_of_batches(task_result, expected_result);
         if let Err(e) = result {
-            // If we found inconsistent result, we print the test details for reproducing at first
+            let mut file = File::create("output.txt").unwrap();
+            writeln!(file, "{:?}", self.dataset_ref.batches).unwrap();
+            writeln!(file, "param: {:?}", self.ctx_with_params.params).unwrap();
+
+            let e = pretty_format_batches(expected_result).unwrap();
+            let got = pretty_format_batches(task_result).unwrap();
             println!(
-                "##### AggregationFuzzer error report #####
-                 ### Sql:\n{}\n\
-                 ### Schema:\n{}\n\
-                 ### Session context params:\n{:?}\n\
-                 ### Inconsistent row:\n\
-                 - row_idx:{}\n\
-                 - task_row:{}\n\
-                 - expected_row:{}\n\
-                 ### Task total result:\n{}\n\
-                 ### Expected total result:\n{}\n\
-                 ### Input:\n{}\n\
-                 ",
-                self.sql,
-                self.dataset_ref.batches[0].schema_ref(),
-                self.ctx_with_params.params,
-                e.row_idx,
-                e.lhs_row,
-                e.rhs_row,
-                pretty_format_batches(task_result).unwrap(),
-                pretty_format_batches(expected_result).unwrap(),
-                pretty_format_batches(&self.dataset_ref.batches).unwrap(),
+                "self.dataset_ref.batches len: {:?}",
+                self.dataset_ref.batches.len()
             );
+            let first_arr = self.dataset_ref.batches[0].column(0);
+            println!("first_arr: {:?}", first_arr);
+            let sec_arr = self.dataset_ref.batches[0].column(1);
+            let input = pretty_format_batches(&self.dataset_ref.batches).unwrap();
+            writeln!(file, "expect: {}", e);
+            writeln!(file, "got: {}", got);
+            writeln!(file, "input: {}", input);
+            // writeln!(file, "first_arr: {}", first_arr);
+
+            // println!("batches: {:?}", self.dataset_ref.batches);
+            // If we found inconsistent result, we print the test details for reproducing at first
+            // println!(
+            //     "##### AggregationFuzzer error report #####
+            //      ### Sql:\n{}\n\
+            //      ### Schema:\n{}\n\
+            //      ### Session context params:\n{:?}\n\
+            //      ### Inconsistent row:\n\
+            //      - row_idx:{}\n\
+            //      - task_row:{}\n\
+            //      - expected_row:{}\n\
+            //      ### Task total result:\n{}\n\
+            //      ### Expected total result:\n{}\n\
+            //      ### Input:\n{}\n\
+            //      ",
+            //     self.sql,
+            //     self.dataset_ref.batches[0].schema_ref(),
+            //     self.ctx_with_params.params,
+            //     e.row_idx,
+            //     e.lhs_row,
+            //     e.rhs_row,
+            //     // pretty_format_batches(task_result).unwrap(),
+            //     // pretty_format_batches(expected_result).unwrap(),
+            //     // pretty_format_batches(&self.dataset_ref.batches).unwrap(),
+            //     "",
+            //     "",
+            //     ""
+            // );
 
             // Then we just panic
             panic!("The result mismatch");

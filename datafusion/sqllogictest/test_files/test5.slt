@@ -1,0 +1,25 @@
+statement ok
+create table t1(a int, id varchar, name varchar) as values (1, 'a', 'id1'), (2, 'b', 'id2');
+
+statement ok
+create table t2(a int, id varchar) as values (1, 'a'), (2, 'b'), (3, 'c');
+
+query ITTIT
+select * from t1 join t2 on t1.id = t2.id;
+----
+1 a id1 1 a
+2 b id2 2 b
+
+query TT
+explain select * from t1 join t2 on t1.id = t2.id;
+----
+logical_plan
+01)Inner Join: t1.id = t2.id
+02)--TableScan: t1 projection=[a, id, name]
+03)--TableScan: t2 projection=[a, id]
+physical_plan
+01)ProjectionExec: expr=[a@2 as a, id@3 as id, name@4 as name, a@0 as a, id@1 as id]
+02)--CoalesceBatchesExec: target_batch_size=8192
+03)----HashJoinExec: mode=Partitioned, join_type=Inner, on=[(id@1, id@1)]
+04)------MemoryExec: partitions=1, partition_sizes=[1]
+05)------MemoryExec: partitions=1, partition_sizes=[1]

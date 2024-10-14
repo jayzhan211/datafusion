@@ -1,0 +1,131 @@
+[RecordBatch { schema: Schema { fields: [Field { name: "a", data_type: Int32, nullable: true, dict_id: 0, dict_is_ordered: false, metadata: {} }, Field { name: "b", data_type: Utf8, nullable: true, dict_id: 0, dict_is_ordered: false, metadata: {} }, Field { name: "c", data_type: Int64, nullable: true, dict_id: 0, dict_is_ordered: false, metadata: {} }], metadata: {} }, columns: [PrimitiveArray<Int32>
+[
+  -1552503027,
+  1952867677,
+  188349958,
+  -2006510098,
+  null,
+  -1552503027,
+  -1189484247,
+  -2006510098,
+  -1189484247,
+  -729320203,
+  1721437720,
+  -2006510098,
+  -1647665320,
+], StringArray
+[
+  null,
+  null,
+  "嫎\u{1047ab}鹎\u{9e77d}\u{9c52e}\u{ee69a}\u{76d47}\u{6b850}\u{64053}\u{efa71}\u{e1e24}\u{8ca06}\u{3b381}\u{dc7a6}\u{fd85d}흁\u{8c650}\u{71695}\u{3bcbc}\u{e6e02}\u{7a0ab}\u{9d690}\u{61a04}\u{87272}\u{1a177}\u{5c181}\u{9f447}𨬚\u{6e241}\u{ce6ba}\u{a817e}\u{fd826}\u{72f66}\u{d24b2}\u{10d44f}\u{d0fdc}\u{1ee3a}\u{ab697}\u{5a3df}\u{bac06}\u{b7479}\u{ab1df}\u{82215}",
+  "嫎\u{1047ab}鹎\u{9e77d}\u{9c52e}\u{ee69a}\u{76d47}\u{6b850}\u{64053}\u{efa71}\u{e1e24}\u{8ca06}\u{3b381}\u{dc7a6}\u{fd85d}흁\u{8c650}\u{71695}\u{3bcbc}\u{e6e02}\u{7a0ab}\u{9d690}\u{61a04}\u{87272}\u{1a177}\u{5c181}\u{9f447}𨬚\u{6e241}\u{ce6ba}\u{a817e}\u{fd826}\u{72f66}\u{d24b2}\u{10d44f}\u{d0fdc}\u{1ee3a}\u{ab697}\u{5a3df}\u{bac06}\u{b7479}\u{ab1df}\u{82215}",
+  "嫎\u{1047ab}鹎\u{9e77d}\u{9c52e}\u{ee69a}\u{76d47}\u{6b850}\u{64053}\u{efa71}\u{e1e24}\u{8ca06}\u{3b381}\u{dc7a6}\u{fd85d}흁\u{8c650}\u{71695}\u{3bcbc}\u{e6e02}\u{7a0ab}\u{9d690}\u{61a04}\u{87272}\u{1a177}\u{5c181}\u{9f447}𨬚\u{6e241}\u{ce6ba}\u{a817e}\u{fd826}\u{72f66}\u{d24b2}\u{10d44f}\u{d0fdc}\u{1ee3a}\u{ab697}\u{5a3df}\u{bac06}\u{b7479}\u{ab1df}\u{82215}",
+  "嫎\u{1047ab}鹎\u{9e77d}\u{9c52e}\u{ee69a}\u{76d47}\u{6b850}\u{64053}\u{efa71}\u{e1e24}\u{8ca06}\u{3b381}\u{dc7a6}\u{fd85d}흁\u{8c650}\u{71695}\u{3bcbc}\u{e6e02}\u{7a0ab}\u{9d690}\u{61a04}\u{87272}\u{1a177}\u{5c181}\u{9f447}𨬚\u{6e241}\u{ce6ba}\u{a817e}\u{fd826}\u{72f66}\u{d24b2}\u{10d44f}\u{d0fdc}\u{1ee3a}\u{ab697}\u{5a3df}\u{bac06}\u{b7479}\u{ab1df}\u{82215}",
+  "\u{e42e}\u{91766}\u{89c8b}\u{933d3}\u{37818}\u{3b2d4}눂\u{37e85}\u{3a5f0}\u{73efc}\u{c7d3b}𐳭𣍐\u{cdf1f}\u{77508}\u{4a9c5}嚷\u{d9230}\u{45896}\u{d2a39}\u{1003e1}\u{3827a}\u{89d05}𛇋\u{edd67}\u{7c7eb}\u{c19b6}\u{10bf25}\u{37931}\u{c9e46}葤\u{cf477}\u{62c01}\u{8920f}🧛\u{37c40}\u{4317f}\u{1a412}\u{63c6f}𭴖",
+  "\u{e42e}\u{91766}\u{89c8b}\u{933d3}\u{37818}\u{3b2d4}눂\u{37e85}\u{3a5f0}\u{73efc}\u{c7d3b}𐳭𣍐\u{cdf1f}\u{77508}\u{4a9c5}嚷\u{d9230}\u{45896}\u{d2a39}\u{1003e1}\u{3827a}\u{89d05}𛇋\u{edd67}\u{7c7eb}\u{c19b6}\u{10bf25}\u{37931}\u{c9e46}葤\u{cf477}\u{62c01}\u{8920f}🧛\u{37c40}\u{4317f}\u{1a412}\u{63c6f}𭴖",
+  "\u{7ba30}\u{90b2f}\u{a3bc9}\u{10bd13}\u{cb607}\u{79b45}",
+  "\u{7ba30}\u{90b2f}\u{a3bc9}\u{10bd13}\u{cb607}\u{79b45}",
+  "\u{7ba30}\u{90b2f}\u{a3bc9}\u{10bd13}\u{cb607}\u{79b45}",
+  "\u{7ba30}\u{90b2f}\u{a3bc9}\u{10bd13}\u{cb607}\u{79b45}",
+  "\u{7f898}𗂵\u{1061e1}\u{101a2b}\u{a85a7}\u{caa85}\u{7678f}𑌠\u{eaf22}\u{72bed}\u{d9a56}\u{16378}\u{539ef}\u{d142f}\u{457ef}\u{8fef6}\u{802bb}𨸻\u{b0920}\u{82ea8}鞣\u{858b7}\u{c1840}ⳝ\u{773d8}\u{1a7ad}\u{10d66e}\u{79e54}\u{5104e}\u{bf6d8}𪉜\u{4caef}\u{43b5a}\u{dec78}\u{34102}\u{7540a}\u{836e3}\u{46501}\u{c3448}\u{bb142}",
+], PrimitiveArray<Int64>
+[
+  -6667949724800521943,
+  -6667949724800521943,
+  808956911292196769,
+  1260943554524879296,
+  808956911292196769,
+  1260943554524879296,
+  1260943554524879296,
+  1260943554524879296,
+  -6667949724800521943,
+  808956911292196769,
+  1260943554524879296,
+  1260943554524879296,
+  1260943554524879296,
+]], row_count: 13 }, RecordBatch { schema: Schema { fields: [Field { name: "a", data_type: Int32, nullable: true, dict_id: 0, dict_is_ordered: false, metadata: {} }, Field { name: "b", data_type: Utf8, nullable: true, dict_id: 0, dict_is_ordered: false, metadata: {} }, Field { name: "c", data_type: Int64, nullable: true, dict_id: 0, dict_is_ordered: false, metadata: {} }], metadata: {} }, columns: [PrimitiveArray<Int32>
+[
+], StringArray
+[
+], PrimitiveArray<Int64>
+[
+]], row_count: 0 }, RecordBatch { schema: Schema { fields: [Field { name: "a", data_type: Int32, nullable: true, dict_id: 0, dict_is_ordered: false, metadata: {} }, Field { name: "b", data_type: Utf8, nullable: true, dict_id: 0, dict_is_ordered: false, metadata: {} }, Field { name: "c", data_type: Int64, nullable: true, dict_id: 0, dict_is_ordered: false, metadata: {} }], metadata: {} }, columns: [PrimitiveArray<Int32>
+[
+  1766201792,
+  1479223201,
+  -1453602088,
+  -1552503027,
+  -1453602088,
+  null,
+  965520417,
+], StringArray
+[
+  "\u{7f898}𗂵\u{1061e1}\u{101a2b}\u{a85a7}\u{caa85}\u{7678f}𑌠\u{eaf22}\u{72bed}\u{d9a56}\u{16378}\u{539ef}\u{d142f}\u{457ef}\u{8fef6}\u{802bb}𨸻\u{b0920}\u{82ea8}鞣\u{858b7}\u{c1840}ⳝ\u{773d8}\u{1a7ad}\u{10d66e}\u{79e54}\u{5104e}\u{bf6d8}𪉜\u{4caef}\u{43b5a}\u{dec78}\u{34102}\u{7540a}\u{836e3}\u{46501}\u{c3448}\u{bb142}",
+  "\u{7f898}𗂵\u{1061e1}\u{101a2b}\u{a85a7}\u{caa85}\u{7678f}𑌠\u{eaf22}\u{72bed}\u{d9a56}\u{16378}\u{539ef}\u{d142f}\u{457ef}\u{8fef6}\u{802bb}𨸻\u{b0920}\u{82ea8}鞣\u{858b7}\u{c1840}ⳝ\u{773d8}\u{1a7ad}\u{10d66e}\u{79e54}\u{5104e}\u{bf6d8}𪉜\u{4caef}\u{43b5a}\u{dec78}\u{34102}\u{7540a}\u{836e3}\u{46501}\u{c3448}\u{bb142}",
+  "\u{7f898}𗂵\u{1061e1}\u{101a2b}\u{a85a7}\u{caa85}\u{7678f}𑌠\u{eaf22}\u{72bed}\u{d9a56}\u{16378}\u{539ef}\u{d142f}\u{457ef}\u{8fef6}\u{802bb}𨸻\u{b0920}\u{82ea8}鞣\u{858b7}\u{c1840}ⳝ\u{773d8}\u{1a7ad}\u{10d66e}\u{79e54}\u{5104e}\u{bf6d8}𪉜\u{4caef}\u{43b5a}\u{dec78}\u{34102}\u{7540a}\u{836e3}\u{46501}\u{c3448}\u{bb142}",
+  "\u{7f898}𗂵\u{1061e1}\u{101a2b}\u{a85a7}\u{caa85}\u{7678f}𑌠\u{eaf22}\u{72bed}\u{d9a56}\u{16378}\u{539ef}\u{d142f}\u{457ef}\u{8fef6}\u{802bb}𨸻\u{b0920}\u{82ea8}鞣\u{858b7}\u{c1840}ⳝ\u{773d8}\u{1a7ad}\u{10d66e}\u{79e54}\u{5104e}\u{bf6d8}𪉜\u{4caef}\u{43b5a}\u{dec78}\u{34102}\u{7540a}\u{836e3}\u{46501}\u{c3448}\u{bb142}",
+  "\u{87d17}\u{a9638}\u{974ca}𓊠\u{542b2}\u{eb491}\u{aea18}\u{d931b}𬤰\u{10d21b}\u{10c86d}\u{9eed2}\u{36b61}\u{7565d}\u{9edf0}\u{b2de1}\u{ddf3d}",
+  "\u{87d17}\u{a9638}\u{974ca}𓊠\u{542b2}\u{eb491}\u{aea18}\u{d931b}𬤰\u{10d21b}\u{10c86d}\u{9eed2}\u{36b61}\u{7565d}\u{9edf0}\u{b2de1}\u{ddf3d}",
+  "\u{d683f}\u{7e2c0}\u{5f592}\u{54d96}谉𔄿𫵼",
+], PrimitiveArray<Int64>
+[
+  1260943554524879296,
+  1260943554524879296,
+  808956911292196769,
+  808956911292196769,
+  808956911292196769,
+  1260943554524879296,
+  1260943554524879296,
+]], row_count: 7 }, RecordBatch { schema: Schema { fields: [Field { name: "a", data_type: Int32, nullable: true, dict_id: 0, dict_is_ordered: false, metadata: {} }, Field { name: "b", data_type: Utf8, nullable: true, dict_id: 0, dict_is_ordered: false, metadata: {} }, Field { name: "c", data_type: Int64, nullable: true, dict_id: 0, dict_is_ordered: false, metadata: {} }], metadata: {} }, columns: [PrimitiveArray<Int32>
+[
+], StringArray
+[
+], PrimitiveArray<Int64>
+[
+]], row_count: 0 }, RecordBatch { schema: Schema { fields: [Field { name: "a", data_type: Int32, nullable: true, dict_id: 0, dict_is_ordered: false, metadata: {} }, Field { name: "b", data_type: Utf8, nullable: true, dict_id: 0, dict_is_ordered: false, metadata: {} }, Field { name: "c", data_type: Int64, nullable: true, dict_id: 0, dict_is_ordered: false, metadata: {} }], metadata: {} }, columns: [PrimitiveArray<Int32>
+[
+  -1647665320,
+  -1647665320,
+], StringArray
+[
+  "\u{d683f}\u{7e2c0}\u{5f592}\u{54d96}谉𔄿𫵼",
+  "\u{d683f}\u{7e2c0}\u{5f592}\u{54d96}谉𔄿𫵼",
+], PrimitiveArray<Int64>
+[
+  -6667949724800521943,
+  808956911292196769,
+]], row_count: 2 }, RecordBatch { schema: Schema { fields: [Field { name: "a", data_type: Int32, nullable: true, dict_id: 0, dict_is_ordered: false, metadata: {} }, Field { name: "b", data_type: Utf8, nullable: true, dict_id: 0, dict_is_ordered: false, metadata: {} }, Field { name: "c", data_type: Int64, nullable: true, dict_id: 0, dict_is_ordered: false, metadata: {} }], metadata: {} }, columns: [PrimitiveArray<Int32>
+[
+], StringArray
+[
+], PrimitiveArray<Int64>
+[
+]], row_count: 0 }, RecordBatch { schema: Schema { fields: [Field { name: "a", data_type: Int32, nullable: true, dict_id: 0, dict_is_ordered: false, metadata: {} }, Field { name: "b", data_type: Utf8, nullable: true, dict_id: 0, dict_is_ordered: false, metadata: {} }, Field { name: "c", data_type: Int64, nullable: true, dict_id: 0, dict_is_ordered: false, metadata: {} }], metadata: {} }, columns: [PrimitiveArray<Int32>
+[
+], StringArray
+[
+], PrimitiveArray<Int64>
+[
+]], row_count: 0 }, RecordBatch { schema: Schema { fields: [Field { name: "a", data_type: Int32, nullable: true, dict_id: 0, dict_is_ordered: false, metadata: {} }, Field { name: "b", data_type: Utf8, nullable: true, dict_id: 0, dict_is_ordered: false, metadata: {} }, Field { name: "c", data_type: Int64, nullable: true, dict_id: 0, dict_is_ordered: false, metadata: {} }], metadata: {} }, columns: [PrimitiveArray<Int32>
+[
+  293586299,
+  -1647665320,
+  -1552503027,
+], StringArray
+[
+  "\u{e1e5a}\u{cb5f8}\u{7bf29}\u{6d517}\u{d99f9}\u{3d88b}\u{58e7f}\u{7c40b}\u{61442}\u{7de19}\u{a069b}\u{57e2c}\u{8d5b9}𥥼\u{86897}𝐵\u{3d342}𨌜\u{3a620}\u{7a0f1}瞕\u{3c03c}\u{b3107}𠣸\u{3505c}\u{5274c}",
+  "\u{e1e5a}\u{cb5f8}\u{7bf29}\u{6d517}\u{d99f9}\u{3d88b}\u{58e7f}\u{7c40b}\u{61442}\u{7de19}\u{a069b}\u{57e2c}\u{8d5b9}𥥼\u{86897}𝐵\u{3d342}𨌜\u{3a620}\u{7a0f1}瞕\u{3c03c}\u{b3107}𠣸\u{3505c}\u{5274c}",
+  "\u{e1e5a}\u{cb5f8}\u{7bf29}\u{6d517}\u{d99f9}\u{3d88b}\u{58e7f}\u{7c40b}\u{61442}\u{7de19}\u{a069b}\u{57e2c}\u{8d5b9}𥥼\u{86897}𝐵\u{3d342}𨌜\u{3a620}\u{7a0f1}瞕\u{3c03c}\u{b3107}𠣸\u{3505c}\u{5274c}",
+], PrimitiveArray<Int64>
+[
+  808956911292196769,
+  1260943554524879296,
+  1260943554524879296,
+]], row_count: 3 }, RecordBatch { schema: Schema { fields: [Field { name: "a", data_type: Int32, nullable: true, dict_id: 0, dict_is_ordered: false, metadata: {} }, Field { name: "b", data_type: Utf8, nullable: true, dict_id: 0, dict_is_ordered: false, metadata: {} }, Field { name: "c", data_type: Int64, nullable: true, dict_id: 0, dict_is_ordered: false, metadata: {} }], metadata: {} }, columns: [PrimitiveArray<Int32>
+[
+], StringArray
+[
+], PrimitiveArray<Int64>
+[
+]], row_count: 0 }]
+param: SessionContextParams { batch_size: 4, target_partitions: 1, sort_hint: true, skip_partial_params: SkipPartialParams { ratio_threshold: 1.0, rows_threshold: 18446744073709551615 } }

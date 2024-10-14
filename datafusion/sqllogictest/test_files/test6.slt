@@ -1,0 +1,7 @@
+statement ok
+create table t(a int[2]) as values ([1,2]);
+
+query T
+select arrow_typeof(a) from t;
+----
+FixedSizeList(Field { name: "item", data_type: Int32, nullable: true, dict_id: 0, dict_is_ordered: false, metadata: {} }, 2)

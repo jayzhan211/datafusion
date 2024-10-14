@@ -1,0 +1,71 @@
+
+statement ok
+CREATE EXTERNAL TABLE hits
+STORED AS PARQUET
+LOCATION '../../benchmarks/data/hits_partitioned/hits_28.parquet';
+
+query TT
+explain SELECT REGEXP_REPLACE("Referer", '^https?://(?:www\.)?([^/]+)/.*$', '\1') AS k, AVG(length("Referer")) AS l, COUNT(*) AS c, MIN("Referer") FROM hits WHERE "Referer" <> '' GROUP BY k HAVING COUNT(*) > 100000 ORDER BY l DESC LIMIT 25;
+----
+logical_plan
+01)Sort: l DESC NULLS FIRST, fetch=25
+02)--Projection: regexp_replace(hits.Referer,Utf8("^https?://(?:www\.)?([^/]+)/.*$"),Utf8("\1")) AS k, avg(character_length(hits.Referer)) AS l, count(*) AS c, min(hits.Referer)
+03)----Filter: count(*) > Int64(100000)
+04)------Aggregate: groupBy=[[regexp_replace(__common_expr_1 AS hits.Referer, Utf8("^https?://(?:www\.)?([^/]+)/.*$"), Utf8("\1"))]], aggr=[[avg(CAST(character_length(__common_expr_1 AS hits.Referer) AS Float64)), count(Int64(1)) AS count(*), min(hits.Referer)]]
+05)--------Projection: CAST(hits.Referer AS Utf8) AS __common_expr_1, hits.Referer
+06)----------Filter: hits.Referer != Binary("")
+07)------------TableScan: hits projection=[Referer], partial_filters=[hits.Referer != Binary("")]
+physical_plan
+01)SortPreservingMergeExec: [l@1 DESC], fetch=25
+02)--SortExec: TopK(fetch=25), expr=[l@1 DESC], preserve_partitioning=[true]
+03)----ProjectionExec: expr=[regexp_replace(hits.Referer,Utf8("^https?://(?:www\.)?([^/]+)/.*$"),Utf8("\1"))@0 as k, avg(character_length(hits.Referer))@1 as l, count(*)@2 as c, min(hits.Referer)@3 as min(hits.Referer)]
+04)------CoalesceBatchesExec: target_batch_size=8192
+05)--------FilterExec: count(*)@2 > 100000
+06)----------AggregateExec: mode=FinalPartitioned, gby=[regexp_replace(hits.Referer,Utf8("^https?://(?:www\.)?([^/]+)/.*$"),Utf8("\1"))@0 as regexp_replace(hits.Referer,Utf8("^https?://(?:www\.)?([^/]+)/.*$"),Utf8("\1"))], aggr=[avg(character_length(hits.Referer)), count(*), min(hits.Referer)]
+07)------------CoalesceBatchesExec: target_batch_size=8192
+08)--------------RepartitionExec: partitioning=Hash([regexp_replace(hits.Referer,Utf8("^https?://(?:www\.)?([^/]+)/.*$"),Utf8("\1"))@0], 4), input_partitions=4
+09)----------------AggregateExec: mode=Partial, gby=[regexp_replace(__common_expr_1@0, ^https?://(?:www\.)?([^/]+)/.*$, \1) as regexp_replace(hits.Referer,Utf8("^https?://(?:www\.)?([^/]+)/.*$"),Utf8("\1"))], aggr=[avg(character_length(hits.Referer)), count(*), min(hits.Referer)]
+10)------------------ProjectionExec: expr=[CAST(Referer@0 AS Utf8) as __common_expr_1, Referer@0 as Referer]
+11)--------------------CoalesceBatchesExec: target_batch_size=8192
+12)----------------------FilterExec: Referer@0 != 
+13)------------------------ParquetExec: file_groups={4 groups: [[WORKSPACE_ROOT/benchmarks/data/hits_partitioned/hits_28.parquet:0..40693102], [WORKSPACE_ROOT/benchmarks/data/hits_partitioned/hits_28.parquet:40693102..81386204], [WORKSPACE_ROOT/benchmarks/data/hits_partitioned/hits_28.parquet:81386204..122079306], [WORKSPACE_ROOT/benchmarks/data/hits_partitioned/hits_28.parquet:122079306..162772407]]}, projection=[Referer], predicate=Referer@14 != , pruning_predicate=CASE WHEN Referer_null_count@2 = Referer_row_count@3 THEN false ELSE Referer_min@0 !=  OR  != Referer_max@1 END, required_guarantees=[Referer not in ()]
+
+
+statement ok
+create table t(Referer varchar) as values ('a');
+
+query I
+copy (select * from t) to '../../benchmarks/data/test/a.parquet' STORED AS PARQUET;
+----
+1
+
+statement ok
+CREATE EXTERNAL TABLE t2
+STORED AS PARQUET
+LOCATION '../../benchmarks/data/test/a.parquet';
+
+query TT
+explain SELECT REGEXP_REPLACE("Referer", '^https?://(?:www\.)?([^/]+)/.*$', '\1') AS k, AVG(length("Referer")) AS l, COUNT(*) AS c, MIN("Referer") FROM hits WHERE "Referer" <> '' GROUP BY k HAVING COUNT(*) > 100000 ORDER BY l DESC LIMIT 25;
+----
+logical_plan
+01)Sort: l DESC NULLS FIRST, fetch=25
+02)--Projection: regexp_replace(hits.Referer,Utf8("^https?://(?:www\.)?([^/]+)/.*$"),Utf8("\1")) AS k, avg(character_length(hits.Referer)) AS l, count(*) AS c, min(hits.Referer)
+03)----Filter: count(*) > Int64(100000)
+04)------Aggregate: groupBy=[[regexp_replace(__common_expr_1 AS hits.Referer, Utf8("^https?://(?:www\.)?([^/]+)/.*$"), Utf8("\1"))]], aggr=[[avg(CAST(character_length(__common_expr_1 AS hits.Referer) AS Float64)), count(Int64(1)) AS count(*), min(hits.Referer)]]
+05)--------Projection: CAST(hits.Referer AS Utf8) AS __common_expr_1, hits.Referer
+06)----------Filter: hits.Referer != Binary("")
+07)------------TableScan: hits projection=[Referer], partial_filters=[hits.Referer != Binary("")]
+physical_plan
+01)SortPreservingMergeExec: [l@1 DESC], fetch=25
+02)--SortExec: TopK(fetch=25), expr=[l@1 DESC], preserve_partitioning=[true]
+03)----ProjectionExec: expr=[regexp_replace(hits.Referer,Utf8("^https?://(?:www\.)?([^/]+)/.*$"),Utf8("\1"))@0 as k, avg(character_length(hits.Referer))@1 as l, count(*)@2 as c, min(hits.Referer)@3 as min(hits.Referer)]
+04)------CoalesceBatchesExec: target_batch_size=8192
+05)--------FilterExec: count(*)@2 > 100000
+06)----------AggregateExec: mode=FinalPartitioned, gby=[regexp_replace(hits.Referer,Utf8("^https?://(?:www\.)?([^/]+)/.*$"),Utf8("\1"))@0 as regexp_replace(hits.Referer,Utf8("^https?://(?:www\.)?([^/]+)/.*$"),Utf8("\1"))], aggr=[avg(character_length(hits.Referer)), count(*), min(hits.Referer)]
+07)------------CoalesceBatchesExec: target_batch_size=8192
+08)--------------RepartitionExec: partitioning=Hash([regexp_replace(hits.Referer,Utf8("^https?://(?:www\.)?([^/]+)/.*$"),Utf8("\1"))@0], 4), input_partitions=4
+09)----------------AggregateExec: mode=Partial, gby=[regexp_replace(__common_expr_1@0, ^https?://(?:www\.)?([^/]+)/.*$, \1) as regexp_replace(hits.Referer,Utf8("^https?://(?:www\.)?([^/]+)/.*$"),Utf8("\1"))], aggr=[avg(character_length(hits.Referer)), count(*), min(hits.Referer)]
+10)------------------ProjectionExec: expr=[CAST(Referer@0 AS Utf8) as __common_expr_1, Referer@0 as Referer]
+11)--------------------CoalesceBatchesExec: target_batch_size=8192
+12)----------------------FilterExec: Referer@0 != 
+13)------------------------ParquetExec: file_groups={4 groups: [[WORKSPACE_ROOT/benchmarks/data/hits_partitioned/hits_28.parquet:0..40693102], [WORKSPACE_ROOT/benchmarks/data/hits_partitioned/hits_28.parquet:40693102..81386204], [WORKSPACE_ROOT/benchmarks/data/hits_partitioned/hits_28.parquet:81386204..122079306], [WORKSPACE_ROOT/benchmarks/data/hits_partitioned/hits_28.parquet:122079306..162772407]]}, projection=[Referer], predicate=Referer@14 != , pruning_predicate=CASE WHEN Referer_null_count@2 = Referer_row_count@3 THEN false ELSE Referer_min@0 !=  OR  != Referer_max@1 END, required_guarantees=[Referer not in ()]

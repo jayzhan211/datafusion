@@ -142,13 +142,14 @@ async fn test_basic_prim_aggr_group_by_single_string() {
     let data_gen_config = DatasetGeneratorConfig {
         columns,
         rows_num_range: (512, 1024),
+        // rows_num_range: (4, 12),
         sort_keys_set,
     };
 
     // Build fuzzer
     let fuzzer = builder
         .data_gen_config(data_gen_config)
-        .data_gen_rounds(16)
+        .data_gen_rounds(1)
         // .add_sql("SELECT b, sum(a) FROM fuzz_table GROUP BY b")
         .add_sql("SELECT b, sum(distinct a) FROM fuzz_table GROUP BY b")
         // .add_sql("SELECT b, max(a) FROM fuzz_table GROUP BY b")

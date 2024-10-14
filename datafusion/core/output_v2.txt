@@ -1,0 +1,152 @@
+[RecordBatch { schema: Schema { fields: [Field { name: "a", data_type: Int32, nullable: true, dict_id: 0, dict_is_ordered: false, metadata: {} }, Field { name: "b", data_type: Utf8, nullable: true, dict_id: 0, dict_is_ordered: false, metadata: {} }, Field { name: "c", data_type: Int64, nullable: true, dict_id: 0, dict_is_ordered: false, metadata: {} }], metadata: {} }, columns: [PrimitiveArray<Int32>
+[
+  -357113469,
+  null,
+  null,
+  null,
+  -1279405755,
+  -444714478,
+  null,
+  1774788067,
+  -1306952328,
+  null,
+  null,
+  1770857641,
+  1774788067,
+  -1792070317,
+  null,
+], StringArray
+[
+  null,
+  null,
+  "i",
+  "jhgbzkuiwbgwkt",
+  "jhgbzkuiwbgwkt",
+  "jhgbzkuiwbgwkt",
+  "jhgbzkuiwbgwkt",
+  "na",
+  "na",
+  "na",
+  "na",
+  "na",
+  "niihllpeeyvd",
+  "niihllpeeyvd",
+  "niihllpeeyvd",
+], PrimitiveArray<Int64>
+[
+  null,
+  -2033270342133114175,
+  null,
+  -4200106050806947131,
+  null,
+  null,
+  -4200106050806947131,
+  null,
+  null,
+  null,
+  -3847918510752683269,
+  8501589679279013149,
+  null,
+  null,
+  7605775654001090772,
+]], row_count: 15 }, RecordBatch { schema: Schema { fields: [Field { name: "a", data_type: Int32, nullable: true, dict_id: 0, dict_is_ordered: false, metadata: {} }, Field { name: "b", data_type: Utf8, nullable: true, dict_id: 0, dict_is_ordered: false, metadata: {} }, Field { name: "c", data_type: Int64, nullable: true, dict_id: 0, dict_is_ordered: false, metadata: {} }], metadata: {} }, columns: [PrimitiveArray<Int32>
+[
+], StringArray
+[
+], PrimitiveArray<Int64>
+[
+]], row_count: 0 }, RecordBatch { schema: Schema { fields: [Field { name: "a", data_type: Int32, nullable: true, dict_id: 0, dict_is_ordered: false, metadata: {} }, Field { name: "b", data_type: Utf8, nullable: true, dict_id: 0, dict_is_ordered: false, metadata: {} }, Field { name: "c", data_type: Int64, nullable: true, dict_id: 0, dict_is_ordered: false, metadata: {} }], metadata: {} }, columns: [PrimitiveArray<Int32>
+[
+  null,
+  null,
+  462257437,
+  null,
+  -1337912794,
+  null,
+  null,
+], StringArray
+[
+  "npbbfobgibtgeeqhdn",
+  "npbbfobgibtgeeqhdn",
+  "spqsbsacoy",
+  "wesfsqwixzajgulo",
+  "wesfsqwixzajgulo",
+  "wesfsqwixzajgulo",
+  "wesfsqwixzajgulo",
+], PrimitiveArray<Int64>
+[
+  null,
+  null,
+  null,
+  1072653868017529066,
+  null,
+  510519871089534151,
+  -6306834322567809381,
+]], row_count: 7 }, RecordBatch { schema: Schema { fields: [Field { name: "a", data_type: Int32, nullable: true, dict_id: 0, dict_is_ordered: false, metadata: {} }, Field { name: "b", data_type: Utf8, nullable: true, dict_id: 0, dict_is_ordered: false, metadata: {} }, Field { name: "c", data_type: Int64, nullable: true, dict_id: 0, dict_is_ordered: false, metadata: {} }], metadata: {} }, columns: [PrimitiveArray<Int32>
+[
+], StringArray
+[
+], PrimitiveArray<Int64>
+[
+]], row_count: 0 }, RecordBatch { schema: Schema { fields: [Field { name: "a", data_type: Int32, nullable: true, dict_id: 0, dict_is_ordered: false, metadata: {} }, Field { name: "b", data_type: Utf8, nullable: true, dict_id: 0, dict_is_ordered: false, metadata: {} }, Field { name: "c", data_type: Int64, nullable: true, dict_id: 0, dict_is_ordered: false, metadata: {} }], metadata: {} }, columns: [PrimitiveArray<Int32>
+[
+  -411706700,
+  null,
+  -411706700,
+  null,
+], StringArray
+[
+  "wesfsqwixzajgulo",
+  "xhazuofxdqkekigwsbgqdcetobrzb",
+  "xlba",
+  "xlba",
+], PrimitiveArray<Int64>
+[
+  640559834438583325,
+  null,
+  1072653868017529066,
+  -2419711412701188161,
+]], row_count: 4 }, RecordBatch { schema: Schema { fields: [Field { name: "a", data_type: Int32, nullable: true, dict_id: 0, dict_is_ordered: false, metadata: {} }, Field { name: "b", data_type: Utf8, nullable: true, dict_id: 0, dict_is_ordered: false, metadata: {} }, Field { name: "c", data_type: Int64, nullable: true, dict_id: 0, dict_is_ordered: false, metadata: {} }], metadata: {} }, columns: [PrimitiveArray<Int32>
+[
+  null,
+], StringArray
+[
+  "xoyiatitmaso",
+], PrimitiveArray<Int64>
+[
+  null,
+]], row_count: 1 }, RecordBatch { schema: Schema { fields: [Field { name: "a", data_type: Int32, nullable: true, dict_id: 0, dict_is_ordered: false, metadata: {} }, Field { name: "b", data_type: Utf8, nullable: true, dict_id: 0, dict_is_ordered: false, metadata: {} }, Field { name: "c", data_type: Int64, nullable: true, dict_id: 0, dict_is_ordered: false, metadata: {} }], metadata: {} }, columns: [PrimitiveArray<Int32>
+[
+], StringArray
+[
+], PrimitiveArray<Int64>
+[
+]], row_count: 0 }, RecordBatch { schema: Schema { fields: [Field { name: "a", data_type: Int32, nullable: true, dict_id: 0, dict_is_ordered: false, metadata: {} }, Field { name: "b", data_type: Utf8, nullable: true, dict_id: 0, dict_is_ordered: false, metadata: {} }, Field { name: "c", data_type: Int64, nullable: true, dict_id: 0, dict_is_ordered: false, metadata: {} }], metadata: {} }, columns: [PrimitiveArray<Int32>
+[
+], StringArray
+[
+], PrimitiveArray<Int64>
+[
+]], row_count: 0 }, RecordBatch { schema: Schema { fields: [Field { name: "a", data_type: Int32, nullable: true, dict_id: 0, dict_is_ordered: false, metadata: {} }, Field { name: "b", data_type: Utf8, nullable: true, dict_id: 0, dict_is_ordered: false, metadata: {} }, Field { name: "c", data_type: Int64, nullable: true, dict_id: 0, dict_is_ordered: false, metadata: {} }], metadata: {} }, columns: [PrimitiveArray<Int32>
+[
+], StringArray
+[
+], PrimitiveArray<Int64>
+[
+]], row_count: 0 }, RecordBatch { schema: Schema { fields: [Field { name: "a", data_type: Int32, nullable: true, dict_id: 0, dict_is_ordered: false, metadata: {} }, Field { name: "b", data_type: Utf8, nullable: true, dict_id: 0, dict_is_ordered: false, metadata: {} }, Field { name: "c", data_type: Int64, nullable: true, dict_id: 0, dict_is_ordered: false, metadata: {} }], metadata: {} }, columns: [PrimitiveArray<Int32>
+[
+], StringArray
+[
+], PrimitiveArray<Int64>
+[
+]], row_count: 0 }, RecordBatch { schema: Schema { fields: [Field { name: "a", data_type: Int32, nullable: true, dict_id: 0, dict_is_ordered: false, metadata: {} }, Field { name: "b", data_type: Utf8, nullable: true, dict_id: 0, dict_is_ordered: false, metadata: {} }, Field { name: "c", data_type: Int64, nullable: true, dict_id: 0, dict_is_ordered: false, metadata: {} }], metadata: {} }, columns: [PrimitiveArray<Int32>
+[
+  null,
+], StringArray
+[
+  "xoyiatitmaso",
+], PrimitiveArray<Int64>
+[
+  null,
+]], row_count: 1 }]
+param: SessionContextParams { batch_size: 2, target_partitions: 1, sort_hint: true, skip_partial_params: SkipPartialParams { ratio_threshold: 0.0, rows_threshold: 0 } }

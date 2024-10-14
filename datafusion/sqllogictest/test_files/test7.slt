@@ -1,0 +1,33 @@
+
+
+statement ok
+create table t1(a int, b varchar) as values 
+(null, 'a'),
+(null, 'a'),
+(null, 'b'),
+(null, 'b'),
+(null,null),
+(null, 'b');
+
+statement ok
+create table t2(a int, b varchar) as values
+(null,null),
+(5, 'a'),
+(null, 'a'),
+(6, 'b'),
+(7, 'b'),
+(8, 'b');
+
+query TI
+With T as
+ (select * from t1 UNION ALL select * from t2)
+select b, sum(DISTINCT a) from T group by b order by b;
+----
+a 5
+b 21
+NULL NULL
+
+query TI
+With T as
+ (select * from t1 UNION ALL select * from t2)
+select b, sum(DISTINCT a) from T group by b order by b;

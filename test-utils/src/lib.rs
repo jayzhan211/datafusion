@@ -99,6 +99,7 @@ pub fn stagger_batch_with_seed(batch: RecordBatch, seed: u64) -> Vec<RecordBatch
     // use a random number generator to pick a random sized output
     let mut rng = StdRng::seed_from_u64(seed);
 
+    let batch_s = batch.num_rows();
     let mut remainder = batch;
     while remainder.num_rows() > 0 {
         let batch_size = rng.gen_range(0..remainder.num_rows() + 1);
@@ -107,6 +108,8 @@ pub fn stagger_batch_with_seed(batch: RecordBatch, seed: u64) -> Vec<RecordBatch
         remainder = remainder.slice(batch_size, remainder.num_rows() - batch_size);
     }
 
+    let s = batches.iter().map(|b| b.num_rows() as u64).sum::<u64>();
+    assert_eq!(s, batch_s as u64);
     add_empty_batches(batches, &mut rng)
 }
 
