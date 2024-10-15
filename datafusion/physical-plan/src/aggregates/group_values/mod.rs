@@ -21,6 +21,7 @@ use arrow::record_batch::RecordBatch;
 use arrow_array::{downcast_primitive, ArrayRef};
 use arrow_schema::{DataType, SchemaRef};
 use bytes_view::GroupValuesBytesView;
+use column_sequential::GroupValuesColumnSequential;
 use datafusion_common::Result;
 
 pub(crate) mod primitive;
@@ -28,6 +29,7 @@ use datafusion_expr::EmitTo;
 use primitive::GroupValuesPrimitive;
 
 mod column;
+mod column_sequential;
 mod row;
 pub use column::my_sum;
 use column::GroupValuesColumn;
@@ -37,6 +39,8 @@ mod bytes;
 mod bytes_view;
 use bytes::GroupValuesByes;
 use datafusion_physical_expr::binary_map::OutputType;
+
+use super::order::GroupOrdering;
 
 mod group_column;
 mod null_builder;
@@ -106,7 +110,7 @@ pub trait GroupValues: Send {
 }
 
 /// Return a specialized implementation of [`GroupValues`] for the given schema.
-pub fn new_group_values(schema: SchemaRef) -> Result<Box<dyn GroupValues>> {
+pub fn new_group_values(schema: SchemaRef, group_ordering: &GroupOrdering) -> Result<Box<dyn GroupValues>> {
     if schema.fields.len() == 1 {
         let d = schema.fields[0].data_type();
 
@@ -143,9 +147,14 @@ pub fn new_group_values(schema: SchemaRef) -> Result<Box<dyn GroupValues>> {
             _ => {}
         }
     }
-
+    println!("group_ordering: {:?}", group_ordering);
     if GroupValuesColumn::supported_schema(schema.as_ref()) {
-        Ok(Box::new(GroupValuesColumn::try_new(schema)?))
+        if group_ordering.is_none() {
+            Ok(Box::new(GroupValuesColumn::try_new(schema)?))
+        } else {
+            /// TODO: Support for group ordering
+            Ok(Box::new(GroupValuesColumnSequential::try_new(schema)?))
+        }
     } else {
         Ok(Box::new(GroupValuesRows::try_new(schema)?))
     }

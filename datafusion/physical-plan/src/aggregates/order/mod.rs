@@ -40,6 +40,10 @@ pub enum GroupOrdering {
 }
 
 impl GroupOrdering {
+    pub fn is_none(&self) -> bool {
+        matches!(self, GroupOrdering::None)
+    }
+
     /// Create a `GroupOrdering` for the specified ordering
     pub fn try_new(
         input_schema: &Schema,
