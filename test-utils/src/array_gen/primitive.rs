@@ -39,7 +39,6 @@ macro_rules! impl_gen_data {
     ($NATIVE_TYPE:ty, $ARROW_TYPE:ident) => {
         paste::paste! {
             pub fn [< gen_data_ $NATIVE_TYPE >](&mut self) -> ArrayRef {
-                    let dist = self.num_distinct_primitives;
                     // table of strings from which to draw
                     let distinct_primitives: PrimitiveArray<$ARROW_TYPE> = (0..self.num_distinct_primitives)
                     // .map(|_| Some(self.rng.gen::<$NATIVE_TYPE>() % 32 as $NATIVE_TYPE))

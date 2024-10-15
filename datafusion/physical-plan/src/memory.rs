@@ -39,7 +39,6 @@ use datafusion_physical_expr::utils::collect_columns;
 use datafusion_physical_expr::{EquivalenceProperties, LexOrdering};
 
 use futures::Stream;
-use itertools::Itertools;
 
 /// Execution plan for reading in-memory batches of data
 pub struct MemoryExec {
@@ -139,13 +138,8 @@ impl ExecutionPlan for MemoryExec {
     fn execute(
         &self,
         partition: usize,
-        context: Arc<TaskContext>,
+        _context: Arc<TaskContext>,
     ) -> Result<SendableRecordBatchStream> {
-        // let batch_size = context.session_config().batch_size();
-        // let batch = self.partitions[partition];
-        // let len = batch[0].
-
-        // (0..partitions[0].len()).chunk_by(key)
         Ok(Box::pin(MemoryStream::try_new(
             self.partitions[partition].clone(),
             Arc::clone(&self.projected_schema),

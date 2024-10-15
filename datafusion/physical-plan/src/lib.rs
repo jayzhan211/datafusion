@@ -17,7 +17,6 @@
 
 // Make cheap clones clear: https://github.com/apache/datafusion/issues/11143
 
-#![feature(portable_simd)]
 #![deny(clippy::clone_on_ref_ptr)]
 
 //! Traits for physical query plan, supporting parallel execution for partitioned relations.

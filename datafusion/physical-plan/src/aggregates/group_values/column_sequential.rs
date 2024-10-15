@@ -15,9 +15,6 @@
 // specific language governing permissions and limitations
 // under the License.
 
-use std::borrow::BorrowMut;
-use std::simd::i32x4;
-
 use crate::aggregates::group_values::group_column::{
     ByteGroupValueBuilder, GroupColumn, PrimitiveGroupValueBuilder,
 };
