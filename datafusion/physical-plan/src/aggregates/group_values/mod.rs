@@ -110,7 +110,10 @@ pub trait GroupValues: Send {
 }
 
 /// Return a specialized implementation of [`GroupValues`] for the given schema.
-pub fn new_group_values(schema: SchemaRef, group_ordering: &GroupOrdering) -> Result<Box<dyn GroupValues>> {
+pub fn new_group_values(
+    schema: SchemaRef,
+    group_ordering: &GroupOrdering,
+) -> Result<Box<dyn GroupValues>> {
     if schema.fields.len() == 1 {
         let d = schema.fields[0].data_type();
 
@@ -147,12 +150,12 @@ pub fn new_group_values(schema: SchemaRef, group_ordering: &GroupOrdering) -> Re
             _ => {}
         }
     }
-    println!("group_ordering: {:?}", group_ordering);
+
     if GroupValuesColumn::supported_schema(schema.as_ref()) {
         if group_ordering.is_none() {
             Ok(Box::new(GroupValuesColumn::try_new(schema)?))
         } else {
-            /// TODO: Support for group ordering
+            // TODO: Support vectorized for group ordering
             Ok(Box::new(GroupValuesColumnSequential::try_new(schema)?))
         }
     } else {

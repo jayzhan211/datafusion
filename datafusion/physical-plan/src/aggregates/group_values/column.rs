@@ -396,7 +396,7 @@ impl GroupValues for GroupValuesColumn {
         groups.resize(groups_true.len(), 0);
 
         for i in 0..groups_true.len() {
-            groups[i] = groups_true[i]; 
+            groups[i] = groups_true[i];
         }
         // println!("groups new: {:?}",groups);
         // println!("cols: {:?}", cols);
@@ -550,8 +550,6 @@ impl GroupValues for GroupValuesColumn {
                     }
                 }
 
-                
-
                 let after_len_true = self.map.len();
                 assert_eq!(prev_len_true, after_len_true + n);
 
@@ -665,7 +663,6 @@ impl GroupValuesColumn {
         self.current_offsets.resize(n_rows, 0);
         for row_idx in 0..n_rows {
             let hash = batch_hashes[row_idx];
-            // let hash = self.hashes_buffer[row_idx];
             let hash_table_idx = (hash as usize) & bit_mask;
             self.current_offsets[row_idx] = hash_table_idx;
         }
@@ -691,13 +688,8 @@ impl GroupValuesColumn {
                 .take(remaining_entries)
                 .for_each(|&row_idx| {
                     let hash = batch_hashes[row_idx];
-                    // let hash = self.hashes_buffer[row_idx];
                     let ht_offset = self.current_offsets[row_idx];
                     let offset = self.hash_table[ht_offset];
-
-                    // if row_idx == 0 {
-                    //     println!("row0 hash: {}, ht_offset:{}, offset:{}", hash, ht_offset, offset);
-                    // }
 
                     let is_empty_slot = offset == 0;
                     if is_empty_slot {
@@ -751,7 +743,7 @@ impl GroupValuesColumn {
             self.need_equality_check
                 .iter()
                 .take(n_need_equality_check)
-                .map(|&row_idx| {
+                .for_each(|&row_idx| {
                     let ht_offset = self.current_offsets[row_idx];
                     let offset = self.hash_table[ht_offset];
 

@@ -17,7 +17,7 @@
 
 use std::sync::Arc;
 
-use arrow_array::{Array, ArrayRef, Int32Array, Int64Array, RecordBatch, StringArray};
+use arrow_array::{ArrayRef, RecordBatch};
 use arrow_schema::{DataType, Field, Schema};
 use datafusion_common::{arrow_datafusion_err, DataFusionError, Result};
 use datafusion_physical_expr::{expressions::col, PhysicalSortExpr};
@@ -93,14 +93,12 @@ impl DatasetGenerator {
         }
     }
 
-    pub fn generate(&self, seed: Option<u64>) -> Result<Vec<Dataset>> {
+    pub fn generate(&self) -> Result<Vec<Dataset>> {
         let mut datasets = Vec::with_capacity(self.sort_keys_set.len() + 1);
 
         // Generate the base batch
-        let base_batch = self.batch_generator.generate(seed)?;
-
-        // let batches = stagger_batch(base_batch.clone());
-        let batches = vec![base_batch.clone()];
+        let base_batch = self.batch_generator.generate()?;
+        let batches = stagger_batch(base_batch.clone());
         let dataset = Dataset::new(batches, Vec::new());
         datasets.push(dataset);
 
@@ -116,10 +114,7 @@ impl DatasetGenerator {
                 .collect::<Result<Vec<_>>>()?;
             let sorted_batch = sort_batch(&base_batch, &sort_exprs, None)?;
 
-            // println!("sorted_batch: {:?}", sorted_batch);
             let batches = stagger_batch(sorted_batch);
-            // println!("bathes: {:?}", batches);
-            // let batches = vec![sorted_batch];
             let dataset = Dataset::new(batches, sort_keys);
             datasets.push(dataset);
         }
@@ -179,17 +174,15 @@ struct RecordBatchGenerator {
 }
 
 macro_rules! generate_string_array {
-    ($SELF:ident, $NUM_ROWS:ident, $ARRAY_GEN_RNG:ident, $OFFSET_TYPE:ty) => {{
-        let null_pct_idx = $ARRAY_GEN_RNG.gen_range(0..$SELF.candidate_null_pcts.len());
+    ($SELF:ident, $NUM_ROWS:ident, $BATCH_GEN_RNG:ident, $ARRAY_GEN_RNG:ident, $OFFSET_TYPE:ty) => {{
+        let null_pct_idx = $BATCH_GEN_RNG.gen_range(0..$SELF.candidate_null_pcts.len());
         let null_pct = $SELF.candidate_null_pcts[null_pct_idx];
-        let max_len = $ARRAY_GEN_RNG.gen_range(1..50);
+        let max_len = $BATCH_GEN_RNG.gen_range(1..50);
         let num_distinct_strings = if $NUM_ROWS > 1 {
-            $ARRAY_GEN_RNG.gen_range(1..$NUM_ROWS)
+            $BATCH_GEN_RNG.gen_range(1..$NUM_ROWS)
         } else {
             $NUM_ROWS
         };
-
-        let max_len = 4;
 
         let mut generator = StringArrayGenerator {
             max_len,
@@ -204,17 +197,15 @@ macro_rules! generate_string_array {
 }
 
 macro_rules! generate_primitive_array {
-    ($SELF:ident, $NUM_ROWS:ident, $ARRAY_GEN_RNG:ident, $DATA_TYPE:ident) => {
+    ($SELF:ident, $NUM_ROWS:ident, $BATCH_GEN_RNG:ident, $ARRAY_GEN_RNG:ident, $DATA_TYPE:ident) => {
         paste::paste! {{
-            let null_pct_idx = $ARRAY_GEN_RNG.gen_range(0..$SELF.candidate_null_pcts.len());
+            let null_pct_idx = $BATCH_GEN_RNG.gen_range(0..$SELF.candidate_null_pcts.len());
             let null_pct = $SELF.candidate_null_pcts[null_pct_idx];
             let num_distinct_primitives = if $NUM_ROWS > 1 {
-                $ARRAY_GEN_RNG.gen_range(1..$NUM_ROWS)
+                $BATCH_GEN_RNG.gen_range(1..$NUM_ROWS)
             } else {
                 $NUM_ROWS
             };
-
-            let num_distinct_primitives = 8;
 
             let mut generator = PrimitiveArrayGenerator {
                 num_primitives: $NUM_ROWS,
@@ -239,15 +230,10 @@ impl RecordBatchGenerator {
         }
     }
 
-    fn generate(&self, seed: Option<u64>) -> Result<RecordBatch> {
-        let seed = seed.unwrap_or_else(|| {
-            let mut rng = thread_rng();
-            rng.gen::<u64>()
-        });
-        println!("seed: {:?}", seed);
-
-        let mut array_gen_rng = StdRng::seed_from_u64(seed);
-        let num_rows = array_gen_rng.gen_range(self.min_rows_nun..=self.max_rows_num);
+    fn generate(&self) -> Result<RecordBatch> {
+        let mut rng = thread_rng();
+        let num_rows = rng.gen_range(self.min_rows_nun..=self.max_rows_num);
+        let array_gen_rng = StdRng::from_seed(rng.gen());
 
         // Build arrays
         let mut arrays = Vec::with_capacity(self.columns.len());
@@ -255,331 +241,11 @@ impl RecordBatchGenerator {
             let array = self.generate_array_of_type(
                 col.column_type.clone(),
                 num_rows,
-                // &mut rng,
+                &mut rng,
                 array_gen_rng.clone(),
             );
             arrays.push(array);
         }
-
-        // println!("arrays: {:?}", arrays);
-
-        // let first_column = vec![
-        //     None,              // (empty)
-        //     None,              // (empty)
-        //     None,              // (empty)
-        //     Some(2104462536),  // 2104462536
-        //     Some(11663347),    // 11663347
-        //     Some(-620207880),  // -620207880
-        //     Some(20063192),    // 20063192
-        //     Some(11663347),    // 11663347
-        //     None,              // (empty)
-        //     Some(1580798191),  // 1580798191
-        //     None,              // (empty)
-        //     Some(20063192),    // 20063192
-        //     None,              // (empty)
-        //     None,              // (empty)
-        //     None,              // (empty)
-        //     None,              // (empty)
-        //     None,              // (empty)
-        //     Some(-1560869220), // -1560869220
-        //     Some(2104462536),  // 2104462536
-        //     Some(-620207880),  // -620207880
-        //     None,              // (empty)
-        //     None,              // (empty)
-        //     Some(11663347),    // 11663347
-        //     None,              // (empty)
-        //     Some(-1560869220), // -1560869220
-        //     None,              // (empty)
-        //     Some(-1560869220), // -1560869220
-        //     None,              // (empty)
-        //     None,              // (empty)
-        //     Some(20063192),    // 20063192
-        //     Some(2104462536),  // 2104462536
-        //     Some(1580798191),  // 1580798191
-        //     None,              // (empty)
-        //     Some(-1270843045), // -1270843045
-        //     Some(-1560869220), // -1560869220
-        //     Some(1580798191),  // 1580798191
-        //     Some(-620207880),  // -620207880
-        //     Some(-1270843045), // -1270843045
-        //     None,              // (empty)
-        //     Some(-1270843045), // -1270843045
-        //     Some(-1270843045), // -1270843045
-        //     Some(2104462536),  // 2104462536
-        //     Some(-1270843045), // -1270843045
-        //     Some(2104462536),  // 2104462536
-        //     Some(20063192),    // 20063192
-        //     Some(2104462536),  // 2104462536
-        //     None,              // (empty)
-        //     Some(20063192),    // 20063192
-        //     Some(20063192),    // 20063192
-        //     Some(-1560869220), // -1560869220
-        //     None,              // (empty)
-        //     None,              // (empty)
-        //     None,              // (empty)
-        //     None,              // (empty)
-        //     Some(2104462536),  // 2104462536
-        //     Some(11663347),    // 11663347
-        //     Some(11663347),    // 11663347
-        //     Some(-1270843045), // -1270843045
-        //     Some(1580798191),  // 1580798191
-        //     Some(-1270843045), // -1270843045
-        //     None,              // (empty)
-        //     Some(-1560869220), // -1560869220
-        //     Some(1580798191),  // 1580798191
-        //     None,              // (empty)
-        //     Some(-1270843045), // -1270843045
-        //     Some(-620207880),  // -620207880
-        //     Some(11663347),    // 11663347
-        //     Some(2104462536),  // 2104462536
-        //     Some(-1560869220), // -1560869220
-        //     Some(2104462536),  // 2104462536
-        //     Some(2104462536),  // 2104462536
-        //     Some(1580798191),  // 1580798191
-        //     None,              // (empty)
-        //     Some(20063192),    // 20063192
-        //     Some(1580798191),  // 1580798191
-        //     Some(-620207880),  // -620207880
-        //     Some(11663347),    // 11663347
-        //     Some(2104462536),  // 2104462536
-        //     Some(-1270843045), // -1270843045
-        //     Some(-620207880),  // -620207880
-        //     None,              // (empty)
-        //     None,              // (empty)
-        //     Some(1580798191),  // 1580798191
-        //     None,              // (empty)
-        //     Some(1580798191),  // 1580798191
-        //     Some(20063192),    // 20063192
-        //     None,              // (empty)
-        //     Some(11663347),    // 11663347
-        //     None,              // (empty)
-        //     Some(1580798191),  // 1580798191
-        //     None,              // (empty)
-        //     Some(11663347),    // 11663347
-        // ];
-        // let i32_array = Arc::new(Int32Array::from(first_column));
-        // let second_column = vec![
-        //     None,
-        //     None,
-        //     None,
-        //     None,
-        //     None,
-        //     None,
-        //     None,
-        //     None,
-        //     None,
-        //     None,
-        //     None,
-        //     None,
-        //     None,
-        //     None,
-        //     None,
-        //     None,
-        //     None,
-        //     None,
-        //     None,
-        //     None,
-        //     None,
-        //     None,
-        //     None,
-        //     None,
-        //     None,
-        //     None,
-        //     None,
-        //     None,
-        //     None,
-        //     None,
-        //     None,
-        //     None,
-        //     None,
-        //     None,
-        //     None,
-        //     None,
-        //     None,
-        //     None,
-        //     None,
-        //     None,
-        //     None,
-        //     None,
-        //     None,
-        //     None,
-        //     None,
-        //     None,
-        //     None,
-        //     None,
-        //     None,
-        //     None,
-        //     None,
-        //     None,
-        //     None,
-        //     None,
-        //     None,
-        //     None,
-        //     None,
-        //     None,
-        //     None,
-        //     None,
-        //     None,
-        //     None,
-        //     None,
-        //     None,
-        //     None,
-        //     None,
-        //     None,
-        //     None,
-        //     None,
-        //     None,
-        //     None,
-        //     None,
-        //     None,
-        //     None,
-        //     None,
-        //     None,
-        //     None,
-        //     None,
-        //     None,
-        //     None,
-        //     None,
-        //     None,
-        //     None,
-        //     None,
-        //     None,
-        //     None,
-        //     None,
-        //     None,
-        //     None,
-        //     None,
-        //     None,
-        //     None,
-        //     None,
-        //     None,
-        //     None,
-        //     None,
-        //     None,
-        //     None,
-        //     Some("am".to_string()),
-        //     Some("am".to_string()),
-        //     Some("am".to_string()),
-        //     Some("am".to_string()),
-        //     Some("am".to_string()),
-        //     Some("am".to_string()),
-        //     Some("am".to_string()),
-        //     Some("ap".to_string()),
-        //     Some("ap".to_string()),
-        //     Some("ap".to_string()),
-        //     Some("ap".to_string()),
-        //     Some("ap".to_string()),
-        //     Some("ap".to_string()),
-        //     Some("ast".to_string()),
-        //     Some("ast".to_string()),
-        //     Some("ast".to_string()),
-        //     Some("ast".to_string()),
-        //     Some("ast".to_string()),
-        //     Some("ast".to_string()),
-        //     Some("ast".to_string()),
-        //     Some("ast".to_string()),
-        //     Some("bxhl".to_string()),
-        //     Some("bxhl".to_string()),
-        //     Some("bxhl".to_string()),
-        //     Some("bxhl".to_string()),
-        //     Some("bxhl".to_string()),
-        //     Some("bxhl".to_string()),
-        //     Some("bxhl".to_string()),
-        //     Some("bxhl".to_string()),
-        //     Some("etl".to_string()),
-        //     Some("etl".to_string()),
-        //     Some("etl".to_string()),
-        //     Some("etl".to_string()),
-        //     Some("etl".to_string()),
-        //     Some("etl".to_string()),
-        //     Some("etl".to_string()),
-        //     Some("etl".to_string()),
-        //     Some("etl".to_string()),
-        //     Some("gma".to_string()),
-        //     Some("gma".to_string()),
-        //     Some("gma".to_string()),
-        //     Some("gma".to_string()),
-        //     Some("gma".to_string()),
-        //     Some("gma".to_string()),
-        //     Some("gma".to_string()),
-        //     Some("gma".to_string()),
-        //     Some("gma".to_string()),
-        //     Some("gv".to_string()),
-        //     Some("gv".to_string()),
-        //     Some("gv".to_string()),
-        //     Some("gv".to_string()),
-        //     Some("gv".to_string()),
-        //     Some("gv".to_string()),
-        //     Some("gv".to_string()),
-        //     Some("izuy".to_string()),
-        //     Some("izuy".to_string()),
-        //     Some("izuy".to_string()),
-        //     Some("izuy".to_string()),
-        //     Some("izuy".to_string()),
-        //     Some("izuy".to_string()),
-        //     Some("izuy".to_string()),
-        //     Some("izuy".to_string()),
-        //     Some("izuy".to_string()),
-        //     Some("izuy".to_string()),
-        //     Some("j".to_string()),
-        //     Some("j".to_string()),
-        //     Some("j".to_string()),
-        //     Some("j".to_string()),
-        //     Some("j".to_string()),
-        //     Some("j".to_string()),
-        //     Some("j".to_string()),
-        //     Some("j".to_string()),
-        //     Some("j".to_string()),
-        //     Some("l".to_string()),
-        //     Some("l".to_string()),
-        //     Some("l".to_string()),
-        //     Some("l".to_string()),
-        //     Some("l".to_string()),
-        //     Some("l".to_string()),
-        //     Some("l".to_string()),
-        //     Some("l".to_string()),
-        //     Some("l".to_string()),
-        //     Some("l".to_string()),
-        //     Some("l".to_string()),
-        //     Some("qt".to_string()),
-        //     Some("qt".to_string()),
-        //     Some("qt".to_string()),
-        //     Some("qt".to_string()),
-        //     Some("qt".to_string()),
-        //     Some("qt".to_string()),
-        //     Some("qt".to_string()),
-        //     Some("qt".to_string()),
-        //     Some("qt".to_string()),
-        //     Some("qt".to_string()),
-        //     Some("qt".to_string()),
-        //     Some("rcz".to_string()),
-        //     Some("rcz".to_string()),
-        //     Some("rcz".to_string()),
-        //     Some("rcz".to_string()),
-        //     Some("rcz".to_string()),
-        //     Some("rcz".to_string()),
-        //     Some("rcz".to_string()),
-        //     Some("rcz".to_string()),
-        //     Some("rcz".to_string()),
-        //     Some("rcz".to_string()),
-        //     Some("rcz".to_string()),
-        //     Some("uzr".to_string()),
-        //     Some("uzr".to_string()),
-        //     Some("uzr".to_string()),
-        //     Some("uzr".to_string()),
-        //     Some("uzr".to_string()),
-        //     Some("uzr".to_string()),
-        //     Some("uzr".to_string()),
-        //     Some("uzr".to_string()),
-        // ];
-
-        // let arr = StringArray::from(second_column);
-        // let len = arr.len();
-        // let s_array = Arc::new(StringArray::from(arr));
-        // let i64_array = Arc::new(Int64Array::from(vec![1; len]));
-        // arrays[0] = i32_array;
-        // arrays[1] = s_array;
-        // arrays[2] = i64_array;
 
         // Build schema
         let fields = self
@@ -596,17 +262,15 @@ impl RecordBatchGenerator {
         &self,
         data_type: DataType,
         num_rows: usize,
-        // batch_gen_rng: &mut ThreadRng,
+        batch_gen_rng: &mut ThreadRng,
         array_gen_rng: StdRng,
     ) -> ArrayRef {
-        let mut array_gen_rng = array_gen_rng;
-
         match data_type {
             DataType::Int8 => {
                 generate_primitive_array!(
                     self,
                     num_rows,
-                    // batch_gen_rng,
+                    batch_gen_rng,
                     array_gen_rng,
                     i8
                 )
@@ -615,7 +279,7 @@ impl RecordBatchGenerator {
                 generate_primitive_array!(
                     self,
                     num_rows,
-                    // batch_gen_rng,
+                    batch_gen_rng,
                     array_gen_rng,
                     i16
                 )
@@ -624,7 +288,7 @@ impl RecordBatchGenerator {
                 generate_primitive_array!(
                     self,
                     num_rows,
-                    // batch_gen_rng,
+                    batch_gen_rng,
                     array_gen_rng,
                     i32
                 )
@@ -633,7 +297,7 @@ impl RecordBatchGenerator {
                 generate_primitive_array!(
                     self,
                     num_rows,
-                    // batch_gen_rng,
+                    batch_gen_rng,
                     array_gen_rng,
                     i64
                 )
@@ -642,7 +306,7 @@ impl RecordBatchGenerator {
                 generate_primitive_array!(
                     self,
                     num_rows,
-                    // batch_gen_rng,
+                    batch_gen_rng,
                     array_gen_rng,
                     u8
                 )
@@ -651,7 +315,7 @@ impl RecordBatchGenerator {
                 generate_primitive_array!(
                     self,
                     num_rows,
-                    // batch_gen_rng,
+                    batch_gen_rng,
                     array_gen_rng,
                     u16
                 )
@@ -660,7 +324,7 @@ impl RecordBatchGenerator {
                 generate_primitive_array!(
                     self,
                     num_rows,
-                    // batch_gen_rng,
+                    batch_gen_rng,
                     array_gen_rng,
                     u32
                 )
@@ -669,7 +333,7 @@ impl RecordBatchGenerator {
                 generate_primitive_array!(
                     self,
                     num_rows,
-                    // batch_gen_rng,
+                    batch_gen_rng,
                     array_gen_rng,
                     u64
                 )
@@ -678,7 +342,7 @@ impl RecordBatchGenerator {
                 generate_primitive_array!(
                     self,
                     num_rows,
-                    // batch_gen_rng,
+                    batch_gen_rng,
                     array_gen_rng,
                     f32
                 )
@@ -687,16 +351,16 @@ impl RecordBatchGenerator {
                 generate_primitive_array!(
                     self,
                     num_rows,
-                    // batch_gen_rng,
+                    batch_gen_rng,
                     array_gen_rng,
                     f64
                 )
             }
             DataType::Utf8 => {
-                generate_string_array!(self, num_rows, array_gen_rng, i32)
+                generate_string_array!(self, num_rows, batch_gen_rng, array_gen_rng, i32)
             }
             DataType::LargeUtf8 => {
-                generate_string_array!(self, num_rows, array_gen_rng, i64)
+                generate_string_array!(self, num_rows, batch_gen_rng, array_gen_rng, i64)
             }
             _ => unreachable!(),
         }
@@ -736,7 +400,7 @@ mod test {
         };
 
         let gen = DatasetGenerator::new(config);
-        let datasets = gen.generate(None).unwrap();
+        let datasets = gen.generate().unwrap();
 
         // Should Generate 2 datasets
         assert_eq!(datasets.len(), 2);
