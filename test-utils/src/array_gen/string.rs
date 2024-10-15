@@ -66,42 +66,13 @@ fn random_string(rng: &mut StdRng, max_len: usize) -> String {
     // pick characters at random (not just ascii)
     match max_len {
         0 => "".to_string(),
-        1 => {
-            let r = rng.gen::<u8>();
-            String::from((b'a' + (r % 26) as u8) as char)
-
-            // String::from(rng.gen::<char>())
-        }
+        1 => String::from(rng.gen::<char>()),
         _ => {
             let len = rng.gen_range(1..=max_len);
-            // rng.sample_iter::<char, _>(rand::distributions::Standard)
-            //     .take(len)
-            //     .map(char::from)
-            //     .collect::<String>()
-            // let a = vec![String::from("a"), String::from("b"), String::from("c")];
-            rng.sample_iter::<usize, _>(rand::distributions::Standard)
+            rng.sample_iter::<char, _>(rand::distributions::Standard)
                 .take(len)
-                .map(|i| (b'a' + (i % 26) as u8) as char)
+                .map(char::from)
                 .collect::<String>()
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use rand::{rngs::StdRng, SeedableRng};
-
-    use super::random_string;
-
-    #[test]
-    fn test123() {
-        let mut rng = StdRng::seed_from_u64(1);
-        let a = random_string(&mut rng, 8);
-        println!("a: {:?}", a);
-        println!("a: {}", a);
-
-        let code_p = [0x3b3eb];
-        let p = char::from_u32(code_p[0]);
-        println!("p: {:?}", p);
     }
 }

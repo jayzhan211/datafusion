@@ -94,7 +94,6 @@ where
     ) -> Result<()> {
         assert_eq!(values.len(), 1, "single argument to update_batch");
         let values = values[0].as_primitive::<T>();
-        // println!("values: {:?}", values);
 
         // update values
         self.values.resize(total_num_groups, self.starting_value);

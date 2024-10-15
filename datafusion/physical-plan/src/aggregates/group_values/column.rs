@@ -237,12 +237,11 @@ impl GroupValues for GroupValuesColumn {
         batch_hashes.resize(n_rows, 0);
         create_hashes(cols, &self.random_state, batch_hashes)?;
         self.build_group_values(cols, groups);
-        Ok(()) 
+        Ok(())
     }
 
     fn size(&self) -> usize {
-        let group_values_size: usize =
-            self.group_values.iter().map(|v| v.size()).sum();
+        let group_values_size: usize = self.group_values.iter().map(|v| v.size()).sum();
         group_values_size + self.hashes_buffer.allocated_size()
     }
 
