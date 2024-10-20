@@ -56,6 +56,7 @@ pub trait GroupColumn: Send + Sync {
     ///
     /// Note that this comparison returns true if both elements are NULL
     fn equal_to(&self, lhs_row: usize, array: &ArrayRef, rhs_row: usize) -> bool;
+    fn equal_to_vector(&self, lhs_row: usize, array: &ArrayRef, rhs_row: usize) -> bool;
     fn equal_to_vectorize(
         &self,
         lhs_rows: &[usize],
@@ -119,13 +120,27 @@ impl<T: ArrowPrimitiveType, const NULLABLE: bool> GroupColumn
         self.group_values[lhs_row] == array.as_primitive::<T>().value(rhs_row)
     }
 
+    #[inline(always)]
+    fn equal_to_vector(&self, lhs_row: usize, array: &ArrayRef, rhs_row: usize) -> bool {
+        lhs_row == rhs_row
+        // unsafe {
+        //     *self.group_values.get_unchecked(lhs_row) == array.as_primitive::<T>().value_unchecked(rhs_row)
+        // }
+    }
+
     fn equal_to_vectorize(
         &self,
         lhs_rows: &[usize],
         array: &ArrayRef,
         rhs_rows: &[usize],
     ) -> Vec<bool> {
-        todo!("1")
+        let n = lhs_rows.len();
+        (0..n)
+            .map(|i| {
+                self.group_values[lhs_rows[i]]
+                    == array.as_primitive::<T>().value(rhs_rows[i])
+            })
+            .collect()
     }
 
     fn append_val(&mut self, array: &ArrayRef, row: usize) {
@@ -280,6 +295,11 @@ where
             }
             _ => unreachable!("View types should use `ArrowBytesViewMap`"),
         }
+    }
+
+    #[inline(always)]
+    fn equal_to_vector(&self, lhs_row: usize, array: &ArrayRef, rhs_row: usize) -> bool {
+        lhs_row == rhs_row
     }
 
     fn equal_to_vectorize(
@@ -798,6 +818,11 @@ impl<B: ByteViewType> GroupColumn for ByteViewGroupValueBuilder<B> {
         self.equal_to_inner(lhs_row, array, rhs_row)
     }
 
+    #[inline(always)]
+    fn equal_to_vector(&self, lhs_row: usize, array: &ArrayRef, rhs_row: usize) -> bool {
+        lhs_row == rhs_row
+    }
+
     fn append_val(&mut self, array: &ArrayRef, row: usize) {
         self.append_val_inner(array, row)
     }
@@ -807,11 +832,11 @@ impl<B: ByteViewType> GroupColumn for ByteViewGroupValueBuilder<B> {
     }
 
     fn equal_to_vectorize(
-            &self,
-            lhs_rows: &[usize],
-            array: &ArrayRef,
-            rhs_rows: &[usize],
-        ) -> Vec<bool> {
+        &self,
+        lhs_rows: &[usize],
+        array: &ArrayRef,
+        rhs_rows: &[usize],
+    ) -> Vec<bool> {
         todo!("123")
     }
 
