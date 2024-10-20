@@ -419,9 +419,6 @@ impl GroupValuesColumn {
 
                     let is_empty_slot = offset == 0;
                     if is_empty_slot {
-                        // if row_idx == 0 {
-                        //     println!("hash: {:?} ht_offset: {:?}, offest: {:?}", hash, ht_offset, offset);
-                        // }
                         // the slot is empty, so we can create a new entry here
                         self.new_entries[n_new_entries] = row_idx;
                         n_new_entries += 1;

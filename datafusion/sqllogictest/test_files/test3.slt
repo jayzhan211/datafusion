@@ -18,7 +18,7 @@ LOCATION '../../benchmarks/data/hits.parquet';
 # 950338919516514282 (empty) 1
 # 950338919516514282 ищу районам 1
 
-query TTT
+query TT
 explain SELECT "RegionID", COUNT(DISTINCT "UserID") AS u FROM hits GROUP BY "RegionID" ORDER BY u DESC LIMIT 10;
 ----
 WatchID Int64 NO

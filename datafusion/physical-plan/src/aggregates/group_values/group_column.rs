@@ -806,6 +806,15 @@ impl<B: ByteViewType> GroupColumn for ByteViewGroupValueBuilder<B> {
         self.views.len()
     }
 
+    fn equal_to_vectorize(
+            &self,
+            lhs_rows: &[usize],
+            array: &ArrayRef,
+            rhs_rows: &[usize],
+        ) -> Vec<bool> {
+        todo!("123")
+    }
+
     fn size(&self) -> usize {
         let buffers_size = self
             .completed

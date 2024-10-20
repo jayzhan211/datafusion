@@ -31,3 +31,7 @@ query TI
 With T as
  (select * from t1 UNION ALL select * from t2)
 select b, sum(DISTINCT a) from T group by b order by b;
+----
+a 5
+b 21
+NULL NULL
