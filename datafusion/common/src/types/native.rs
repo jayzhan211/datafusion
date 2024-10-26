@@ -16,15 +16,15 @@
 // under the License.
 
 use super::{
-    LogicalField, LogicalFieldRef, LogicalFields, LogicalType, LogicalUnionFields,
-    TypeSignature,
+    LogicalField, LogicalFieldRef, LogicalFields, LogicalType, LogicalTypeRef,
+    LogicalUnionFields, TypeSignature,
 };
 use crate::error::{Result, _internal_err};
 use arrow::compute::can_cast_types;
 use arrow_schema::{
     DataType, Field, FieldRef, Fields, IntervalUnit, TimeUnit, UnionFields,
 };
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 /// Representation of a type that DataFusion can handle natively. It is a subset
 /// of the physical variants in Arrow's native [`DataType`].
@@ -346,6 +346,12 @@ impl LogicalType for NativeType {
 // mapping solutions to provide backwards compatibility while transitioning from
 // the purely physical system to a logical / physical system.
 
+impl From<&DataType> for NativeType {
+    fn from(value: &DataType) -> Self {
+        value.clone().into()
+    }
+}
+
 impl From<DataType> for NativeType {
     fn from(value: DataType) -> Self {
         use NativeType::*;
@@ -388,4 +394,28 @@ impl From<DataType> for NativeType {
             DataType::RunEndEncoded(_, field) => field.data_type().clone().into(),
         }
     }
+}
+
+// Singleton instances
+// TODO: Replace with LazyLock
+pub static LOGICAL_STRING: OnceLock<LogicalTypeRef> = OnceLock::new();
+pub static LOGICAL_FLOAT16: OnceLock<LogicalTypeRef> = OnceLock::new();
+pub static LOGICAL_FLOAT32: OnceLock<LogicalTypeRef> = OnceLock::new();
+pub static LOGICAL_FLOAT64: OnceLock<LogicalTypeRef> = OnceLock::new();
+
+// Usage functions
+pub fn logical_string() -> LogicalTypeRef {
+    Arc::clone(LOGICAL_STRING.get_or_init(|| Arc::new(NativeType::Utf8)))
+}
+
+pub fn logical_float16() -> LogicalTypeRef {
+    Arc::clone(LOGICAL_FLOAT16.get_or_init(|| Arc::new(NativeType::Float16)))
+}
+
+pub fn logical_float32() -> LogicalTypeRef {
+    Arc::clone(LOGICAL_FLOAT32.get_or_init(|| Arc::new(NativeType::Float32)))
+}
+
+pub fn logical_float64() -> LogicalTypeRef {
+    Arc::clone(LOGICAL_FLOAT64.get_or_init(|| Arc::new(NativeType::Float64)))
 }

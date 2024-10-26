@@ -23,11 +23,11 @@ use arrow::{
 };
 use datafusion_common::{
     exec_err, internal_datafusion_err, internal_err, plan_err,
+    types::{logical_string, LogicalType, NativeType},
     utils::{coerced_fixed_size_list_to_list, list_ndims},
     Result,
 };
 use datafusion_expr_common::{
-    logical_type::{logical_string, LogicalType},
     signature::{ArrayFunctionSignature, FIXED_SIZE_LIST_WILDCARD, TIMEZONE_WILDCARD},
     type_coercion::binary::string_coercion,
 };
@@ -497,28 +497,12 @@ fn get_valid_types(
             let mut new_types = Vec::with_capacity(current_types.len());
             for (data_type, target_type) in current_types.iter().zip(target_types.iter())
             {
-                if !target_type.can_decode_to(data_type) {
-                    fn search_castable_physical_type(
-                        data_type: &DataType,
-                        target_type: &Arc<dyn LogicalType>,
-                    ) -> Option<DataType> {
-                        for physical_type in target_type.decode_types().iter() {
-                            if can_cast_types(data_type, physical_type) {
-                                return Some(physical_type.to_owned());
-                            }
-                        }
-                        None
-                    }
-
-                    if let Some(physical_type) =
-                        search_castable_physical_type(data_type, target_type)
-                    {
-                        new_types.push(physical_type);
-                    } else {
-                        return plan_err!("{target_type} can't decode to {data_type} and {data_type} can't cast to any of {:?}", target_type.decode_types());
-                    }
-                } else {
+                let logical_data_type: NativeType = data_type.into();
+                if logical_data_type == *target_type.native() {
                     new_types.push(data_type.to_owned());
+                } else {
+                    let casted_type = target_type.default_cast_for(data_type)?;
+                    new_types.push(casted_type);
                 }
             }
 

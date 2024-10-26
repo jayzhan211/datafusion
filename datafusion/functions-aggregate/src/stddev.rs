@@ -24,6 +24,7 @@ use std::sync::{Arc, OnceLock};
 use arrow::array::Float64Array;
 use arrow::{array::ArrayRef, datatypes::DataType, datatypes::Field};
 
+use datafusion_common::types::logical_float64;
 use datafusion_common::{internal_err, not_impl_err, Result};
 use datafusion_common::{plan_err, ScalarValue};
 use datafusion_expr::aggregate_doc_sections::DOC_SECTION_STATISTICAL;
@@ -33,7 +34,6 @@ use datafusion_expr::{
     Accumulator, AggregateUDFImpl, Documentation, GroupsAccumulator, Signature,
     Volatility,
 };
-use datafusion_expr_common::logical_type::logical_float64;
 use datafusion_functions_aggregate_common::stats::StatsType;
 
 use crate::variance::{VarianceAccumulator, VarianceGroupsAccumulator};

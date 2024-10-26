@@ -19,8 +19,10 @@
 //! and return types of functions in DataFusion.
 
 use arrow::datatypes::DataType;
+use datafusion_common::types::LogicalTypeRef;
+// use datafusion_common::types::LogicalType;
 
-use crate::logical_type::LogicalTypeRef;
+// use crate::logical_type::LogicalTypeRef;
 
 /// Constant that is used as a placeholder for any valid timezone.
 /// This is used where a function can accept a timestamp type with any
