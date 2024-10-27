@@ -21,108 +21,22 @@ LOCATION '../../benchmarks/data/hits.parquet';
 query TT
 explain SELECT "RegionID", COUNT(DISTINCT "UserID") AS u FROM hits GROUP BY "RegionID" ORDER BY u DESC LIMIT 10;
 ----
-WatchID Int64 NO
-JavaEnable Int16 NO
-Title Utf8 NO
-GoodEvent Int16 NO
-EventTime Int64 NO
-EventDate UInt16 NO
-CounterID Int32 NO
-ClientIP Int32 NO
-RegionID Int32 NO
-UserID Int64 NO
-CounterClass Int16 NO
-OS Int16 NO
-UserAgent Int16 NO
-URL Utf8 NO
-Referer Utf8 NO
-IsRefresh Int16 NO
-RefererCategoryID Int16 NO
-RefererRegionID Int32 NO
-URLCategoryID Int16 NO
-URLRegionID Int32 NO
-ResolutionWidth Int16 NO
-ResolutionHeight Int16 NO
-ResolutionDepth Int16 NO
-FlashMajor Int16 NO
-FlashMinor Int16 NO
-FlashMinor2 Utf8 NO
-NetMajor Int16 NO
-NetMinor Int16 NO
-UserAgentMajor Int16 NO
-UserAgentMinor Utf8 NO
-CookieEnable Int16 NO
-JavascriptEnable Int16 NO
-IsMobile Int16 NO
-MobilePhone Int16 NO
-MobilePhoneModel Utf8 NO
-Params Utf8 NO
-IPNetworkID Int32 NO
-TraficSourceID Int16 NO
-SearchEngineID Int16 NO
-SearchPhrase Utf8 NO
-AdvEngineID Int16 NO
-IsArtifical Int16 NO
-WindowClientWidth Int16 NO
-WindowClientHeight Int16 NO
-ClientTimeZone Int16 NO
-ClientEventTime Int64 NO
-SilverlightVersion1 Int16 NO
-SilverlightVersion2 Int16 NO
-SilverlightVersion3 Int32 NO
-SilverlightVersion4 Int16 NO
-PageCharset Utf8 NO
-CodeVersion Int32 NO
-IsLink Int16 NO
-IsDownload Int16 NO
-IsNotBounce Int16 NO
-FUniqID Int64 NO
-OriginalURL Utf8 NO
-HID Int32 NO
-IsOldCounter Int16 NO
-IsEvent Int16 NO
-IsParameter Int16 NO
-DontCountHits Int16 NO
-WithHash Int16 NO
-HitColor Utf8 NO
-LocalEventTime Int64 NO
-Age Int16 NO
-Sex Int16 NO
-Income Int16 NO
-Interests Int16 NO
-Robotness Int16 NO
-RemoteIP Int32 NO
-WindowName Int32 NO
-OpenerName Int32 NO
-HistoryLength Int16 NO
-BrowserLanguage Utf8 NO
-BrowserCountry Utf8 NO
-SocialNetwork Utf8 NO
-SocialAction Utf8 NO
-HTTPError Int16 NO
-SendTiming Int32 NO
-DNSTiming Int32 NO
-ConnectTiming Int32 NO
-ResponseStartTiming Int32 NO
-ResponseEndTiming Int32 NO
-FetchTiming Int32 NO
-SocialSourceNetworkID Int16 NO
-SocialSourcePage Utf8 NO
-ParamPrice Int64 NO
-ParamOrderID Utf8 NO
-ParamCurrency Utf8 NO
-ParamCurrencyID Int16 NO
-OpenstatServiceName Utf8 NO
-OpenstatCampaignID Utf8 NO
-OpenstatAdID Utf8 NO
-OpenstatSourceID Utf8 NO
-UTMSource Utf8 NO
-UTMMedium Utf8 NO
-UTMCampaign Utf8 NO
-UTMContent Utf8 NO
-UTMTerm Utf8 NO
-FromTag Utf8 NO
-HasGCLID Int16 NO
-RefererHash Int64 NO
-URLHash Int64 NO
-CLID Int32 NO
+logical_plan
+01)Sort: u DESC NULLS FIRST, fetch=10
+02)--Projection: hits.RegionID, count(alias1) AS u
+03)----Aggregate: groupBy=[[hits.RegionID]], aggr=[[count(alias1)]]
+04)------Aggregate: groupBy=[[hits.RegionID, hits.UserID AS alias1]], aggr=[[]]
+05)--------TableScan: hits projection=[RegionID, UserID]
+physical_plan
+01)SortPreservingMergeExec: [u@1 DESC], fetch=10
+02)--SortExec: TopK(fetch=10), expr=[u@1 DESC], preserve_partitioning=[true]
+03)----ProjectionExec: expr=[RegionID@0 as RegionID, count(alias1)@1 as u]
+04)------AggregateExec: mode=FinalPartitioned, gby=[RegionID@0 as RegionID], aggr=[count(alias1)]
+05)--------CoalesceBatchesExec: target_batch_size=8192
+06)----------RepartitionExec: partitioning=Hash([RegionID@0], 4), input_partitions=4
+07)------------AggregateExec: mode=Partial, gby=[RegionID@0 as RegionID], aggr=[count(alias1)]
+08)--------------AggregateExec: mode=FinalPartitioned, gby=[RegionID@0 as RegionID, alias1@1 as alias1], aggr=[]
+09)----------------CoalesceBatchesExec: target_batch_size=8192
+10)------------------RepartitionExec: partitioning=Hash([RegionID@0, alias1@1], 4), input_partitions=4
+11)--------------------AggregateExec: mode=Partial, gby=[RegionID@0 as RegionID, UserID@1 as alias1], aggr=[]
+12)----------------------ParquetExec: file_groups={4 groups: [[WORKSPACE_ROOT/benchmarks/data/hits.parquet:0..3694994112], [WORKSPACE_ROOT/benchmarks/data/hits.parquet:3694994112..7389988224], [WORKSPACE_ROOT/benchmarks/data/hits.parquet:7389988224..11084982336], [WORKSPACE_ROOT/benchmarks/data/hits.parquet:11084982336..14779976446]]}, projection=[RegionID, UserID]

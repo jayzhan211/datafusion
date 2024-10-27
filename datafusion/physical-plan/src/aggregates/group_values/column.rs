@@ -280,43 +280,8 @@ impl GroupValues for GroupValuesColumn {
                     .map(|v| v.build())
                     .collect::<Vec<_>>()
             }
-            EmitTo::First(n) => {
+            EmitTo::First(_n) => {
                 todo!("not supported");
-                // let output= self
-                //     .group_values
-                //     .iter_mut()
-                //     .map(|v| v.take_n(n))
-                //     .collect::<Vec<_>>();
-
-                // self.hashes.drain(0..n);
-                // self.hash_table.clear();
-                // self.hash_table.resize(self.capacity, 0);
-                // let bit_mask = self.capacity - 1;
-                // for (i, hash) in self.hashes.iter().enumerate() {
-                //     let mut new_idx = *hash as usize & bit_mask;
-                //     let mut num_iter = 0;
-                //     while self.hash_table[new_idx] != 0 {
-                //         num_iter += 1;
-                //         new_idx += num_iter * num_iter;
-                //         new_idx &= bit_mask;
-                //     }
-                //     self.hash_table[new_idx] = i + 1;
-                // }
-
-                // let hash_table_ptr = self.hash_table.as_mut_ptr();
-                // unsafe {
-                //     for i in 0..self.capacity {
-                //         let offset = *hash_table_ptr.add(i);
-                //         if offset != 0 {
-                //             match offset.checked_sub(n + 1) {
-                //                 Some(sub) => *hash_table_ptr.add(i) = sub + 1,
-                //                 None => *hash_table_ptr.add(i) = 0,
-                //             }
-                //         }
-                //     }
-                // }
-
-                // output
             }
         };
 
@@ -466,7 +431,7 @@ impl GroupValuesColumn {
                 });
             assert_eq!(self.hashes.len(), self.group_values[0].len());
 
-            let row_idxes = check_eq_vec_expr(
+            vectorized_eq_check(
                 &self.group_values,
                 cols,
                 &mut self.no_match,
@@ -476,86 +441,26 @@ impl GroupValuesColumn {
                 &self.current_offsets,
                 &self.hash_table,
             );
-            for i in 0..row_idxes.len() {
-                self.no_match[n_no_match] = row_idxes[i];
-                n_no_match += 1;
-            }
 
-            // self.need_equality_check
-            //     .iter()
-            //     .take(n_need_equality_check)
-            //     .for_each(|&row_idx| {
-            //         let ht_offset = self.current_offsets[row_idx];
-            //         let offset = self.hash_table[ht_offset];
-
-            //         let is_equal = self
-            //             .group_values
-            //             .iter()
-            //             .enumerate()
-            //             .all(|(j, g)| g.equal_to(offset - 1, &cols[j], row_idx));
-            //         if !is_equal {
-            //             self.no_match[n_no_match] = row_idx;
-            //             n_no_match += 1;
-            //         }
-            //     });
-
-            self.need_equality_check
-                .iter()
-                .take(n_need_equality_check)
-                .for_each(|&row_idx| {
-                    let ht_offset = self.current_offsets[row_idx];
-                    let offset = self.hash_table[ht_offset];
-
-                    let is_equal = self
-                        .group_values
-                        .iter()
-                        .enumerate()
-                        .all(|(j, g)| g.equal_to(offset - 1, &cols[j], row_idx));
-                    if !is_equal {
-                        self.no_match[n_no_match] = row_idx;
-                        n_no_match += 1;
-                    }
-                });
-
-            // let equal_check_lhs_indexes = self
-            //     .need_equality_check
-            //     .iter()
-            //     .take(n_need_equality_check)
-            //     .map(|row_idx| {
-            //         let ht_offset = self.current_offsets[*row_idx];
-            //         self.hash_table[ht_offset] - 1
-            //     })
-            //     .collect::<Vec<_>>();
-            // let equal_check_rhs_indexes = self
-            //     .need_equality_check
-            //     .iter()
-            //     .take(n_need_equality_check)
-            //     .map(|row_idx| *row_idx)
-            //     .collect::<Vec<_>>();
-
-            // assert_eq!(self.hashes.len(), self.group_values[0].len());
-            // let len = self.hashes.len();
-            // for (lhs_row, rhs_row) in equal_check_lhs_indexes
-            //     .into_iter()
-            //     .zip(equal_check_rhs_indexes.into_iter())
-            // {
-            //     assert!(lhs_row <= len);
-            //     // if rhs_row > cols[0].len() {
-            //     //     println!("rhs_row: {:?}", rhs_row);
-            //     //     println!("len: {:?}", cols[0].len());
-            //     // }
-            //     let is_equal = self
-            //         .group_values
-            //         .iter()
-            //         .enumerate()
-            //         .all(|(j, g)| g.equal_to(lhs_row, &cols[j], rhs_row));
-            //     if !is_equal {
-            //         self.no_match[n_no_match] = rhs_row;
-            //         n_no_match += 1;
+            // let row_idxes = check_eq_vec_expr(
+            //     &self.group_values,
+            //     cols,
+            //     &mut self.no_match,
+            //     &mut n_no_match,
+            //     &self.need_equality_check,
+            //     n_need_equality_check,
+            //     &self.current_offsets,
+            //     &self.hash_table,
+            // );
+            
+            // unsafe {
+            //     let no_match_ptr = self.no_match.as_mut_ptr();
+            //     for (i, &row_idx) in row_idxes.iter().enumerate() {
+            //         *no_match_ptr.add(n_no_match + i) = row_idx;
             //     }
             // }
 
-            // equality_check(&mut self.no_match, &mut n_no_match, need_equality_check, &self.current_offsets, &self.hash_table, &self.group_values, cols);
+            // n_no_match += row_idxes.len();
 
             // now we need to probing for those rows in `no_match`
             let delta = num_iter * num_iter;
@@ -580,75 +485,6 @@ impl GroupValuesColumn {
     }
 }
 
-// #[inline(always)]
-// fn equ_vec<const L: usize>(
-//     equal_mask: &mut [bool; L],
-//     chunk: &[&usize],
-//     current_offsets: &[usize],
-//     hash_table: &[usize],
-//     group_values: &[Box<dyn GroupColumn>],
-//     cols: &[ArrayRef],
-// ) {
-//     for i in 0..L {
-//         let row_idx = *chunk[i];
-//         let ht_offset = current_offsets[row_idx];
-//         let offset = hash_table[ht_offset];
-
-//         equal_mask[i] = group_values
-//             .iter()
-//             .enumerate()
-//             .all(|(j, group_val)| group_val.equal_to(offset - 1, &cols[j], row_idx))
-//     }
-// }
-
-// #[inline(never)]
-// fn equality_check(
-//     no_match: &mut Vec<usize>,
-//     n_no_match: &mut usize,
-//     need_equality_check: Vec<&usize>,
-//     current_offsets: &[usize],
-//     hash_table: &[usize],
-//     group_values: &[Box<dyn GroupColumn>],
-//     cols: &[ArrayRef],
-// ) {
-//     let mut chunks = need_equality_check.chunks_exact(LANES);
-//     chunks.borrow_mut().for_each(|chunk| {
-//         // TODO: Check if it is vectorized
-//         let mut equal_mask = [true; LANES];
-//         equ_vec::<LANES>(
-//             &mut equal_mask,
-//             chunk,
-//             current_offsets,
-//             hash_table,
-//             group_values,
-//             cols,
-//         );
-
-//         for (i, &eq) in equal_mask.iter().enumerate() {
-//             if !eq {
-//                 let row_idx = *chunk[i];
-//                 no_match[*n_no_match] = row_idx;
-//                 *n_no_match += 1;
-//             }
-//         }
-//     });
-//     let remainder = chunks.remainder();
-//     for i in 0..remainder.len() {
-//         let row_idx = *remainder[i];
-//         let ht_offset = current_offsets[row_idx];
-//         let offset = hash_table[ht_offset];
-
-//         let is_equal = group_values
-//             .iter()
-//             .enumerate()
-//             .all(|(i, group_val)| group_val.equal_to(offset - 1, &cols[i], row_idx));
-
-//         if !is_equal {
-//             no_match[*n_no_match] = row_idx;
-//             *n_no_match += 1;
-//         }
-//     }
-// }
 
 /// My funcrion
 #[inline(never)]
@@ -674,8 +510,8 @@ pub fn my_sum() {
     check_eq_vec_expr(
         &groups_values,
         &cols,
-        &mut no_matches,
-        &mut n_no_match,
+        // &mut no_matches,
+        // &mut n_no_match,
         &need_equality_check,
         n_need_equality_check,
         &current_offsets,
@@ -701,153 +537,73 @@ fn select<T: Copy>(m: bool, a: T, b: T) -> T {
     }
 }
 
+fn vectorized_eq_check(
+    groups_values: &[Box<dyn GroupColumn>],
+    cols: &[ArrayRef],
+    no_matches: &mut Vec<usize>,
+    n_no_match: &mut usize,
+    need_equality_check: &[usize],
+    n_need_equality_check: usize,
+    current_offsets: &[usize],
+    hash_table: &[usize],
+) {
+    let row_idxes = check_eq_vec_expr(
+        groups_values,
+        cols,
+        need_equality_check,
+        n_need_equality_check,
+        current_offsets,
+        hash_table
+    );
+    
+    unsafe {
+        let no_match_ptr = no_matches.as_mut_ptr();
+        for (i, &row_idx) in row_idxes.iter().enumerate() {
+            *no_match_ptr.add(*n_no_match + i) = row_idx;
+        }
+    }
+
+    *n_no_match += row_idxes.len();
+}
+
 #[inline(never)]
 fn check_eq_vec_expr(
     groups_values: &[Box<dyn GroupColumn>],
     cols: &[ArrayRef],
-    _no_matches: &mut Vec<usize>,
-    _n_no_match: &mut usize,
+    // _no_matches: &mut Vec<usize>,
+    // _n_no_match: &mut usize,
     need_equality_check: &[usize],
     n_need_equality_check: usize,
     current_offsets: &[usize],
     hash_table: &[usize],
 ) -> Vec<usize> {
-    // let acc = vec![false; need_equality_check.len()];
-    // let mut is_eq_v = true;
-    let mut non_matching_indices = vec![0; n_need_equality_check];
-    for (i, &row_idx) in need_equality_check.iter().take(n_need_equality_check).enumerate() {
-        // is_eq_v &= row_idx > 3;
+    let mut acc = vec![true; n_need_equality_check];
+    for (j, g) in groups_values.iter().enumerate() {
+        let col_j = unsafe { cols.get_unchecked(j) };
+        need_equality_check
+            .iter()
+            .take(n_need_equality_check)
+            .enumerate()
+            .for_each(|(i, &row_idx)| unsafe {
+                let ht_offset = *current_offsets.get_unchecked(row_idx);
+                let offset = *hash_table.get_unchecked(ht_offset) - 1;
 
-        // let ht_offset = current_offsets[row_idx];
-        // let offset = hash_table[ht_offset];
-        // let is_not_the_same = is_not_same_group_simple(groups_values, cols, offset, row_idx);
-        // non_matching_indices[i] = (row_idx + 1) * is_not_the_same;
-
-
-        unsafe {
-            let ht_offset = current_offsets.get_unchecked(row_idx);
-            let offset = hash_table.get_unchecked(*ht_offset);
-            let is_not_the_same = is_not_same_group_simple(groups_values, cols, *offset, row_idx);
-            *non_matching_indices.get_unchecked_mut(i) = (row_idx + 1) * is_not_the_same;
-        }
-
-        // indices[i].add_assign(i+1);
+                *acc.get_unchecked_mut(i) &= g.equal_to(offset, col_j, row_idx);
+            });
     }
 
-    // let r = need_equality_check.iter().enumerate().filter_map(|(i,v)| {
-    //     if (*v).gt(&3) {
-    //         Some(i)
-    //     } else {
-    //         None
-    //     }
-    //     // acc.push(is_eq);
-    //     // acc
-    //     // is_eq &= (*v).compare(3).is_gt();
-    //     // is_eq
-    // }).collect::<Vec<_>>();
-    // println!("R: {:?}", is_eq_v);
-    // println!("R: {:?}", indices);
-
-    // let mut non_matching_indices = vec![0; n_need_equality_check];
-    // need_equality_check
-    //     .iter()
-    //     .take(n_need_equality_check)
-    //     .enumerate()
-    //     .for_each(|(i, &row_idx)| {
-    //         // let ht_offset = current_offsets[row_idx];
-    //         // let offset = hash_table[ht_offset];
-    //         // non_matching_indices[i] = (row_idx + 1) * is_not_same_group(groups_values, cols, offset, row_idx);
-    //         // non_matching_indices[i] = row_idx + 1;
-    //         unsafe {
-    //             *non_matching_indices.get_unchecked_mut(i) = row_idx + 1;
-    //         }
-    //     });
-
-    non_matching_indices
-        .into_iter()
-        .filter(|&idx| idx != 0)
-        .map(|idx| idx - 1)
-        .collect()
-}
-#[inline(never)]
-fn check_eq_vec(
-    groups_values: &[Box<dyn GroupColumn>],
-    cols: &[ArrayRef],
-    _no_matches: &mut Vec<usize>,
-    _n_no_match: &mut usize,
-    need_equality_check: &[usize],
-    n_need_equality_check: usize,
-    current_offsets: &[usize],
-    hash_table: &[usize],
-) -> Vec<usize> {
-    let mut non_matching_indices = vec![0; n_need_equality_check];
     need_equality_check
         .iter()
         .take(n_need_equality_check)
         .enumerate()
-        .for_each(|(i, &row_idx)| {
-            let ht_offset = current_offsets[row_idx];
-            let offset = hash_table[ht_offset];
-            non_matching_indices[i] =
-                (row_idx + 1) * is_not_same_group(groups_values, cols, offset, row_idx);
-        });
-
-    non_matching_indices
-        .into_iter()
-        .filter(|&idx| idx != 0)
-        .map(|idx| idx - 1)
+        .filter_map(|(i, &row_idx)| {
+            if !unsafe { *acc.get_unchecked(i) } {
+                Some(row_idx)
+            } else {
+                None
+            }
+        })
         .collect()
-}
-
-#[inline(always)]
-fn is_not_same_group(
-    groups_values: &[Box<dyn GroupColumn>],
-    cols: &[ArrayRef],
-    offset: usize,
-    row_idx: usize,
-) -> usize {
-    for (j, g) in groups_values.iter().enumerate() {
-        if !g.equal_to(offset - 1, &cols[j], row_idx) {
-            return 1;
-        }
-    }
-
-    0
-}
-
-#[inline(always)]
-fn is_not_same_group_simple(
-    groups_values: &[Box<dyn GroupColumn>],
-    cols: &[ArrayRef],
-    offset: usize,
-    row_idx: usize,
-) -> usize {
-    // let is_eq0 = groups_values[0].equal_to(offset - 1, &cols[0], row_idx);
-    // let is_eq1 = groups_values[0].equal_to(offset - 1, &cols[1], row_idx);
-    // let is_eq2 = groups_values[0].equal_to(offset - 1, &cols[2], row_idx);
-    // let is_eq3 = groups_values[0].equal_to(offset - 1, &cols[3], row_idx);
-    // if !is_eq0 || !is_eq1 || !is_eq2 || !is_eq3 {
-    //     return 1;
-    // }
-    // 0
-
-    let mut is_eq = true;
-    for (j, g) in groups_values.iter().enumerate() {
-        // is_eq &= offset - 1 == row_idx;
-        is_eq &= g.equal_to(offset - 1, &cols[j], row_idx);
-        // is_eq &= g.equal_to(offset - 1, &cols[j], row_idx);
-        // if offset - 1 == (row_idx + j) {
-        // if !g.equal_to(offset - 1, &cols[j], row_idx) {
-        //     return 1;
-        // }
-    }
-
-    // 0
-    if is_eq {
-        0
-    } else {
-        1
-    }
 }
 
 #[cfg(test)]
