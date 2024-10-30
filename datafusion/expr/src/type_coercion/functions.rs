@@ -23,7 +23,7 @@ use arrow::{
 };
 use datafusion_common::{
     exec_err, internal_datafusion_err, internal_err, plan_err,
-    types::{logical_string, LogicalType, NativeType},
+    types::NativeType,
     utils::{coerced_fixed_size_list_to_list, list_ndims},
     Result,
 };
@@ -402,12 +402,41 @@ fn get_valid_types(
             .map(|valid_type| current_types.iter().map(|_| valid_type.clone()).collect())
             .collect(),
         TypeSignature::String(number) => {
-            let data_types = get_valid_types(
-                &TypeSignature::Coercible(vec![logical_string(); *number]),
-                current_types,
-            )?
-            .swap_remove(0);
+            if *number < 1 {
+                return plan_err!(
+                    "The signature expected at least one argument but received {}",
+                    current_types.len()
+                );
+            }
+            if *number != current_types.len() {
+                return plan_err!(
+                    "The signature expected {} arguments but received {}",
+                    number,
+                    current_types.len()
+                );
+            }
 
+            let mut new_types = Vec::with_capacity(current_types.len());
+            for data_type in current_types.iter() {
+                let logical_data_type: NativeType = data_type.into();
+
+                match logical_data_type {
+                    NativeType::String => {
+                        new_types.push(data_type.to_owned());
+                    }
+                    NativeType::Null => {
+                        // TODO: we can switch to Utf8 if all the related string function supports ut8view
+                        new_types.push(DataType::Utf8);
+                    }
+                    _ => {
+                        return plan_err!(
+                            "The signature expected NativeType::String but received {data_type}"
+                        );
+                    }
+                }
+            }
+
+            let data_types = new_types;
             // Find the common string type for the given types
             fn find_common_type(
                 lhs_type: &DataType,
