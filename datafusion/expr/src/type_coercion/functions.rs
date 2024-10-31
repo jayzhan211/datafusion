@@ -23,7 +23,7 @@ use arrow::{
 };
 use datafusion_common::{
     exec_err, internal_datafusion_err, internal_err, plan_err,
-    types::NativeType,
+    types::{logical_string, NativeType},
     utils::{coerced_fixed_size_list_to_list, list_ndims},
     Result,
 };
@@ -402,6 +402,10 @@ fn get_valid_types(
             .map(|valid_type| current_types.iter().map(|_| valid_type.clone()).collect())
             .collect(),
         TypeSignature::String(number) => {
+            // TODO: we can switch to coercible after all the string functions support utf8view since it is choosen as the default string type.
+            //
+            // let data_types = get_valid_types(&TypeSignature::Coercible(vec![logical_string(); *number]), current_types)?.swap_remove(0);
+
             if *number < 1 {
                 return plan_err!(
                     "The signature expected at least one argument but received {}",
@@ -425,7 +429,6 @@ fn get_valid_types(
                         new_types.push(data_type.to_owned());
                     }
                     NativeType::Null => {
-                        // TODO: we can switch to Utf8 if all the related string function supports ut8view
                         new_types.push(DataType::Utf8);
                     }
                     _ => {
@@ -437,6 +440,7 @@ fn get_valid_types(
             }
 
             let data_types = new_types;
+
             // Find the common string type for the given types
             fn find_common_type(
                 lhs_type: &DataType,
@@ -529,9 +533,15 @@ fn get_valid_types(
                 let logical_data_type: NativeType = data_type.into();
                 if logical_data_type == *target_type.native() {
                     new_types.push(data_type.to_owned());
-                } else {
+                } else if logical_data_type.can_cast_to(target_type.native()) {
                     let casted_type = target_type.default_cast_for(data_type)?;
                     new_types.push(casted_type);
+                } else {
+                    return plan_err!(
+                        "The signature expected {:?} but received {:?}",
+                        target_type.native(),
+                        logical_data_type
+                    );
                 }
             }
 

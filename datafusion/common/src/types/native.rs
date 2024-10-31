@@ -398,6 +398,41 @@ impl From<DataType> for NativeType {
     }
 }
 
+impl NativeType {
+    #[inline]
+    pub fn is_numeric(&self) -> bool {
+        use NativeType::*;
+        matches!(
+            self,
+            UInt8
+                | UInt16
+                | UInt32
+                | UInt64
+                | Int8
+                | Int16
+                | Int32
+                | Int64
+                | Float16
+                | Float32
+                | Float64
+        )
+    }
+
+    /// This function is the NativeType version of `can_cast_types`.
+    /// It handles general coercion rules that are widely applicable.
+    /// Avoid adding specific coercion cases here.
+    /// Aim to keep this logic as SIMPLE as possible!
+    pub fn can_cast_to(&self, target_type: &Self) -> bool {
+        // In Postgres, most functions coerce numeric strings to numeric inputs,
+        // but they do not accept numeric inputs as strings.
+        if self.is_numeric() && target_type == &NativeType::String {
+            return false;
+        }
+
+        true
+    }
+}
+
 // Singleton instances
 // TODO: Replace with LazyLock
 // pub static LOGICAL_STRING: OnceLock<LogicalTypeRef> = OnceLock::new();
