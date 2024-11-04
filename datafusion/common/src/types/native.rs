@@ -433,32 +433,3 @@ impl NativeType {
         true
     }
 }
-
-// Singleton instances
-// TODO: Replace with LazyLock
-// pub static LOGICAL_STRING: OnceLock<LogicalTypeRef> = OnceLock::new();
-// pub static LOGICAL_FLOAT16: OnceLock<LogicalTypeRef> = OnceLock::new();
-// pub static LOGICAL_FLOAT32: OnceLock<LogicalTypeRef> = OnceLock::new();
-// pub static LOGICAL_FLOAT64: OnceLock<LogicalTypeRef> = OnceLock::new();
-
-// // Usage functions
-// pub fn logical_string() -> LogicalTypeRef {
-//     Arc::clone(LOGICAL_STRING.get_or_init(|| Arc::new(NativeType::Utf8)))
-// }
-
-// pub fn logical_float16() -> LogicalTypeRef {
-//     Arc::clone(LOGICAL_FLOAT16.get_or_init(|| Arc::new(NativeType::Float16)))
-// }
-
-// pub fn logical_float32() -> LogicalTypeRef {
-//     Arc::clone(LOGICAL_FLOAT32.get_or_init(|| Arc::new(NativeType::Float32)))
-// }
-
-// pub fn logical_float64() -> LogicalTypeRef {
-//     Arc::clone(LOGICAL_FLOAT64.get_or_init(|| Arc::new(NativeType::Float64)))
-// }
-// impl From<&DataType> for NativeType {
-//     fn from(value: &DataType) -> Self {
-//         value.clone().into()
-//     }
-// }
