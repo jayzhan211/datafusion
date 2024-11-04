@@ -24,6 +24,7 @@ use arrow::compute::can_cast_types;
 use arrow_schema::{
     DataType, Field, FieldRef, Fields, IntervalUnit, TimeUnit, UnionFields,
 };
+use std::sync::Arc;
 use std::sync::{Arc, OnceLock};
 
 /// Representation of a type that DataFusion can handle natively. It is a subset
@@ -455,4 +456,9 @@ impl NativeType {
 
 // pub fn logical_float64() -> LogicalTypeRef {
 //     Arc::clone(LOGICAL_FLOAT64.get_or_init(|| Arc::new(NativeType::Float64)))
+// }
+// impl From<&DataType> for NativeType {
+//     fn from(value: &DataType) -> Self {
+//         value.clone().into()
+//     }
 // }
