@@ -17,8 +17,9 @@
 
 //! Expression utilities
 
-use crate::ScalarValue;
+use crate::{scalar::LogicalScalar, ScalarValue};
 
 ///  The value to which `COUNT(*)` is expanded to in
 ///  `COUNT(<constant>)` expressions
 pub const COUNT_STAR_EXPANSION: ScalarValue = ScalarValue::Int64(Some(1));
+pub const LOGICAL_COUNT_STAR_EXPANSION: LogicalScalar = LogicalScalar::Int64(Some(1));

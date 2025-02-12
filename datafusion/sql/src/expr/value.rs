@@ -24,9 +24,9 @@ use arrow::datatypes::{
 };
 use bigdecimal::num_bigint::BigInt;
 use bigdecimal::{BigDecimal, Signed, ToPrimitive};
+use datafusion_common::scalar::LogicalScalar;
 use datafusion_common::{
     internal_datafusion_err, not_impl_err, plan_err, DFSchema, DataFusionError, Result,
-    ScalarValue,
 };
 use datafusion_expr::expr::{BinaryExpr, Placeholder};
 use datafusion_expr::planner::PlannerResult;
@@ -48,7 +48,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
         match value {
             Value::Number(n, _) => self.parse_sql_number(&n, false),
             Value::SingleQuotedString(s) | Value::DoubleQuotedString(s) => Ok(lit(s)),
-            Value::Null => Ok(Expr::Literal(ScalarValue::Null)),
+            Value::Null => Ok(Expr::Literal(LogicalScalar::Null)),
             Value::Boolean(n) => Ok(lit(n)),
             Value::Placeholder(param) => {
                 Self::create_placeholder_expr(param, param_data_types)
@@ -248,7 +248,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
 
         let config = IntervalParseConfig::new(IntervalUnit::Second);
         let val = parse_interval_month_day_nano_config(&value, config)?;
-        Ok(lit(ScalarValue::IntervalMonthDayNano(Some(val))))
+        Ok(lit(LogicalScalar::IntervalMonthDayNano(Some(val))))
     }
 }
 
@@ -375,7 +375,7 @@ fn parse_decimal(unsigned_number: &str, negative: bool) -> Result<Expr> {
                 int_val
             )
         })?;
-        Ok(Expr::Literal(ScalarValue::Decimal128(
+        Ok(Expr::Literal(LogicalScalar::Decimal128(
             Some(val),
             precision as u8,
             scale as i8,
@@ -388,7 +388,7 @@ fn parse_decimal(unsigned_number: &str, negative: bool) -> Result<Expr> {
                 int_val
             )
         })?;
-        Ok(Expr::Literal(ScalarValue::Decimal256(
+        Ok(Expr::Literal(LogicalScalar::Decimal256(
             Some(val),
             precision as u8,
             scale as i8,
@@ -457,19 +457,19 @@ mod tests {
     fn test_parse_decimal() {
         // Supported cases
         let cases = [
-            ("0", ScalarValue::Decimal128(Some(0), 1, 0)),
-            ("1", ScalarValue::Decimal128(Some(1), 1, 0)),
-            ("123.45", ScalarValue::Decimal128(Some(12345), 5, 2)),
+            ("0", LogicalScalar::Decimal128(Some(0), 1, 0)),
+            ("1", LogicalScalar::Decimal128(Some(1), 1, 0)),
+            ("123.45", LogicalScalar::Decimal128(Some(12345), 5, 2)),
             // Digit count is less than scale
-            ("0.001", ScalarValue::Decimal128(Some(1), 3, 3)),
+            ("0.001", LogicalScalar::Decimal128(Some(1), 3, 3)),
             // Scientific notation
-            ("123.456e-2", ScalarValue::Decimal128(Some(123456), 6, 5)),
+            ("123.456e-2", LogicalScalar::Decimal128(Some(123456), 6, 5)),
             // Negative scale
-            ("123456e128", ScalarValue::Decimal128(Some(123456), 6, -128)),
+            ("123456e128", LogicalScalar::Decimal128(Some(123456), 6, -128)),
             // Decimal256
             (
                 &("9".repeat(39) + "." + "99999"),
-                ScalarValue::Decimal256(
+                LogicalScalar::Decimal256(
                     Some(i256::from_string(&"9".repeat(44)).unwrap()),
                     44,
                     5,

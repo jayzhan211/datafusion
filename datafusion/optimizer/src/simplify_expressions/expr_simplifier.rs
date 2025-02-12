@@ -665,7 +665,7 @@ impl<'a> ConstEvaluator<'a> {
                                     expr,
                                 )
                             } else {
-                                ConstSimplifyResult::Simplified(s)
+                                ConstSimplifyResult::Simplified(LogicalScalar::from(s))
                             }
                         }
                         Err(err) => ConstSimplifyResult::SimplifyRuntimeError(err, expr),
@@ -683,7 +683,7 @@ impl<'a> ConstEvaluator<'a> {
                         expr,
                     )
                 } else {
-                    ConstSimplifyResult::Simplified(s)
+                    ConstSimplifyResult::Simplified(LogicalScalar::from(s))
                 }
             }
         }

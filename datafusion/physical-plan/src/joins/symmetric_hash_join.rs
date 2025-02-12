@@ -1819,6 +1819,8 @@ mod tests {
         cardinality: (i32, i32),
     ) -> Result<()> {
         // a + b > c + 10 AND a + b < c + 100
+
+        use datafusion_common::scalar::LogicalScalar;
         let task_ctx = Arc::new(TaskContext::default());
 
         let (left_partition, right_partition) = get_or_create_table(cardinality, 8)?;
@@ -1850,7 +1852,7 @@ mod tests {
             binary(
                 col("lc1", left_schema)?,
                 Operator::Plus,
-                lit(ScalarValue::Int32(Some(1))),
+                lit(LogicalScalar::Int32(Some(1))),
                 left_schema,
             )?,
             Arc::new(Column::new_with_schema("rc1", right_schema)?) as _,

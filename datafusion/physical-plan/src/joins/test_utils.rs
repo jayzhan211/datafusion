@@ -34,6 +34,7 @@ use arrow::array::{
 };
 use arrow::datatypes::{DataType, Schema};
 use arrow::util::pretty::pretty_format_batches;
+use datafusion_common::scalar::LogicalScalar;
 use datafusion_common::{Result, ScalarValue};
 use datafusion_execution::TaskContext;
 use datafusion_expr::{JoinType, Operator};
@@ -560,7 +561,7 @@ pub(crate) fn complicated_filter(
         binary(
             cast(col("2", filter_schema)?, filter_schema, DataType::Int64)?,
             Operator::Plus,
-            lit(ScalarValue::Int64(Some(10))),
+            lit(LogicalScalar::Int64(Some(10))),
             filter_schema,
         )?,
         filter_schema,
@@ -581,7 +582,7 @@ pub(crate) fn complicated_filter(
         binary(
             cast(col("2", filter_schema)?, filter_schema, DataType::Int64)?,
             Operator::Plus,
-            lit(ScalarValue::Int64(Some(100))),
+            lit(LogicalScalar::Int64(Some(100))),
             filter_schema,
         )?,
         filter_schema,

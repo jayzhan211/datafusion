@@ -20,9 +20,9 @@ use crate::analyzer::AnalyzerRule;
 use crate::utils::NamePreserver;
 use datafusion_common::config::ConfigOptions;
 use datafusion_common::tree_node::{Transformed, TransformedResult, TreeNode};
+use datafusion_common::utils::expr::LOGICAL_COUNT_STAR_EXPANSION;
 use datafusion_common::Result;
 use datafusion_expr::expr::{AggregateFunction, WindowFunction};
-use datafusion_expr::utils::COUNT_STAR_EXPANSION;
 use datafusion_expr::{lit, Expr, LogicalPlan, WindowFunctionDefinition};
 
 /// Rewrite `Count(Expr:Wildcard)` to `Count(Expr:Literal)`.
@@ -75,13 +75,13 @@ fn analyze_internal(plan: LogicalPlan) -> Result<Transformed<LogicalPlan>> {
             Expr::WindowFunction(mut window_function)
                 if is_count_star_window_aggregate(&window_function) =>
             {
-                window_function.args = vec![lit(COUNT_STAR_EXPANSION)];
+                window_function.args = vec![lit(LOGICAL_COUNT_STAR_EXPANSION)];
                 Ok(Transformed::yes(Expr::WindowFunction(window_function)))
             }
             Expr::AggregateFunction(mut aggregate_function)
                 if is_count_star_aggregate(&aggregate_function) =>
             {
-                aggregate_function.args = vec![lit(COUNT_STAR_EXPANSION)];
+                aggregate_function.args = vec![lit(LOGICAL_COUNT_STAR_EXPANSION)];
                 Ok(Transformed::yes(Expr::AggregateFunction(
                     aggregate_function,
                 )))

@@ -234,6 +234,7 @@ mod tests {
     use crate::test::{self, make_partition};
 
     use arrow::datatypes::{DataType, Field};
+    use datafusion_common::scalar::LogicalScalar;
     use datafusion_common::stats::{ColumnStatistics, Precision};
 
     #[tokio::test]
@@ -287,16 +288,16 @@ mod tests {
         let _ = ValuesExec::try_new(Arc::clone(&schema), vec![vec![lit(1u32)]]).unwrap();
         // Test that a null value is rejected
         #[allow(deprecated)]
-        let _ = ValuesExec::try_new(schema, vec![vec![lit(ScalarValue::UInt32(None))]])
+        let _ = ValuesExec::try_new(schema, vec![vec![lit(LogicalScalar::UInt32(None))]])
             .unwrap_err();
     }
 
     #[test]
     fn values_stats_with_nulls_only() -> Result<()> {
         let data = vec![
-            vec![lit(ScalarValue::Null)],
-            vec![lit(ScalarValue::Null)],
-            vec![lit(ScalarValue::Null)],
+            vec![lit(LogicalScalar::Null)],
+            vec![lit(LogicalScalar::Null)],
+            vec![lit(LogicalScalar::Null)],
         ];
         let rows = data.len();
         #[allow(deprecated)]

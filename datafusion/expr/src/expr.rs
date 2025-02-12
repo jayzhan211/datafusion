@@ -36,7 +36,7 @@ use datafusion_common::tree_node::{
     Transformed, TransformedResult, TreeNode, TreeNodeContainer, TreeNodeRecursion,
 };
 use datafusion_common::{
-    plan_err, Column, DFSchema, HashMap, Result, ScalarValue, Spans, TableReference,
+    plan_err, Column, DFSchema, HashMap, Result, Spans, TableReference,
 };
 use datafusion_functions_window_common::field::WindowUDFFieldArgs;
 use sqlparser::ast::{
@@ -570,7 +570,7 @@ impl ScalarFunction {
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub enum GetFieldAccess {
     /// Named field, for example `struct["name"]`
-    NamedStructField { name: ScalarValue },
+    NamedStructField { name: LogicalScalar },
     /// Single list index, for example: `list[i]`
     ListIndex { key: Box<Expr> },
     /// List stride, for example `list[i:j:k]`
@@ -2803,6 +2803,7 @@ mod test {
         case, lit, qualified_wildcard, wildcard, wildcard_with_options, ColumnarValue,
         ScalarFunctionArgs, ScalarUDF, ScalarUDFImpl, Volatility,
     };
+    use datafusion_common::ScalarValue;
     use sqlparser::ast;
     use sqlparser::ast::{Ident, IdentWithAlias};
     use std::any::Any;

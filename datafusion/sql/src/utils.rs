@@ -22,12 +22,13 @@ use std::vec;
 use arrow::datatypes::{
     DataType, DECIMAL128_MAX_PRECISION, DECIMAL256_MAX_PRECISION, DECIMAL_DEFAULT_SCALE,
 };
+use datafusion_common::scalar::LogicalScalar;
 use datafusion_common::tree_node::{
     Transformed, TransformedResult, TreeNode, TreeNodeRecursion, TreeNodeRewriter,
 };
 use datafusion_common::{
     exec_err, internal_err, plan_err, Column, DFSchemaRef, DataFusionError, Diagnostic,
-    HashMap, Result, ScalarValue,
+    HashMap, Result,
 };
 use datafusion_expr::builder::get_struct_unnested_columns;
 use datafusion_expr::expr::{Alias, GroupingSet, Unnest, WindowFunction};
@@ -197,7 +198,7 @@ pub(crate) fn resolve_positions_to_exprs(
     match expr {
         // sql_expr_to_logical_expr maps number to i64
         // https://github.com/apache/datafusion/blob/8d175c759e17190980f270b5894348dc4cff9bbf/datafusion/src/sql/planner.rs#L882-L887
-        Expr::Literal(ScalarValue::Int64(Some(position)))
+        Expr::Literal(LogicalScalar::Int64(Some(position)))
             if position > 0_i64 && position <= select_exprs.len() as i64 =>
         {
             let index = (position - 1) as usize;
@@ -207,7 +208,7 @@ pub(crate) fn resolve_positions_to_exprs(
                 _ => select_expr.clone(),
             })
         }
-        Expr::Literal(ScalarValue::Int64(Some(position))) => plan_err!(
+        Expr::Literal(LogicalScalar::Int64(Some(position))) => plan_err!(
             "Cannot find column with position {} in SELECT clause. Valid columns: 1 to {}",
             position, select_exprs.len()
         ),

@@ -985,6 +985,7 @@ where
 mod tests {
     use super::array_element_udf;
     use arrow::datatypes::{DataType, Field};
+    use datafusion_common::scalar::LogicalScalar;
     use datafusion_common::{Column, DFSchema, ScalarValue};
     use datafusion_expr::expr::ScalarFunction;
     use datafusion_expr::{cast, Expr, ExprSchemable};
@@ -1025,8 +1026,8 @@ mod tests {
         assert_eq!(
             udf.return_type_from_exprs(
                 &[
-                    cast(Expr::Literal(ScalarValue::Null), array_type.clone()),
-                    cast(Expr::Literal(ScalarValue::Null), index_type.clone()),
+                    cast(Expr::Literal(LogicalScalar::Null), array_type.clone()),
+                    cast(Expr::Literal(LogicalScalar::Null), index_type.clone()),
                 ],
                 &schema,
                 &[array_type.clone(), index_type.clone()]

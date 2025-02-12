@@ -22,9 +22,7 @@ use super::{
     rewrite::TableAliasRewriter, Unparser,
 };
 use datafusion_common::{
-    internal_err,
-    tree_node::{Transformed, TransformedResult, TreeNode},
-    Column, DataFusionError, Result, ScalarValue,
+    internal_err, scalar::LogicalScalar, tree_node::{Transformed, TransformedResult, TreeNode}, Column, DataFusionError, Result, ScalarValue
 };
 use datafusion_expr::{
     expr, utils::grouping_set_to_exprlist, Aggregate, Expr, LogicalPlan,
@@ -415,7 +413,7 @@ pub(crate) fn date_part_to_sql(
     match (style, date_part_args.len()) {
         (DateFieldExtractStyle::Extract, 2) => {
             let date_expr = unparser.expr_to_sql(&date_part_args[1])?;
-            if let Expr::Literal(ScalarValue::Utf8(Some(field))) = &date_part_args[0] {
+            if let Expr::Literal(LogicalScalar::Utf8(Some(field))) = &date_part_args[0] {
                 let field = match field.to_lowercase().as_str() {
                     "year" => ast::DateTimeField::Year,
                     "month" => ast::DateTimeField::Month,
@@ -436,7 +434,7 @@ pub(crate) fn date_part_to_sql(
         (DateFieldExtractStyle::Strftime, 2) => {
             let column = unparser.expr_to_sql(&date_part_args[1])?;
 
-            if let Expr::Literal(ScalarValue::Utf8(Some(field))) = &date_part_args[0] {
+            if let Expr::Literal(LogicalScalar::Utf8(Some(field))) = &date_part_args[0] {
                 let field = match field.to_lowercase().as_str() {
                     "year" => "%Y",
                     "month" => "%m",

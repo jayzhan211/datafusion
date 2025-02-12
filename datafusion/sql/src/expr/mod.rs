@@ -16,6 +16,7 @@
 // under the License.
 
 use arrow::datatypes::{DataType, TimeUnit};
+use datafusion_common::scalar::LogicalScalar;
 use datafusion_expr::planner::{
     PlannerResult, RawBinaryExpr, RawDictionaryExpr, RawFieldAccessExpr,
 };
@@ -27,7 +28,7 @@ use sqlparser::ast::{
 
 use datafusion_common::{
     internal_datafusion_err, internal_err, not_impl_err, plan_err, Column, DFSchema,
-    Result, ScalarValue,
+    Result,
 };
 
 use datafusion_expr::expr::ScalarFunction;
@@ -215,7 +216,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
             }
             SQLExpr::Extract { field, expr, .. } => {
                 let mut extract_args = vec![
-                    Expr::Literal(ScalarValue::from(format!("{field}"))),
+                    Expr::Literal(LogicalScalar::from(format!("{field}"))),
                     self.sql_expr_to_logical_expr(*expr, schema, planner_context)?,
                 ];
 
@@ -1001,7 +1002,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                                     Value::SingleQuotedString(s)
                                     | Value::DoubleQuotedString(s),
                                 ) => Ok(Some(GetFieldAccess::NamedStructField {
-                                    name: ScalarValue::from(s),
+                                    name: LogicalScalar::from(s),
                                 })),
                                 SQLExpr::JsonAccess { .. } => {
                                     not_impl_err!("JsonAccess")
@@ -1092,7 +1093,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                                 }
                             } else {
                                 Ok(Some(GetFieldAccess::NamedStructField {
-                                    name: ScalarValue::from(name),
+                                    name: LogicalScalar::from(name),
                                 }))
                             }
                         }

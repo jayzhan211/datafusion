@@ -1359,6 +1359,7 @@ mod tests {
     };
     use arrow::compute::{concat_batches, SortOptions};
     use arrow::datatypes::{DataType, Int32Type};
+    use datafusion_common::scalar::LogicalScalar;
     use datafusion_common::{
         assert_batches_eq, assert_batches_sorted_eq, internal_err, DataFusionError,
         ScalarValue,
@@ -1499,8 +1500,8 @@ mod tests {
                 (col("b", &input_schema)?, "b".to_string()),
             ],
             vec![
-                (lit(ScalarValue::UInt32(None)), "a".to_string()),
-                (lit(ScalarValue::Float64(None)), "b".to_string()),
+                (lit(LogicalScalar::UInt32(None)), "a".to_string()),
+                (lit(LogicalScalar::Float64(None)), "b".to_string()),
             ],
             vec![
                 vec![false, true],  // (a, NULL)
@@ -2777,8 +2778,8 @@ mod tests {
                 (col("b", &input_schema)?, "b".to_string()),
             ],
             vec![
-                (lit(ScalarValue::Float32(None)), "a".to_string()),
-                (lit(ScalarValue::Float32(None)), "b".to_string()),
+                (lit(LogicalScalar::Float32(None)), "a".to_string()),
+                (lit(LogicalScalar::Float32(None)), "b".to_string()),
             ],
             vec![
                 vec![false, true],  // (a, NULL)

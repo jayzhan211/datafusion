@@ -1146,6 +1146,7 @@ mod tests {
 
     use arrow::datatypes::{DataType, Field};
     use datafusion_common::assert_batches_eq;
+    use datafusion_common::scalar::LogicalScalar;
     use datafusion_common::stats::{ColumnStatistics, Precision};
     use futures::StreamExt;
 
@@ -1227,7 +1228,7 @@ mod tests {
         // Test that a null value is rejected
         let _ = MemorySourceConfig::try_new_as_values(
             schema,
-            vec![vec![lit(ScalarValue::UInt32(None))]],
+            vec![vec![lit(LogicalScalar::UInt32(None))]],
         )
         .unwrap_err();
     }
@@ -1235,9 +1236,9 @@ mod tests {
     #[test]
     fn values_stats_with_nulls_only() -> Result<()> {
         let data = vec![
-            vec![lit(ScalarValue::Null)],
-            vec![lit(ScalarValue::Null)],
-            vec![lit(ScalarValue::Null)],
+            vec![lit(LogicalScalar::Null)],
+            vec![lit(LogicalScalar::Null)],
+            vec![lit(LogicalScalar::Null)],
         ];
         let rows = data.len();
         let values = MemorySourceConfig::try_new_as_values(

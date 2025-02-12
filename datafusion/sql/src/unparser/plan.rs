@@ -39,9 +39,7 @@ use crate::unparser::extension_unparser::{
 use crate::unparser::utils::{find_unnest_node_until_relation, unproject_agg_exprs};
 use crate::utils::UNNEST_PLACEHOLDER;
 use datafusion_common::{
-    internal_err, not_impl_err,
-    tree_node::{TransformedResult, TreeNode},
-    Column, DataFusionError, Result, ScalarValue, TableReference,
+    internal_err, not_impl_err, scalar::LogicalScalar, tree_node::{TransformedResult, TreeNode}, Column, DataFusionError, Result, TableReference
 };
 use datafusion_expr::expr::OUTER_REFERENCE_COLUMN_PREFIX;
 use datafusion_expr::{
@@ -921,7 +919,7 @@ impl Unparser<'_> {
                     if let Some(project_vec) = &table_scan.projection {
                         if project_vec.is_empty() {
                             builder = builder.project(vec![Expr::Literal(
-                                ScalarValue::Int64(Some(1)),
+                                LogicalScalar::Int64(Some(1)),
                             )])?;
                         } else {
                             let project_columns = project_vec

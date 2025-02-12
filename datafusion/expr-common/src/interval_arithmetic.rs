@@ -1862,15 +1862,15 @@ impl NullableInterval {
     /// };
     /// assert_eq!(interval.single_value(), None);
     /// ```
-    pub fn single_value(&self) -> Option<ScalarValue> {
+    pub fn single_value(&self) -> Option<LogicalScalar> {
         match self {
             Self::Null { datatype } => {
-                Some(ScalarValue::try_from(datatype).unwrap_or(ScalarValue::Null))
+                Some(LogicalScalar::try_new_null(datatype).unwrap_or(LogicalScalar::Null))
             }
             Self::MaybeNull { values } | Self::NotNull { values }
                 if values.lower == values.upper && !values.lower.is_null() =>
             {
-                Some(values.lower.clone())
+                Some(LogicalScalar::from(values.lower.clone()))
             }
             _ => None,
         }

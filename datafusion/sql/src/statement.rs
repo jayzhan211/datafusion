@@ -32,10 +32,11 @@ use crate::utils::normalize_ident;
 use arrow::datatypes::{DataType, Fields};
 use datafusion_common::error::_plan_err;
 use datafusion_common::parsers::CompressionTypeVariant;
+use datafusion_common::scalar::LogicalScalar;
 use datafusion_common::{
     exec_err, internal_err, not_impl_err, plan_datafusion_err, plan_err, schema_err,
     unqualified_field_not_found, Column, Constraint, Constraints, DFSchema, DFSchemaRef,
-    DataFusionError, Result, ScalarValue, SchemaError, SchemaReference, TableReference,
+    DataFusionError, Result, SchemaError, SchemaReference, TableReference,
     ToDFSchema,
 };
 use datafusion_expr::dml::{CopyTo, InsertOp};
@@ -1962,7 +1963,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                         .cloned()
                         .unwrap_or_else(|| {
                             // If there is no default for the column, then the default is NULL
-                            Expr::Literal(ScalarValue::Null)
+                            Expr::Literal(LogicalScalar::Null)
                         })
                         .cast_to(target_field.data_type(), &DFSchema::empty())?,
                 };

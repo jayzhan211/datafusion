@@ -19,6 +19,7 @@
 
 mod consts;
 mod struct_builder;
+mod logical_date;
 
 use std::borrow::Borrow;
 use std::cmp::Ordering;
@@ -58,6 +59,7 @@ use arrow::datatypes::{
     UInt8Type, UnionFields, UnionMode, DECIMAL128_MAX_PRECISION,
 };
 use arrow::util::display::{array_value_to_string, ArrayFormatter, FormatOptions};
+use logical_date::{LogicalDate32, LogicalDate64};
 
 use crate::format::DEFAULT_CAST_OPTIONS;
 use half::f16;
@@ -134,9 +136,9 @@ pub enum LogicalScalar {
     /// Represents a single element [`MapArray`] as an [`ArrayRef`].
     Map(Arc<MapArray>),
     /// Date stored as a signed 32bit int days since UNIX epoch 1970-01-01
-    Date32(Option<i32>),
+    Date32(LogicalDate32),
     /// Date stored as a signed 64bit int milliseconds since UNIX epoch 1970-01-01
-    Date64(Option<i64>),
+    Date64(LogicalDate64),
     /// Time stored as a signed 32bit int as seconds since midnight
     Time32Second(Option<i32>),
     /// Time stored as a signed 32bit int as milliseconds since midnight
@@ -575,10 +577,12 @@ impl fmt::Display for LogicalScalar {
             LogicalScalar::LargeList(arr) => fmt_list(arr.to_owned() as ArrayRef, f)?,
             LogicalScalar::FixedSizeList(arr) => fmt_list(arr.to_owned() as ArrayRef, f)?,
             LogicalScalar::Date32(e) => {
-                format_option!(f, e.map(|v| Date32Type::to_naive_date(v).to_string()))?
+                todo!("Date32Type::to_naive_date")
+                // format_option!(f, e.map(|v| Date32Type::to_naive_date(v).to_string()))?
             }
             LogicalScalar::Date64(e) => {
-                format_option!(f, e.map(|v| Date64Type::to_naive_date(v).to_string()))?
+                todo!("Date64Type::to_naive_date")
+                // format_option!(f, e.map(|v| Date64Type::to_naive_date(v).to_string()))?
             }
             LogicalScalar::Time32Second(e) => format_option!(f, e)?,
             LogicalScalar::Time32Millisecond(e) => format_option!(f, e)?,
@@ -788,8 +792,8 @@ impl LogicalScalar {
             LogicalScalar::FixedSizeList(arr) => arr.len() == arr.null_count(),
             LogicalScalar::Struct(arr) => arr.len() == arr.null_count(),
             LogicalScalar::Map(arr) => arr.len() == arr.null_count(),
-            LogicalScalar::Date32(v) => v.is_none(),
-            LogicalScalar::Date64(v) => v.is_none(),
+            LogicalScalar::Date32(v) => false,
+            LogicalScalar::Date64(v) => false,
             LogicalScalar::Time32Second(v) => v.is_none(),
             LogicalScalar::Time32Millisecond(v) => v.is_none(),
             LogicalScalar::Time64Microsecond(v) => v.is_none(),
@@ -874,8 +878,8 @@ impl LogicalScalar {
             DataType::Duration(TimeUnit::Nanosecond) => {
                 LogicalScalar::DurationNanosecond(Some(0))
             }
-            DataType::Date32 => LogicalScalar::Date32(Some(0)),
-            DataType::Date64 => LogicalScalar::Date64(Some(0)),
+            DataType::Date32 => LogicalScalar::Date32(LogicalDate32::from(0)),
+            DataType::Date64 => LogicalScalar::Date64(LogicalDate64::from(0)),
             _ => {
                 return _not_impl_err!(
                     "Can't create a zero scalar from data_type \"{datatype:?}\""
@@ -972,8 +976,8 @@ impl LogicalScalar {
             DataType::BinaryView => LogicalScalar::BinaryView(None),
             DataType::FixedSizeBinary(len) => LogicalScalar::FixedSizeBinary(*len, None),
             DataType::LargeBinary => LogicalScalar::LargeBinary(None),
-            DataType::Date32 => LogicalScalar::Date32(None),
-            DataType::Date64 => LogicalScalar::Date64(None),
+            DataType::Date32 => todo!("try_new_null"),
+            DataType::Date64 => todo!("try_new_null"),
             DataType::Time32(TimeUnit::Second) => LogicalScalar::Time32Second(None),
             DataType::Time32(TimeUnit::Millisecond) => {
                 LogicalScalar::Time32Millisecond(None)
@@ -1064,6 +1068,119 @@ impl LogicalScalar {
         };
         Some(v.as_ref().map(|v| v.as_str()))
     }
+
+    pub fn arithmetic_negate(&self) -> Result<Self> {
+        fn neg_checked_with_ctx<T: ArrowNativeTypeOp>(
+            v: T,
+            ctx: impl Fn() -> String,
+        ) -> Result<T> {
+            v.neg_checked()
+                .map_err(|e| arrow_datafusion_err!(e).context(ctx()))
+        }
+        match self {
+            LogicalScalar::Int8(None)
+            | LogicalScalar::Int16(None)
+            | LogicalScalar::Int32(None)
+            | LogicalScalar::Int64(None)
+            | LogicalScalar::Float16(None)
+            | LogicalScalar::Float32(None)
+            | LogicalScalar::Float64(None) => Ok(self.clone()),
+            LogicalScalar::Float16(Some(v)) => {
+                Ok(LogicalScalar::Float16(Some(f16::from_f32(-v.to_f32()))))
+            }
+            LogicalScalar::Float64(Some(v)) => Ok(LogicalScalar::Float64(Some(-v))),
+            LogicalScalar::Float32(Some(v)) => Ok(LogicalScalar::Float32(Some(-v))),
+            LogicalScalar::Int8(Some(v)) => Ok(LogicalScalar::Int8(Some(v.neg_checked()?))),
+            LogicalScalar::Int16(Some(v)) => Ok(LogicalScalar::Int16(Some(v.neg_checked()?))),
+            LogicalScalar::Int32(Some(v)) => Ok(LogicalScalar::Int32(Some(v.neg_checked()?))),
+            LogicalScalar::Int64(Some(v)) => Ok(LogicalScalar::Int64(Some(v.neg_checked()?))),
+            LogicalScalar::IntervalYearMonth(Some(v)) => Ok(
+                LogicalScalar::IntervalYearMonth(Some(neg_checked_with_ctx(*v, || {
+                    format!("In negation of IntervalYearMonth({v})")
+                })?)),
+            ),
+            LogicalScalar::IntervalDayTime(Some(v)) => {
+                let (days, ms) = IntervalDayTimeType::to_parts(*v);
+                let val = IntervalDayTimeType::make_value(
+                    neg_checked_with_ctx(days, || {
+                        format!("In negation of days {days} in IntervalDayTime")
+                    })?,
+                    neg_checked_with_ctx(ms, || {
+                        format!("In negation of milliseconds {ms} in IntervalDayTime")
+                    })?,
+                );
+                Ok(LogicalScalar::IntervalDayTime(Some(val)))
+            }
+            LogicalScalar::IntervalMonthDayNano(Some(v)) => {
+                let (months, days, nanos) = IntervalMonthDayNanoType::to_parts(*v);
+                let val = IntervalMonthDayNanoType::make_value(
+                    neg_checked_with_ctx(months, || {
+                        format!("In negation of months {months} of IntervalMonthDayNano")
+                    })?,
+                    neg_checked_with_ctx(days, || {
+                        format!("In negation of days {days} of IntervalMonthDayNano")
+                    })?,
+                    neg_checked_with_ctx(nanos, || {
+                        format!("In negation of nanos {nanos} of IntervalMonthDayNano")
+                    })?,
+                );
+                Ok(LogicalScalar::IntervalMonthDayNano(Some(val)))
+            }
+            LogicalScalar::Decimal128(Some(v), precision, scale) => {
+                Ok(LogicalScalar::Decimal128(
+                    Some(neg_checked_with_ctx(*v, || {
+                        format!("In negation of Decimal128({v}, {precision}, {scale})")
+                    })?),
+                    *precision,
+                    *scale,
+                ))
+            }
+            LogicalScalar::Decimal256(Some(v), precision, scale) => {
+                Ok(LogicalScalar::Decimal256(
+                    Some(neg_checked_with_ctx(*v, || {
+                        format!("In negation of Decimal256({v}, {precision}, {scale})")
+                    })?),
+                    *precision,
+                    *scale,
+                ))
+            }
+            LogicalScalar::TimestampSecond(Some(v), tz) => {
+                Ok(LogicalScalar::TimestampSecond(
+                    Some(neg_checked_with_ctx(*v, || {
+                        format!("In negation of TimestampSecond({v})")
+                    })?),
+                    tz.clone(),
+                ))
+            }
+            LogicalScalar::TimestampNanosecond(Some(v), tz) => {
+                Ok(LogicalScalar::TimestampNanosecond(
+                    Some(neg_checked_with_ctx(*v, || {
+                        format!("In negation of TimestampNanoSecond({v})")
+                    })?),
+                    tz.clone(),
+                ))
+            }
+            LogicalScalar::TimestampMicrosecond(Some(v), tz) => {
+                Ok(LogicalScalar::TimestampMicrosecond(
+                    Some(neg_checked_with_ctx(*v, || {
+                        format!("In negation of TimestampMicroSecond({v})")
+                    })?),
+                    tz.clone(),
+                ))
+            }
+            LogicalScalar::TimestampMillisecond(Some(v), tz) => {
+                Ok(LogicalScalar::TimestampMillisecond(
+                    Some(neg_checked_with_ctx(*v, || {
+                        format!("In negation of TimestampMilliSecond({v})")
+                    })?),
+                    tz.clone(),
+                ))
+            }
+            value => _internal_err!(
+                "Can not run arithmetic negative on scalar value {value:?}"
+            ),
+        }
+    }
 }
 
 impl From<&LogicalScalar> for ScalarValue {
@@ -1100,8 +1217,8 @@ impl From<LogicalScalar> for ScalarValue {
             LogicalScalar::BinaryView(v) => ScalarValue::BinaryView(v),
             LogicalScalar::FixedSizeBinary(sz, v) => ScalarValue::FixedSizeBinary(sz, v),
             LogicalScalar::LargeBinary(v) => ScalarValue::LargeBinary(v),
-            LogicalScalar::Date32(v) => ScalarValue::Date32(v),
-            LogicalScalar::Date64(v) => ScalarValue::Date64(v),
+            LogicalScalar::Date32(v) => todo!("Date32"),
+            LogicalScalar::Date64(v) => todo!("Date64"),
             LogicalScalar::Time32Second(v) => ScalarValue::Time32Second(v),
             LogicalScalar::Time32Millisecond(v) => ScalarValue::Time32Millisecond(v),
             LogicalScalar::Time64Microsecond(v) => ScalarValue::Time64Microsecond(v),
@@ -1127,6 +1244,63 @@ impl From<LogicalScalar> for ScalarValue {
             }
             LogicalScalar::Dictionary(k, v) => ScalarValue::Dictionary(k, Box::new((*v).into())),
             LogicalScalar::Null => ScalarValue::Null,
+        }
+    }
+}
+
+impl From<ScalarValue> for LogicalScalar {
+    fn from(scalar_value: ScalarValue) -> Self {
+        match scalar_value {
+            ScalarValue::Binary(v) => LogicalScalar::Binary(v),
+            ScalarValue::Boolean(v) => LogicalScalar::Boolean(v),
+            ScalarValue::Float16(v) => LogicalScalar::Float16(v),
+            ScalarValue::Float32(v) => LogicalScalar::Float32(v),
+            ScalarValue::Float64(v) => LogicalScalar::Float64(v),
+            ScalarValue::Int8(v) => LogicalScalar::Int8(v),
+            ScalarValue::Int16(v) => LogicalScalar::Int16(v),
+            ScalarValue::Int32(v) => LogicalScalar::Int32(v),
+            ScalarValue::Int64(v) => LogicalScalar::Int64(v),
+            ScalarValue::UInt8(v) => LogicalScalar::UInt8(v),
+            ScalarValue::UInt16(v) => LogicalScalar::UInt16(v),
+            ScalarValue::UInt32(v) => LogicalScalar::UInt32(v),
+            ScalarValue::UInt64(v) => LogicalScalar::UInt64(v),
+            ScalarValue::Utf8(v) => LogicalScalar::Utf8(v),
+            ScalarValue::LargeUtf8(v) => LogicalScalar::Utf8(v),
+            ScalarValue::Utf8View(v) => LogicalScalar::Utf8(v),
+            ScalarValue::BinaryView(v) => LogicalScalar::Binary(v),
+            ScalarValue::FixedSizeBinary(sz, v) => LogicalScalar::FixedSizeBinary(sz, v),
+            ScalarValue::LargeBinary(v) => LogicalScalar::LargeBinary(v),
+            ScalarValue::Date32(v) => LogicalScalar::Date32(LogicalDate32::from(v.unwrap())),
+            ScalarValue::Date64(v) => LogicalScalar::Date64(LogicalDate64::from(v.unwrap())),
+            ScalarValue::Time32Second(v) => LogicalScalar::Time32Second(v),
+            ScalarValue::Time32Millisecond(v) => LogicalScalar::Time32Millisecond(v),
+            ScalarValue::Time64Microsecond(v) => LogicalScalar::Time64Microsecond(v),
+            ScalarValue::Time64Nanosecond(v) => LogicalScalar::Time64Nanosecond(v),
+            ScalarValue::TimestampSecond(v, tz) => LogicalScalar::TimestampSecond(v, tz),
+            ScalarValue::TimestampMillisecond(v, tz) => LogicalScalar::TimestampMillisecond(v, tz),
+            ScalarValue::TimestampMicrosecond(v, tz) => LogicalScalar::TimestampMicrosecond(v, tz),
+            ScalarValue::TimestampNanosecond(v, tz) => LogicalScalar::TimestampNanosecond(v, tz),
+            ScalarValue::IntervalYearMonth(v) => LogicalScalar::IntervalYearMonth(v),
+            ScalarValue::IntervalDayTime(v) => LogicalScalar::IntervalDayTime(v),
+            ScalarValue::IntervalMonthDayNano(v) => LogicalScalar::IntervalMonthDayNano(v),
+            ScalarValue::DurationSecond(v) => LogicalScalar::DurationSecond(v),
+            ScalarValue::DurationMillisecond(v) => LogicalScalar::DurationMillisecond(v),
+            ScalarValue::DurationMicrosecond(v) => LogicalScalar::DurationMicrosecond(v),
+            ScalarValue::DurationNanosecond(v) => LogicalScalar::DurationNanosecond(v),
+            ScalarValue::List(v) => LogicalScalar::List(v),
+            ScalarValue::LargeList(v) => LogicalScalar::LargeList(v),
+            ScalarValue::FixedSizeList(v) => LogicalScalar::FixedSizeList(v),
+            ScalarValue::Struct(v) => LogicalScalar::Struct(v),
+            ScalarValue::Map(v) => LogicalScalar::Map(v),
+            ScalarValue::Union(u, fields, mode) => LogicalScalar::Union(
+                u.map(|(type_id, v)| (type_id, Box::new((*v).into()))),
+                fields,
+                mode,
+            ),
+            ScalarValue::Dictionary(k, v) => LogicalScalar::Dictionary(k, Box::new((*v).into())),
+            ScalarValue::Null => LogicalScalar::Null,
+            ScalarValue::Decimal128(v, p, s) => LogicalScalar::Decimal128(v, p, s),
+            ScalarValue::Decimal256(v, p, s) => LogicalScalar::Decimal256(v, p, s),
         }
     }
 }
@@ -4630,7 +4804,7 @@ impl TryFrom<LogicalScalar> for i32 {
     fn try_from(value: LogicalScalar) -> Result<Self> {
         match value {
             LogicalScalar::Int32(Some(inner_value))
-            | LogicalScalar::Date32(Some(inner_value))
+            // | LogicalScalar::Date32(Some(inner_value))
             | LogicalScalar::Time32Second(Some(inner_value))
             | LogicalScalar::Time32Millisecond(Some(inner_value)) => Ok(inner_value),
             _ => _internal_err!(
@@ -4671,7 +4845,7 @@ impl TryFrom<LogicalScalar> for i64 {
     fn try_from(value: LogicalScalar) -> Result<Self> {
         match value {
             LogicalScalar::Int64(Some(inner_value))
-            | LogicalScalar::Date64(Some(inner_value))
+            // | LogicalScalar::Date64(Some(inner_value))
             | LogicalScalar::Time64Microsecond(Some(inner_value))
             | LogicalScalar::Time64Nanosecond(Some(inner_value))
             | LogicalScalar::TimestampNanosecond(Some(inner_value), _)
