@@ -20,6 +20,7 @@ mod aggregate_fuzz;
 mod distinct_count_string_fuzz;
 #[expect(clippy::needless_pass_by_value)]
 mod join_fuzz;
+mod join_query_fuzz;
 mod merge_fuzz;
 #[expect(clippy::needless_pass_by_value)]
 mod sort_fuzz;

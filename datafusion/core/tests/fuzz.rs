@@ -20,6 +20,8 @@
 /// Run with: cargo test --features extended_tests
 #[cfg(feature = "extended_tests")]
 mod fuzz_cases;
+#[cfg(feature = "extended_tests")]
+mod helper;
 
 #[cfg(test)]
 #[ctor::ctor(unsafe)]
