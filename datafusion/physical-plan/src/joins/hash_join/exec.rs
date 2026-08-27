@@ -7718,10 +7718,16 @@ mod tests {
         let filter = dynamic_filter.current()?.to_string();
         // The aggregated build-side NULL must widen the routed filter once, at the
         // top: `c2 IS NULL OR CASE hash(c2) % 4 WHEN ... END`.
-        assert!(
-            filter.contains("CASE"),
-            "expected a routed partitioned filter, got: {filter}"
-        );
+        //
+        // Forced hash collisions put every build row in one partition, and a
+        // single non-empty partition needs no routing, so only the widening is
+        // asserted in that configuration.
+        if cfg!(not(feature = "force_hash_collisions")) {
+            assert!(
+                filter.contains("CASE"),
+                "expected a routed partitioned filter, got: {filter}"
+            );
+        }
         assert!(
             filter.starts_with("c2@0 IS NULL OR"),
             "expected the IS NULL disjunct to wrap the whole routed filter, got: {filter}"
