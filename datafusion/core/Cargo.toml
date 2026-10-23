@@ -301,6 +301,10 @@ name = "range_and_generate_series"
 
 [[bench]]
 harness = false
+name = "equivalence_planning"
+
+[[bench]]
+harness = false
 name = "sql_planner"
 
 [[bench]]

@@ -773,18 +773,9 @@ impl Ordering {
         }
     }
 
-    /// Keeps the first `len` steps.
-    pub fn truncate(&mut self, len: usize) {
-        self.steps.truncate(len);
-    }
-
     /// Removes and returns the last step.
     pub fn pop(&mut self) -> Option<Step> {
         self.steps.pop()
-    }
-
-    pub fn into_steps(self) -> Vec<Step> {
-        self.steps
     }
 
     /// Whether `prefix` is a prefix of this ordering.
