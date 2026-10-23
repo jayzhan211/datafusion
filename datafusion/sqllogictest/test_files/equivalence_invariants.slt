@@ -1,0 +1,549 @@
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
+#
+#   http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
+
+# Pins the planner's use of equivalence properties (orderings, constants,
+# equalities, keys) on shapes that had no test. Each case states the fact it
+# relies on. All plans here are main's plans as of 61c34724fc.
+
+statement ok
+set datafusion.explain.physical_plan_only = true;
+
+statement ok
+set datafusion.execution.target_partitions = 4;
+
+# window_2.csv is sorted by (a, b) and, separately, by c.
+statement ok
+CREATE EXTERNAL TABLE t (
+  a0 INTEGER,
+  a INTEGER,
+  b INTEGER,
+  c INTEGER,
+  d INTEGER
+)
+STORED AS CSV
+WITH ORDER (a ASC, b ASC)
+WITH ORDER (c ASC)
+LOCATION '../core/tests/data/window_2.csv'
+OPTIONS ('format.has_header' 'true');
+
+# Two keys of one ordering, each with a strict image. Sorting by both images
+# needs no SortExec: CAST(a) fixes a, so b leads among its ties, and CAST(b)
+# is ordered as b is.
+query TT
+EXPLAIN SELECT a, CAST(a AS BIGINT) ca, b, CAST(b AS BIGINT) cb FROM t ORDER BY ca, cb;
+----
+physical_plan
+01)SortPreservingMergeExec: [ca@1 ASC NULLS LAST, cb@3 ASC NULLS LAST]
+02)--ProjectionExec: expr=[a@0 as a, CAST(a@0 AS Int64) as ca, b@1 as b, CAST(b@1 AS Int64) as cb]
+03)----RepartitionExec: partitioning=RoundRobinBatch(4), input_partitions=1, maintains_sort_order=true
+04)------DataSourceExec: file_groups={1 group: [[WORKSPACE_ROOT/datafusion/core/tests/data/window_2.csv]]}, projection=[a, b], output_ordering=[a@0 ASC NULLS LAST, b@1 ASC NULLS LAST], file_type=csv, has_header=true
+
+query IIII
+SELECT a, CAST(a AS BIGINT) ca, b, CAST(b AS BIGINT) cb FROM t ORDER BY ca, cb LIMIT 3;
+----
+0 0 0 0
+0 0 0 0
+0 0 0 0
+
+# The same images in the other order of the keys.
+query TT
+EXPLAIN SELECT CAST(a AS BIGINT) ca, CAST(b AS BIGINT) cb FROM t ORDER BY ca, cb;
+----
+physical_plan
+01)SortPreservingMergeExec: [ca@0 ASC NULLS LAST, cb@1 ASC NULLS LAST]
+02)--ProjectionExec: expr=[CAST(a@0 AS Int64) as ca, CAST(b@1 AS Int64) as cb]
+03)----RepartitionExec: partitioning=RoundRobinBatch(4), input_partitions=1, maintains_sort_order=true
+04)------DataSourceExec: file_groups={1 group: [[WORKSPACE_ROOT/datafusion/core/tests/data/window_2.csv]]}, projection=[a, b], output_ordering=[a@0 ASC NULLS LAST, b@1 ASC NULLS LAST], file_type=csv, has_header=true
+
+# Two orderings that share a leading key: [a, b] and, after the filter makes
+# a = b0 (a constant), the second ordering [c]. Requirement [a, c] holds only
+# by combining both orderings with a pinned a.
+query TT
+EXPLAIN SELECT a, b, c FROM t WHERE b = 0 ORDER BY a, c;
+----
+physical_plan
+01)SortPreservingMergeExec: [a@0 ASC NULLS LAST, c@2 ASC NULLS LAST]
+02)--FilterExec: b@1 = 0
+03)----RepartitionExec: partitioning=RoundRobinBatch(4), input_partitions=1, maintains_sort_order=true
+04)------DataSourceExec: file_groups={1 group: [[WORKSPACE_ROOT/datafusion/core/tests/data/window_2.csv]]}, projection=[a, b, c], output_orderings=[[a@0 ASC NULLS LAST, b@1 ASC NULLS LAST], [c@2 ASC NULLS LAST]], file_type=csv, has_header=true
+
+# A constant inside the requirement is skipped (b = 0 everywhere).
+query TT
+EXPLAIN SELECT a, b, c FROM t WHERE b = 0 ORDER BY b, a, c;
+----
+physical_plan
+01)SortPreservingMergeExec: [b@1 ASC NULLS LAST, a@0 ASC NULLS LAST, c@2 ASC NULLS LAST]
+02)--FilterExec: b@1 = 0
+03)----RepartitionExec: partitioning=RoundRobinBatch(4), input_partitions=1, maintains_sort_order=true
+04)------DataSourceExec: file_groups={1 group: [[WORKSPACE_ROOT/datafusion/core/tests/data/window_2.csv]]}, projection=[a, b, c], output_orderings=[[a@0 ASC NULLS LAST, b@1 ASC NULLS LAST], [c@2 ASC NULLS LAST]], file_type=csv, has_header=true
+
+# Q3 order (GROUP BY): with orderings [a, b] and [c], GROUP BY d, c, b, a finds
+# the sorted permutation in input-index order per round.
+query TT
+EXPLAIN SELECT d, c, b, a, count(*) FROM t GROUP BY d, c, b, a;
+----
+physical_plan
+01)ProjectionExec: expr=[d@0 as d, c@1 as c, b@2 as b, a@3 as a, count(Int64(1))@4 as count(*)]
+02)--AggregateExec: mode=FinalPartitioned, gby=[d@0 as d, c@1 as c, b@2 as b, a@3 as a], aggr=[count(Int64(1))], group_clustering_mode=Partial([1, 3, 2])
+03)----RepartitionExec: partitioning=Hash([d@0, c@1, b@2, a@3], 4), input_partitions=4, preserve_order=true, sort_exprs=c@1 ASC NULLS LAST, a@3 ASC NULLS LAST, b@2 ASC NULLS LAST
+04)------AggregateExec: mode=Partial, gby=[d@3 as d, c@2 as c, b@1 as b, a@0 as a], aggr=[count(Int64(1))], group_clustering_mode=Partial([1, 3, 2])
+05)--------RepartitionExec: partitioning=RoundRobinBatch(4), input_partitions=1, maintains_sort_order=true
+06)----------DataSourceExec: file_groups={1 group: [[WORKSPACE_ROOT/datafusion/core/tests/data/window_2.csv]]}, projection=[a, b, c, d], output_orderings=[[a@0 ASC NULLS LAST, b@1 ASC NULLS LAST], [c@2 ASC NULLS LAST]], file_type=csv, has_header=true
+
+query TT
+EXPLAIN SELECT b, c, a, count(*) FROM t GROUP BY b, c, a;
+----
+physical_plan
+01)ProjectionExec: expr=[b@0 as b, c@1 as c, a@2 as a, count(Int64(1))@3 as count(*)]
+02)--AggregateExec: mode=FinalPartitioned, gby=[b@0 as b, c@1 as c, a@2 as a], aggr=[count(Int64(1))], group_clustering_mode=Full
+03)----RepartitionExec: partitioning=Hash([b@0, c@1, a@2], 4), input_partitions=4, preserve_order=true, sort_exprs=a@2 ASC NULLS LAST, b@0 ASC NULLS LAST, c@1 ASC NULLS LAST
+04)------AggregateExec: mode=Partial, gby=[b@1 as b, c@2 as c, a@0 as a], aggr=[count(Int64(1))], group_clustering_mode=Full
+05)--------RepartitionExec: partitioning=RoundRobinBatch(4), input_partitions=1, maintains_sort_order=true
+06)----------DataSourceExec: file_groups={1 group: [[WORKSPACE_ROOT/datafusion/core/tests/data/window_2.csv]]}, projection=[a, b, c], output_orderings=[[a@0 ASC NULLS LAST, b@1 ASC NULLS LAST], [c@2 ASC NULLS LAST]], file_type=csv, has_header=true
+
+# Q3 with a constant group key: a constant key comes back with default options.
+query TT
+EXPLAIN SELECT b, a, count(*) FROM t WHERE b = 1 GROUP BY b, a;
+----
+physical_plan
+01)ProjectionExec: expr=[b@0 as b, a@1 as a, count(Int64(1))@2 as count(*)]
+02)--AggregateExec: mode=FinalPartitioned, gby=[b@0 as b, a@1 as a], aggr=[count(Int64(1))], group_clustering_mode=Full
+03)----RepartitionExec: partitioning=Hash([b@0, a@1], 4), input_partitions=4, preserve_order=true, sort_exprs=a@1 ASC NULLS LAST
+04)------AggregateExec: mode=Partial, gby=[b@1 as b, a@0 as a], aggr=[count(Int64(1))], group_clustering_mode=Full
+05)--------FilterExec: b@1 = 1
+06)----------RepartitionExec: partitioning=RoundRobinBatch(4), input_partitions=1, maintains_sort_order=true
+07)------------DataSourceExec: file_groups={1 group: [[WORKSPACE_ROOT/datafusion/core/tests/data/window_2.csv]]}, projection=[a, b], output_ordering=[a@0 ASC NULLS LAST, b@1 ASC NULLS LAST], file_type=csv, has_header=true
+
+# Window PARTITION BY over keys the data is sorted by in another order.
+query TT
+EXPLAIN SELECT a, b, ROW_NUMBER() OVER (PARTITION BY b, a ORDER BY c) rn FROM t;
+----
+physical_plan
+01)ProjectionExec: expr=[a@0 as a, b@1 as b, row_number() PARTITION BY [t.b, t.a] ORDER BY [t.c ASC NULLS LAST] RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW@3 as rn]
+02)--BoundedWindowAggExec: wdw=[row_number() PARTITION BY [t.b, t.a] ORDER BY [t.c ASC NULLS LAST] RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW: Field { "row_number() PARTITION BY [t.b, t.a] ORDER BY [t.c ASC NULLS LAST] RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW": UInt64 }, frame: RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW], mode=[Sorted]
+03)----RepartitionExec: partitioning=Hash([b@1, a@0], 4), input_partitions=1, maintains_sort_order=true
+04)------DataSourceExec: file_groups={1 group: [[WORKSPACE_ROOT/datafusion/core/tests/data/window_2.csv]]}, projection=[a, b, c], output_orderings=[[a@0 ASC NULLS LAST, b@1 ASC NULLS LAST], [c@2 ASC NULLS LAST]], file_type=csv, has_header=true
+
+# A PARTITION BY key with no ordering gets a SortExec with the default
+# options (ASC NULLS LAST).
+query TT
+EXPLAIN SELECT d, ROW_NUMBER() OVER (PARTITION BY d ORDER BY c) rn FROM t;
+----
+physical_plan
+01)ProjectionExec: expr=[d@1 as d, row_number() PARTITION BY [t.d] ORDER BY [t.c ASC NULLS LAST] RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW@2 as rn]
+02)--BoundedWindowAggExec: wdw=[row_number() PARTITION BY [t.d] ORDER BY [t.c ASC NULLS LAST] RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW: Field { "row_number() PARTITION BY [t.d] ORDER BY [t.c ASC NULLS LAST] RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW": UInt64 }, frame: RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW], mode=[Sorted]
+03)----SortExec: expr=[d@1 ASC NULLS LAST, c@0 ASC NULLS LAST], preserve_partitioning=[true]
+04)------RepartitionExec: partitioning=Hash([d@1], 4), input_partitions=1, maintains_sort_order=true
+05)--------DataSourceExec: file_groups={1 group: [[WORKSPACE_ROOT/datafusion/core/tests/data/window_2.csv]]}, projection=[c, d], output_ordering=[c@0 ASC NULLS LAST], file_type=csv, has_header=true
+
+# Sort keeps constants: after a TopK on c, b is still the constant 1, so
+# ORDER BY b, c is satisfied by the TopK's ordering.
+query TT
+EXPLAIN SELECT * FROM (SELECT b, c FROM t WHERE b = 1 ORDER BY c LIMIT 5) ORDER BY b, c;
+----
+physical_plan
+01)SortPreservingMergeExec: [c@1 ASC NULLS LAST], fetch=5
+02)--FilterExec: b@0 = 1, fetch=5
+03)----RepartitionExec: partitioning=RoundRobinBatch(4), input_partitions=1, maintains_sort_order=true
+04)------DataSourceExec: file_groups={1 group: [[WORKSPACE_ROOT/datafusion/core/tests/data/window_2.csv]]}, projection=[b, c], output_ordering=[c@1 ASC NULLS LAST], file_type=csv, has_header=true
+
+query II
+SELECT * FROM (SELECT b, c FROM t WHERE b = 1 ORDER BY c LIMIT 5) ORDER BY b, c;
+----
+1 25
+1 26
+1 27
+1 28
+1 29
+
+# Union keeps a constant that each side knows through an equality with a
+# constant column (b = a and a = 1 make b constant).
+query TT
+EXPLAIN SELECT a, b, c FROM t WHERE a = 1 AND b = a
+UNION ALL
+SELECT a, b, c FROM t WHERE a = 1 AND b = a
+ORDER BY b, c;
+----
+physical_plan
+01)SortPreservingMergeExec: [b@1 ASC NULLS LAST, c@2 ASC NULLS LAST]
+02)--UnionExec
+03)----FilterExec: a@0 = 1 AND b@1 = a@0
+04)------RepartitionExec: partitioning=RoundRobinBatch(4), input_partitions=1, maintains_sort_order=true
+05)--------DataSourceExec: file_groups={1 group: [[WORKSPACE_ROOT/datafusion/core/tests/data/window_2.csv]]}, projection=[a, b, c], output_orderings=[[a@0 ASC NULLS LAST, b@1 ASC NULLS LAST], [c@2 ASC NULLS LAST]], file_type=csv, has_header=true
+06)----FilterExec: a@0 = 1 AND b@1 = a@0
+07)------RepartitionExec: partitioning=RoundRobinBatch(4), input_partitions=1, maintains_sort_order=true
+08)--------DataSourceExec: file_groups={1 group: [[WORKSPACE_ROOT/datafusion/core/tests/data/window_2.csv]]}, projection=[a, b, c], output_orderings=[[a@0 ASC NULLS LAST, b@1 ASC NULLS LAST], [c@2 ASC NULLS LAST]], file_type=csv, has_header=true
+
+# Union over sides that both order by c and agree on the constant b.
+query TT
+EXPLAIN SELECT b, c FROM t WHERE b = 2
+UNION ALL
+SELECT b, c FROM t WHERE b = 2
+ORDER BY b, c;
+----
+physical_plan
+01)SortPreservingMergeExec: [b@0 ASC NULLS LAST, c@1 ASC NULLS LAST]
+02)--UnionExec
+03)----FilterExec: b@0 = 2
+04)------RepartitionExec: partitioning=RoundRobinBatch(4), input_partitions=1, maintains_sort_order=true
+05)--------DataSourceExec: file_groups={1 group: [[WORKSPACE_ROOT/datafusion/core/tests/data/window_2.csv]]}, projection=[b, c], output_ordering=[c@1 ASC NULLS LAST], file_type=csv, has_header=true
+06)----FilterExec: b@0 = 2
+07)------RepartitionExec: partitioning=RoundRobinBatch(4), input_partitions=1, maintains_sort_order=true
+08)--------DataSourceExec: file_groups={1 group: [[WORKSPACE_ROOT/datafusion/core/tests/data/window_2.csv]]}, projection=[b, c], output_ordering=[c@1 ASC NULLS LAST], file_type=csv, has_header=true
+
+# Union over sides with different constant values for b: b is no longer
+# constant, so ORDER BY b, c needs a sort.
+query TT
+EXPLAIN SELECT b, c FROM t WHERE b = 2
+UNION ALL
+SELECT b, c FROM t WHERE b = 3
+ORDER BY b, c;
+----
+physical_plan
+01)SortPreservingMergeExec: [b@0 ASC NULLS LAST, c@1 ASC NULLS LAST]
+02)--UnionExec
+03)----FilterExec: b@0 = 2
+04)------RepartitionExec: partitioning=RoundRobinBatch(4), input_partitions=1, maintains_sort_order=true
+05)--------DataSourceExec: file_groups={1 group: [[WORKSPACE_ROOT/datafusion/core/tests/data/window_2.csv]]}, projection=[b, c], output_ordering=[c@1 ASC NULLS LAST], file_type=csv, has_header=true
+06)----FilterExec: b@0 = 3
+07)------RepartitionExec: partitioning=RoundRobinBatch(4), input_partitions=1, maintains_sort_order=true
+08)--------DataSourceExec: file_groups={1 group: [[WORKSPACE_ROOT/datafusion/core/tests/data/window_2.csv]]}, projection=[b, c], output_ordering=[c@1 ASC NULLS LAST], file_type=csv, has_header=true
+
+query II
+SELECT b, c FROM t WHERE b = 2 AND c < 52
+UNION ALL
+SELECT b, c FROM t WHERE b = 3 AND c < 77
+ORDER BY b, c;
+----
+2 50
+2 51
+3 75
+3 76
+
+# Cross join keeps the left side's constants and orderings.
+statement ok
+CREATE TABLE small(x INT) AS VALUES (1), (2);
+
+query TT
+EXPLAIN SELECT l.b, l.c, s.x FROM (SELECT b, c FROM t WHERE b = 1) l CROSS JOIN small s ORDER BY l.b, l.c;
+----
+physical_plan
+01)SortExec: expr=[c@1 ASC NULLS LAST], preserve_partitioning=[false]
+02)--CrossJoinExec
+03)----CoalescePartitionsExec
+04)------FilterExec: b@0 = 1
+05)--------RepartitionExec: partitioning=RoundRobinBatch(4), input_partitions=1, maintains_sort_order=true
+06)----------DataSourceExec: file_groups={1 group: [[WORKSPACE_ROOT/datafusion/core/tests/data/window_2.csv]]}, projection=[b, c], output_ordering=[c@1 ASC NULLS LAST], file_type=csv, has_header=true
+07)----DataSourceExec: partitions=1, partition_sizes=[1]
+
+# Inner join: equi-join keys become equal, so ordering by the right key is
+# ordering by the left key.
+query TT
+EXPLAIN SELECT l.a, l.b, r.a FROM t l JOIN t r ON l.a = r.a ORDER BY r.a;
+----
+physical_plan
+01)SortPreservingMergeExec: [a@2 ASC NULLS LAST]
+02)--HashJoinExec: mode=Partitioned, join_type=Inner, on=[(a@0, a@0)]
+03)----RepartitionExec: partitioning=Hash([a@0], 4), input_partitions=1, maintains_sort_order=true
+04)------DataSourceExec: file_groups={1 group: [[WORKSPACE_ROOT/datafusion/core/tests/data/window_2.csv]]}, projection=[a, b], output_ordering=[a@0 ASC NULLS LAST, b@1 ASC NULLS LAST], file_type=csv, has_header=true
+05)----RepartitionExec: partitioning=Hash([a@0], 4), input_partitions=1, maintains_sort_order=true
+06)------DataSourceExec: file_groups={1 group: [[WORKSPACE_ROOT/datafusion/core/tests/data/window_2.csv]]}, projection=[a], output_ordering=[a@0 ASC NULLS LAST], file_type=csv, has_header=true
+
+# Primary key: an ordering that starts with a key satisfies any extension.
+statement ok
+CREATE EXTERNAL TABLE t_pk (
+  a0 INTEGER,
+  a INTEGER,
+  b INTEGER,
+  c INTEGER NOT NULL,
+  d INTEGER,
+  PRIMARY KEY (c)
+)
+STORED AS CSV
+WITH ORDER (c ASC)
+LOCATION '../core/tests/data/window_2.csv'
+OPTIONS ('format.has_header' 'true');
+
+query TT
+EXPLAIN SELECT c, d FROM t_pk ORDER BY c, d;
+----
+physical_plan DataSourceExec: file_groups={1 group: [[WORKSPACE_ROOT/datafusion/core/tests/data/window_2.csv]]}, projection=[c, d], output_ordering=[c@0 ASC NULLS LAST], constraints=[PrimaryKey([3])], file_type=csv, has_header=true
+
+# The key shortcut sees the requirement after its constants are removed.
+query TT
+EXPLAIN SELECT a, c, d FROM t_pk WHERE a = 0 ORDER BY a, c, d;
+----
+physical_plan
+01)SortPreservingMergeExec: [a@0 ASC NULLS LAST, c@1 ASC NULLS LAST]
+02)--FilterExec: a@0 = 0
+03)----RepartitionExec: partitioning=RoundRobinBatch(4), input_partitions=1, maintains_sort_order=true
+04)------DataSourceExec: file_groups={1 group: [[WORKSPACE_ROOT/datafusion/core/tests/data/window_2.csv]]}, projection=[a, c, d], output_ordering=[c@1 ASC NULLS LAST], constraints=[PrimaryKey([3])], file_type=csv, has_header=true
+
+# A nullable UNIQUE column in the middle of an ordering counts as a key
+# (UNKNOWN: current.md U5, kept as on main).
+statement ok
+CREATE EXTERNAL TABLE t_unique (
+  a0 INTEGER,
+  a INTEGER,
+  b INTEGER,
+  c INTEGER,
+  d INTEGER,
+  UNIQUE (c)
+)
+STORED AS CSV
+WITH ORDER (a ASC, c ASC, b ASC)
+LOCATION '../core/tests/data/window_2.csv'
+OPTIONS ('format.has_header' 'true');
+
+query TT
+EXPLAIN SELECT a, c, b, d FROM t_unique ORDER BY a, c, b, d;
+----
+physical_plan
+01)ProjectionExec: expr=[a@0 as a, c@2 as c, b@1 as b, d@3 as d]
+02)--SortExec: expr=[a@0 ASC NULLS LAST, c@2 ASC NULLS LAST, b@1 ASC NULLS LAST, d@3 ASC NULLS LAST], preserve_partitioning=[false]
+03)----DataSourceExec: file_groups={1 group: [[WORKSPACE_ROOT/datafusion/core/tests/data/window_2.csv]]}, projection=[a, b, c, d], output_ordering=[a@0 ASC NULLS LAST, c@2 ASC NULLS LAST, b@1 ASC NULLS LAST], constraints=[Unique([3])], file_type=csv, has_header=true
+
+# The same column first in the ordering is not enough.
+query TT
+EXPLAIN SELECT c, b, d FROM t_unique ORDER BY c, b, d;
+----
+physical_plan
+01)ProjectionExec: expr=[c@1 as c, b@0 as b, d@2 as d]
+02)--SortExec: expr=[c@1 ASC NULLS LAST, b@0 ASC NULLS LAST, d@2 ASC NULLS LAST], preserve_partitioning=[false]
+03)----DataSourceExec: file_groups={1 group: [[WORKSPACE_ROOT/datafusion/core/tests/data/window_2.csv]]}, projection=[b, c, d], constraints=[Unique([3])], file_type=csv, has_header=true
+
+# Projection through a non-strict image (date_trunc-like: a / 2) keeps an
+# ordering that ends at the image.
+query TT
+EXPLAIN SELECT a / 2 AS h, b FROM t ORDER BY h;
+----
+physical_plan
+01)SortPreservingMergeExec: [h@0 ASC NULLS LAST]
+02)--SortExec: expr=[h@0 ASC NULLS LAST], preserve_partitioning=[true]
+03)----ProjectionExec: expr=[CAST(a@0 AS Int64) / 2 as h, b@1 as b]
+04)------RepartitionExec: partitioning=RoundRobinBatch(4), input_partitions=1, maintains_sort_order=true
+05)--------DataSourceExec: file_groups={1 group: [[WORKSPACE_ROOT/datafusion/core/tests/data/window_2.csv]]}, projection=[a, b], output_ordering=[a@0 ASC NULLS LAST, b@1 ASC NULLS LAST], file_type=csv, has_header=true
+
+query TT
+EXPLAIN SELECT a / 2 AS h, b FROM t ORDER BY h, b;
+----
+physical_plan
+01)SortPreservingMergeExec: [h@0 ASC NULLS LAST, b@1 ASC NULLS LAST]
+02)--SortExec: expr=[h@0 ASC NULLS LAST, b@1 ASC NULLS LAST], preserve_partitioning=[true]
+03)----ProjectionExec: expr=[CAST(a@0 AS Int64) / 2 as h, b@1 as b]
+04)------RepartitionExec: partitioning=RoundRobinBatch(4), input_partitions=1, maintains_sort_order=true
+05)--------DataSourceExec: file_groups={1 group: [[WORKSPACE_ROOT/datafusion/core/tests/data/window_2.csv]]}, projection=[a, b], output_ordering=[a@0 ASC NULLS LAST, b@1 ASC NULLS LAST], file_type=csv, has_header=true
+
+# a + 0 is ordered as a is but not strictly (Plus over unbounded ranges is
+# not order preserving), so the sort stays.
+query TT
+EXPLAIN SELECT a + 0 AS x, b FROM t ORDER BY x, b;
+----
+physical_plan
+01)SortPreservingMergeExec: [x@0 ASC NULLS LAST, b@1 ASC NULLS LAST]
+02)--SortExec: expr=[x@0 ASC NULLS LAST, b@1 ASC NULLS LAST], preserve_partitioning=[true]
+03)----ProjectionExec: expr=[CAST(a@0 AS Int64) + 0 as x, b@1 as b]
+04)------RepartitionExec: partitioning=RoundRobinBatch(4), input_partitions=1, maintains_sort_order=true
+05)--------DataSourceExec: file_groups={1 group: [[WORKSPACE_ROOT/datafusion/core/tests/data/window_2.csv]]}, projection=[a, b], output_ordering=[a@0 ASC NULLS LAST, b@1 ASC NULLS LAST], file_type=csv, has_header=true
+
+# Duplicate aliases of one constant source: both are constant.
+query TT
+EXPLAIN SELECT b AS x, b AS y, c FROM t WHERE b = 1 ORDER BY y, x, c;
+----
+physical_plan
+01)SortPreservingMergeExec: [y@1 ASC NULLS LAST, x@0 ASC NULLS LAST, c@2 ASC NULLS LAST]
+02)--ProjectionExec: expr=[b@0 as x, b@0 as y, c@1 as c]
+03)----FilterExec: b@0 = 1
+04)------RepartitionExec: partitioning=RoundRobinBatch(4), input_partitions=1, maintains_sort_order=true
+05)--------DataSourceExec: file_groups={1 group: [[WORKSPACE_ROOT/datafusion/core/tests/data/window_2.csv]]}, projection=[b, c], output_ordering=[c@1 ASC NULLS LAST], file_type=csv, has_header=true
+
+# Merges: SortPreservingMerge over one partition keeps the input's other
+# ordering (and per-partition constants).
+statement ok
+set datafusion.execution.target_partitions = 1;
+
+query TT
+EXPLAIN SELECT * FROM (SELECT a, b, c FROM t ORDER BY a, b LIMIT 10) ORDER BY c;
+----
+physical_plan DataSourceExec: file_groups={1 group: [[WORKSPACE_ROOT/datafusion/core/tests/data/window_2.csv]]}, projection=[a, b, c], limit=10, output_orderings=[[a@0 ASC NULLS LAST, b@1 ASC NULLS LAST], [c@2 ASC NULLS LAST]], file_type=csv, has_header=true
+
+statement ok
+set datafusion.execution.target_partitions = 4;
+
+# W1 (found.md): over more than one partition, main keeps the input's other
+# orderings after the merge.
+query TT
+EXPLAIN SELECT * FROM (SELECT a, b, c FROM t ORDER BY a, b LIMIT 10) ORDER BY c;
+----
+physical_plan DataSourceExec: file_groups={1 group: [[WORKSPACE_ROOT/datafusion/core/tests/data/window_2.csv]]}, projection=[a, b, c], limit=10, output_orderings=[[a@0 ASC NULLS LAST, b@1 ASC NULLS LAST], [c@2 ASC NULLS LAST]], file_type=csv, has_header=true
+
+query III
+SELECT * FROM (SELECT a, b, c FROM t ORDER BY a, b LIMIT 10) ORDER BY c;
+----
+0 0 0
+0 0 1
+0 0 2
+0 0 3
+0 0 4
+0 0 5
+0 0 6
+0 0 7
+0 0 8
+0 0 9
+
+# Per-partition constants: a no-group partial aggregate has one row per
+# partition, so its outputs are constant only inside each partition.
+query TT
+EXPLAIN SELECT cnt FROM (SELECT count(*) cnt FROM t) ORDER BY cnt;
+----
+physical_plan
+01)ProjectionExec: expr=[count(Int64(1))@0 as cnt]
+02)--AggregateExec: mode=Final, gby=[], aggr=[count(Int64(1))]
+03)----CoalescePartitionsExec
+04)------AggregateExec: mode=Partial, gby=[], aggr=[count(Int64(1))]
+05)--------RepartitionExec: partitioning=RoundRobinBatch(4), input_partitions=1
+06)----------DataSourceExec: file_groups={1 group: [[WORKSPACE_ROOT/datafusion/core/tests/data/window_2.csv]]}, file_type=csv, has_header=true
+
+# Two files, each sorted by a and, separately, by b: the scan has two
+# partitions, so merges really merge.
+statement ok
+COPY (VALUES (1, 10), (2, 20)) TO 'test_files/scratch/equivalence_invariants/w/f1.csv'
+STORED AS CSV OPTIONS ('format.has_header' 'true');
+
+statement ok
+COPY (VALUES (1, 1), (3, 2)) TO 'test_files/scratch/equivalence_invariants/w/f2.csv'
+STORED AS CSV OPTIONS ('format.has_header' 'true');
+
+statement ok
+set datafusion.execution.target_partitions = 2;
+
+statement ok
+CREATE EXTERNAL TABLE w (a INT, b INT) STORED AS CSV
+WITH ORDER (a) WITH ORDER (b)
+LOCATION 'test_files/scratch/equivalence_invariants/w/'
+OPTIONS ('format.has_header' 'true');
+
+# W1 (found.md): main keeps the input's ordering on b after the merge on a,
+# so the outer ORDER BY b is dropped and the result is not sorted by b.
+# Plan only; the POC adds the sort back (allowed change W1).
+query TT
+EXPLAIN SELECT * FROM (SELECT a, b FROM w ORDER BY a LIMIT 10) ORDER BY b;
+----
+physical_plan
+01)SortPreservingMergeExec: [a@0 ASC NULLS LAST], fetch=10
+02)--DataSourceExec: file_groups={2 groups: [[WORKSPACE_ROOT/datafusion/sqllogictest/test_files/scratch/equivalence_invariants/w/f1.csv], [WORKSPACE_ROOT/datafusion/sqllogictest/test_files/scratch/equivalence_invariants/w/f2.csv]]}, projection=[a, b], limit=10, output_orderings=[[a@0 ASC NULLS LAST], [b@1 ASC NULLS LAST]], file_type=csv, has_header=true
+
+# W2 (found.md): a preserve-order repartition merges on [a, b] but main
+# claims [b] separately. Plan only (allowed change W2).
+statement ok
+set datafusion.optimizer.prefer_existing_sort = true;
+
+statement ok
+set datafusion.optimizer.repartition_file_scans = false;
+
+query TT
+EXPLAIN SELECT a, b, count(*) FROM w GROUP BY a, b ORDER BY b;
+----
+physical_plan
+01)SortPreservingMergeExec: [b@1 ASC NULLS LAST]
+02)--ProjectionExec: expr=[a@0 as a, b@1 as b, count(Int64(1))@2 as count(*)]
+03)----AggregateExec: mode=FinalPartitioned, gby=[a@0 as a, b@1 as b], aggr=[count(Int64(1))], group_clustering_mode=Full
+04)------RepartitionExec: partitioning=Hash([a@0, b@1], 2), input_partitions=2, preserve_order=true, sort_exprs=a@0 ASC NULLS LAST, b@1 ASC NULLS LAST
+05)--------AggregateExec: mode=Partial, gby=[a@0 as a, b@1 as b], aggr=[count(Int64(1))], group_clustering_mode=Full
+06)----------DataSourceExec: file_groups={2 groups: [[WORKSPACE_ROOT/datafusion/sqllogictest/test_files/scratch/equivalence_invariants/w/f1.csv], [WORKSPACE_ROOT/datafusion/sqllogictest/test_files/scratch/equivalence_invariants/w/f2.csv]]}, projection=[a, b], output_orderings=[[a@0 ASC NULLS LAST], [b@1 ASC NULLS LAST]], file_type=csv, has_header=true
+
+statement ok
+set datafusion.optimizer.prefer_existing_sort = false;
+
+statement ok
+set datafusion.optimizer.repartition_file_scans = true;
+
+# A merge keeps an all-partition constant: b = 1 holds in every partition.
+query TT
+EXPLAIN SELECT * FROM (SELECT a, b FROM w WHERE b = 1 ORDER BY a LIMIT 10) ORDER BY b, a;
+----
+physical_plan
+01)SortPreservingMergeExec: [a@0 ASC NULLS LAST], fetch=10
+02)--FilterExec: b@1 = 1, fetch=10
+03)----DataSourceExec: file_groups={2 groups: [[WORKSPACE_ROOT/datafusion/sqllogictest/test_files/scratch/equivalence_invariants/w/f1.csv], [WORKSPACE_ROOT/datafusion/sqllogictest/test_files/scratch/equivalence_invariants/w/f2.csv]]}, projection=[a, b], output_orderings=[[a@0 ASC NULLS LAST], [b@1 ASC NULLS LAST]], file_type=csv, has_header=true
+
+query II
+SELECT * FROM (SELECT a, b FROM w WHERE b = 1 ORDER BY a LIMIT 10) ORDER BY b, a;
+----
+1 1
+
+statement ok
+DROP TABLE w;
+
+statement ok
+set datafusion.execution.target_partitions = 4;
+
+# W3 (found.md): RIGHT join keeps the null-extended left side's constant c.
+# Plan only: main drops the NULLS FIRST sort on l.c (kept as on main).
+statement ok
+set datafusion.execution.target_partitions = 1;
+
+statement ok
+CREATE TABLE jl (k INT, c INT) AS VALUES (1, 5), (3, 5), (2, 6);
+
+statement ok
+CREATE TABLE jr (k INT, x INT) AS VALUES (1, 1), (2, 1);
+
+query TT
+EXPLAIN SELECT jr.x, l.c, jr.k FROM (SELECT * FROM jl WHERE c = 5) l RIGHT JOIN jr ON l.k = jr.k ORDER BY jr.x, l.c NULLS FIRST;
+----
+physical_plan
+01)HashJoinExec: mode=CollectLeft, join_type=Right, on=[(k@0, k@0)], projection=[x@3, c@1, k@2]
+02)--FilterExec: c@1 = 5
+03)----DataSourceExec: partitions=1, partition_sizes=[1]
+04)--SortExec: expr=[x@1 ASC NULLS LAST], preserve_partitioning=[false]
+05)----DataSourceExec: partitions=1, partition_sizes=[1]
+
+# The inner side's constants survive a LEFT join on the preserved side.
+query TT
+EXPLAIN SELECT l.c, jr.x FROM (SELECT * FROM jl WHERE c = 5) l LEFT JOIN jr ON l.k = jr.k ORDER BY l.c, jr.x;
+----
+physical_plan
+01)SortExec: expr=[x@1 ASC NULLS LAST], preserve_partitioning=[false]
+02)--HashJoinExec: mode=CollectLeft, join_type=Left, on=[(k@0, k@0)], projection=[c@1, x@3]
+03)----FilterExec: c@1 = 5
+04)------DataSourceExec: partitions=1, partition_sizes=[1]
+05)----DataSourceExec: partitions=1, partition_sizes=[1]
+
+statement ok
+DROP TABLE jl;
+
+statement ok
+DROP TABLE jr;
+
+statement ok
+set datafusion.execution.target_partitions = 4;
+
+statement ok
+DROP TABLE t;
+
+statement ok
+DROP TABLE t_pk;
+
+statement ok
+DROP TABLE t_unique;
+
+statement ok
+DROP TABLE small;
+
+statement ok
+set datafusion.explain.physical_plan_only = false;
