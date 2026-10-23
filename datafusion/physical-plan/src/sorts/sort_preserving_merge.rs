@@ -172,13 +172,12 @@ impl SortPreservingMergeExec {
         };
 
         let mut eq_properties = input.equivalence_properties().clone();
-        // Merging multiple partitions only preserves the merge key ordering.
-        // Other input orderings hold only within each partition:
         if input_partitions > 1 {
-            eq_properties.clear_orderings();
+            eq_properties = eq_properties.merged(Some(ordering));
+        } else {
+            // Nothing is merged; the input already satisfies `ordering`.
+            eq_properties.add_ordering(ordering);
         }
-        eq_properties.clear_per_partition_constants();
-        eq_properties.add_ordering(ordering);
         PlanProperties::new(
             eq_properties,                        // Equivalence Properties
             Partitioning::UnknownPartitioning(1), // Output Partitioning

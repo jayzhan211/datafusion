@@ -152,14 +152,12 @@ fn window_plan(
         )?),
     };
     assert!(
-        input
-            .equivalence_properties()
-            .ordering_satisfy_requirement(
-                plan.required_input_ordering()[0]
-                    .clone()
-                    .unwrap()
-                    .into_single(),
-            )?
+        input.equivalence_properties().ordering_satisfy(
+            plan.required_input_ordering()[0]
+                .clone()
+                .unwrap()
+                .into_single(),
+        )
     );
     Ok(plan)
 }

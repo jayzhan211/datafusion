@@ -41,14 +41,14 @@ use datafusion_expr::{
 use datafusion_functions_window_common::expr::ExpressionArgs;
 use datafusion_functions_window_common::field::WindowUDFFieldArgs;
 use datafusion_functions_window_common::partition::PartitionEvaluatorArgs;
+use datafusion_physical_expr::EquivalenceProperties;
 use datafusion_physical_expr::aggregate::{AggregateExprBuilder, AggregateFunctionExpr};
 use datafusion_physical_expr::expressions::Column;
 use datafusion_physical_expr::window::{
     SlidingAggregateWindowExpr, StandardWindowFunctionExpr,
 };
-use datafusion_physical_expr::{ConstExpr, EquivalenceProperties};
 use datafusion_physical_expr_common::sort_expr::{
-    LexOrdering, LexRequirement, OrderingRequirements, PhysicalSortRequirement,
+    LexOrdering, Ordering, OrderingRequirements, Step,
 };
 
 use itertools::Itertools;
@@ -313,32 +313,18 @@ pub(crate) fn calc_requirements<
     partition_by_exprs: impl IntoIterator<Item = T>,
     orderby_sort_exprs: impl IntoIterator<Item = S>,
 ) -> Option<OrderingRequirements> {
-    let mut sort_reqs_with_partition = partition_by_exprs
+    // One group step per PARTITION BY key: sorted on each key in either
+    // direction, lexicographically.
+    let partition_steps = partition_by_exprs
         .into_iter()
-        .map(|partition_by| {
-            PhysicalSortRequirement::new(Arc::clone(partition_by.borrow()), None)
-        })
-        .collect::<Vec<_>>();
-    let mut sort_reqs = vec![];
-    for element in orderby_sort_exprs.into_iter() {
-        let PhysicalSortExpr { expr, options } = element.borrow();
-        let sort_req = PhysicalSortRequirement::new(Arc::clone(expr), Some(*options));
-        if !sort_reqs_with_partition.iter().any(|e| e.expr.eq(expr)) {
-            sort_reqs_with_partition.push(sort_req.clone());
-        }
-        if !sort_reqs
-            .iter()
-            .any(|e: &PhysicalSortRequirement| e.expr.eq(expr))
-        {
-            sort_reqs.push(sort_req);
-        }
-    }
-
-    let mut alternatives = vec![];
-    alternatives.extend(LexRequirement::new(sort_reqs_with_partition));
-    alternatives.extend(LexRequirement::new(sort_reqs));
-
-    OrderingRequirements::new_alternatives(alternatives, false)
+        .map(|partition_by| Step::group([Arc::clone(partition_by.borrow())]));
+    let order_steps: Vec<Step> = orderby_sort_exprs
+        .into_iter()
+        .map(|element| Step::from(element.borrow().clone()))
+        .collect();
+    let with_partition = Ordering::new(partition_steps.chain(order_steps.clone()));
+    let without_partition = Ordering::new(order_steps);
+    OrderingRequirements::new_alternatives([with_partition, without_partition], false)
 }
 
 /// This function calculates the indices such that when partition by expressions reordered with the indices
@@ -352,7 +338,7 @@ pub fn get_ordered_partition_by_indices(
 ) -> Result<Vec<usize>> {
     let (_, indices) = input
         .equivalence_properties()
-        .find_longest_permutation(partition_by_exprs)?;
+        .longest_permutation(partition_by_exprs);
     Ok(indices)
 }
 
@@ -369,7 +355,7 @@ pub(crate) fn get_partition_by_sort_exprs(
     assert!(ordered_partition_by_indices.len() <= partition_by_exprs.len());
     let (ordering, _) = input
         .equivalence_properties()
-        .find_longest_permutation(&ordered_partition_exprs)?;
+        .longest_permutation(&ordered_partition_exprs);
     if ordering.len() == ordered_partition_exprs.len() {
         Ok(ordering)
     } else {
@@ -384,8 +370,10 @@ pub(crate) fn window_equivalence_properties(
 ) -> Result<EquivalenceProperties> {
     // We need to update the schema, so we can't directly use input's equivalence
     // properties.
-    let mut window_eq_properties = EquivalenceProperties::new(Arc::clone(schema))
-        .extend(input.equivalence_properties().clone())?;
+    let mut window_eq_properties = input
+        .equivalence_properties()
+        .clone()
+        .with_extended_schema(Arc::clone(schema));
 
     let window_schema_len = schema.fields.len();
     let input_schema_len = window_schema_len - window_exprs.len();
@@ -409,7 +397,7 @@ pub(crate) fn window_equivalence_properties(
             for sort_expr in sort_options.into_iter() {
                 candidate_ordering.push(sort_expr);
                 if let Some(lex) = LexOrdering::new(candidate_ordering.clone())
-                    && window_eq_properties.ordering_satisfy(lex)?
+                    && window_eq_properties.ordering_satisfy(lex)
                 {
                     found = true;
                     break;
@@ -450,8 +438,7 @@ pub(crate) fn window_equivalence_properties(
                     Arc::new(Column::new(expr.name(), i + input_schema_len)) as _;
                 if no_partitioning {
                     // Window function has a constant result across the table:
-                    window_eq_properties
-                        .add_constants(std::iter::once(ConstExpr::from(window_col)))?
+                    window_eq_properties.add_local_constant(window_col)
                 } else {
                     // Window function results in a partial constant value in
                     // some ordering. Adjust the ordering equivalences accordingly:
@@ -532,7 +519,7 @@ pub(crate) fn window_equivalence_properties(
                             candidate_order.push(sort_expr);
 
                             if let Some(lex) = LexOrdering::new(candidate_order.clone())
-                                && window_eq_properties.ordering_satisfy(lex)?
+                                && window_eq_properties.ordering_satisfy(lex)
                             {
                                 if idx == 0 {
                                     // The first column's ordering direction determines the overall
@@ -698,25 +685,23 @@ pub fn get_window_mode(
     input: &Arc<dyn ExecutionPlan>,
 ) -> Result<Option<(bool, InputOrderMode)>> {
     let mut input_eqs = input.equivalence_properties().clone();
-    let (_, indices) = input_eqs.find_longest_permutation(partitionby_exprs)?;
+    let (_, indices) = input_eqs.longest_permutation(partitionby_exprs);
     let partition_by_reqs = indices
         .iter()
-        .map(|&idx| PhysicalSortRequirement {
-            expr: Arc::clone(&partitionby_exprs[idx]),
-            options: None,
-        })
+        .map(|&idx| Step::group([Arc::clone(&partitionby_exprs[idx])]))
         .collect::<Vec<_>>();
     // Treat partition by exprs as constant. During analysis of requirements are satisfied.
-    let const_exprs = partitionby_exprs.iter().cloned().map(ConstExpr::from);
-    input_eqs.add_constants(const_exprs)?;
+    for expr in partitionby_exprs {
+        input_eqs.add_local_constant(Arc::clone(expr));
+    }
     let reverse_orderby_keys =
         orderby_keys.iter().map(|e| e.reverse()).collect::<Vec<_>>();
     for (should_swap, orderbys) in
         [(false, orderby_keys), (true, reverse_orderby_keys.as_ref())]
     {
-        let mut req = partition_by_reqs.clone();
-        req.extend(orderbys.iter().cloned().map(Into::into));
-        if req.is_empty() || input_eqs.ordering_satisfy_requirement(req)? {
+        let steps = orderbys.iter().cloned().map(Step::from);
+        let req = Ordering::new(partition_by_reqs.iter().cloned().chain(steps));
+        if req.is_empty() || input_eqs.ordering_satisfy(req) {
             // Window can be run with existing ordering
             let mode = if indices.len() == partitionby_exprs.len() {
                 InputOrderMode::Sorted
@@ -910,13 +895,16 @@ mod tests {
             for expected_param in expected_params.clone() {
                 let mut requirements = vec![];
                 for (col_name, reqs) in expected_param {
-                    let options = reqs.map(|(descending, nulls_first)| {
-                        SortOptions::new(descending, nulls_first)
-                    });
                     let expr = col(col_name, &schema)?;
-                    requirements.push(PhysicalSortRequirement::new(expr, options));
+                    requirements.push(match reqs {
+                        Some((descending, nulls_first)) => {
+                            Step::sort(expr, SortOptions::new(descending, nulls_first))
+                        }
+                        None => Step::group([expr]),
+                    });
                 }
-                if let Some(requirements) = LexRequirement::new(requirements) {
+                let requirements = Ordering::new(requirements);
+                if !requirements.is_empty() {
                     if let Some(alts) = expected.as_mut() {
                         alts.add_alternative(requirements);
                     } else {
@@ -1069,7 +1057,11 @@ mod tests {
                     nulls_first: req_nulls_first,
                 },
             };
-            let res = physical_ordering.satisfy(&required_ordering.into(), &schema);
+            let props = EquivalenceProperties::new_with_orderings(
+                Arc::clone(&schema),
+                [[physical_ordering]],
+            );
+            let res = props.ordering_satisfy([required_ordering]);
             assert_eq!(res, expected);
         }
 
@@ -1109,7 +1101,11 @@ mod tests {
                     nulls_first: req_nulls_first,
                 },
             };
-            let res = physical_ordering.satisfy(&required_ordering.into(), &schema);
+            let props = EquivalenceProperties::new_with_orderings(
+                Arc::clone(&schema),
+                [[physical_ordering]],
+            );
+            let res = props.ordering_satisfy([required_ordering]);
             assert_eq!(res, expected);
         }
 

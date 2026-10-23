@@ -93,10 +93,12 @@ impl CoalescePartitionsExec {
             )
         };
 
-        // Coalescing partitions loses existing orderings:
+        // Coalescing partitions loses per-partition facts (orderings
+        // included); one input partition is passed through as is.
         let mut eq_properties = input.equivalence_properties().clone();
-        eq_properties.clear_orderings();
-        eq_properties.clear_per_partition_constants();
+        if input_partitions > 1 {
+            eq_properties = eq_properties.merged(None);
+        }
         PlanProperties::new(
             eq_properties,                        // Equivalence Properties
             Partitioning::UnknownPartitioning(1), // Output Partitioning

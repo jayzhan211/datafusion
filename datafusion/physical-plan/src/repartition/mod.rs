@@ -2200,18 +2200,16 @@ impl RepartitionExec {
         input: &Arc<dyn ExecutionPlan>,
         preserve_order: bool,
     ) -> EquivalenceProperties {
-        // Equivalence Properties
-        let mut eq_properties = input.equivalence_properties().clone();
-        // If the ordering is lost, reset the ordering equivalence class:
-        if !Self::maintains_input_order_helper(input, preserve_order)[0] {
-            eq_properties.clear_orderings();
+        let eq_properties = input.equivalence_properties().clone();
+        // One input partition is passed through as is. More than one are
+        // fused at each output, which keeps only the merge key, if any.
+        if input.output_partitioning().partition_count() <= 1 {
+            eq_properties
+        } else if preserve_order {
+            eq_properties.merged(input.output_ordering().cloned())
+        } else {
+            eq_properties.merged(None)
         }
-        // When there are more than one input partitions, they will be fused at the output.
-        // Therefore, remove per partition constants.
-        if input.output_partitioning().partition_count() > 1 {
-            eq_properties.clear_per_partition_constants();
-        }
-        eq_properties
     }
 
     /// This function creates the cache object that stores the plan properties such as schema, equivalence properties, ordering, partitioning, etc.

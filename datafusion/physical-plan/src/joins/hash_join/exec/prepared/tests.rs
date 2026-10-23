@@ -222,10 +222,10 @@ async fn prepared_build_placeholder_properties_and_reset() -> Result<()> {
     let base_properties = base.properties().equivalence_properties();
     assert!(
         base_properties
-            .eq_group()
-            .exprs_equal(&build_key, &build_payload)
+            .equalities()
+            .are_equal(&build_key, &build_payload)
     );
-    assert!(base_properties.ordering_satisfy(asserted_order.clone())?);
+    assert!(base_properties.ordering_satisfy(asserted_order.clone()));
 
     let prepared =
         prepare(&base, vec![build], Arc::new(GreedyMemoryPool::new(1 << 20))).await?;
@@ -239,11 +239,11 @@ async fn prepared_build_placeholder_properties_and_reset() -> Result<()> {
     let properties = attached.properties().equivalence_properties();
     assert!(
         !properties
-            .eq_group()
-            .exprs_equal(&build_key, &build_payload)
+            .equalities()
+            .are_equal(&build_key, &build_payload)
     );
-    assert!(properties.ordering_satisfy([ascending("key", 2)])?);
-    assert!(!properties.ordering_satisfy(asserted_order)?);
+    assert!(properties.ordering_satisfy([ascending("key", 2)]));
+    assert!(!properties.ordering_satisfy(asserted_order));
     let stats = StatisticsContext::new().compute(&attached, &StatisticsArgs::new())?;
     assert_ne!(stats.num_rows.get_value(), Some(&0));
     let output = run(&attached).await?;

@@ -77,7 +77,7 @@ fn test_ordering_satisfy_with_equivalence_random() -> Result<()> {
                 // Check whether ordering_satisfy API result and
                 // experimental result matches.
                 assert_eq!(
-                    eq_properties.ordering_satisfy(ordering)?,
+                    eq_properties.ordering_satisfy(ordering),
                     expected,
                     "{err_msg}"
                 );
@@ -158,10 +158,10 @@ fn test_ordering_satisfy_with_equivalence_complex_random() -> Result<()> {
                         })
                         .cloned(),
                 );
-                if eq_properties.ordering_satisfy(ordering)? {
+                if eq_properties.ordering_satisfy(ordering) {
                     assert!(expected, "{err_msg}");
                 } else if let Some(prefix) = conclusive_prefix
-                    && !eq_properties.ordering_satisfy(prefix)?
+                    && !eq_properties.ordering_satisfy(prefix)
                 {
                     assert!(!expected, "{err_msg}");
                 }
@@ -328,7 +328,7 @@ fn test_ordering_satisfy_with_equivalence() -> Result<()> {
             expected
         );
         assert_eq!(
-            eq_properties.ordering_satisfy(ordering)?,
+            eq_properties.ordering_satisfy(ordering),
             expected,
             "{err_msg}"
         );

@@ -29,6 +29,7 @@ use datafusion_physical_plan::ExecutionPlan;
 use datafusion_common::config::{ConfigOptions, OptimizerOptions};
 use datafusion_common::plan_err;
 use datafusion_common::tree_node::{TreeNode, TreeNodeRecursion};
+use datafusion_physical_expr::equivalence::format_orderings;
 use datafusion_physical_expr::intervals::utils::{check_support, is_datatype_supported};
 use datafusion_physical_plan::aggregates::AggregateExec;
 use datafusion_physical_plan::execution_plan::{
@@ -40,7 +41,6 @@ use datafusion_physical_plan::{
 };
 
 use crate::PhysicalOptimizerRule;
-use datafusion_physical_expr_common::sort_expr::format_physical_sort_requirement_list;
 use itertools::izip;
 
 /// The SanityCheckPlan rule rejects the following query plans:
@@ -156,14 +156,14 @@ pub fn check_plan_sanity(
         let child_eq_props = child.equivalence_properties();
         if let Some(sort_req) = sort_req {
             let sort_req = sort_req.into_single();
-            if !child_eq_props.ordering_satisfy_requirement(sort_req.clone())? {
+            if !child_eq_props.ordering_satisfy(sort_req.clone()) {
                 let plan_str = get_plan_string(plan);
                 return plan_err!(
                     "Plan: {:?} does not satisfy order requirements: {}. Child-{} order: {}",
                     plan_str,
-                    format_physical_sort_requirement_list(&sort_req),
+                    format_args!("[{sort_req}]"),
                     idx,
-                    child_eq_props.oeq_class()
+                    format_orderings(child_eq_props.orderings())
                 );
             }
         }

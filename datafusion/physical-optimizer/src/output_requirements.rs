@@ -173,13 +173,13 @@ impl DisplayAs for OutputRequirementExec {
                             .iter()
                             .map(|req| {
                                 let direction = req
-                                    .options
+                                    .options()
                                     .as_ref()
                                     .map(
                                         |opt| if opt.descending { "desc" } else { "asc" },
                                     )
                                     .unwrap_or("unspecified");
-                                format!("({}, {direction})", req.expr)
+                                format!("({}, {direction})", req.expr())
                             })
                             .collect();
                         format!("[{}]", pairs.join(", "))

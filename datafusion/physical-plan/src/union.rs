@@ -56,9 +56,7 @@ use datafusion_common::{
 };
 use datafusion_execution::TaskContext;
 use datafusion_physical_expr::expressions::{CastExpr, Column};
-use datafusion_physical_expr::{
-    EquivalenceProperties, PhysicalExpr, calculate_union, conjunction,
-};
+use datafusion_physical_expr::{EquivalenceProperties, PhysicalExpr, conjunction};
 
 use futures::Stream;
 use itertools::Itertools;
@@ -240,7 +238,7 @@ impl UnionExec {
             .iter()
             .map(|child| child.equivalence_properties().clone())
             .collect::<Vec<_>>();
-        let eq_properties = calculate_union(children_eqps, schema)?;
+        let eq_properties = EquivalenceProperties::union(children_eqps, schema)?;
 
         // Calculate output partitioning; i.e. sum output partitions of the inputs.
         let num_partitions = inputs
@@ -1634,12 +1632,12 @@ mod tests {
         rhs: &EquivalenceProperties,
         err_msg: String,
     ) {
-        // Check whether orderings are same.
-        let lhs_orderings = lhs.oeq_class();
-        let rhs_orderings = rhs.oeq_class();
-        assert_eq!(lhs_orderings.len(), rhs_orderings.len(), "{err_msg}");
-        for rhs_ordering in rhs_orderings.iter() {
-            assert!(lhs_orderings.contains(rhs_ordering), "{}", err_msg);
+        // The same orderings hold on both sides (compared by answers, as
+        // orderings may be stored differently).
+        for (a, b) in [(lhs, rhs), (rhs, lhs)] {
+            for ordering in a.orderings() {
+                assert!(b.ordering_satisfy(ordering.clone()), "{err_msg}");
+            }
         }
     }
 

@@ -33,8 +33,7 @@ use datafusion_physical_expr::{
     Distribution, EquivalenceProperties, add_offset_to_physical_sort_exprs,
 };
 use datafusion_physical_expr_common::sort_expr::{
-    LexOrdering, LexRequirement, OrderingRequirements, PhysicalSortExpr,
-    PhysicalSortRequirement,
+    LexOrdering, Ordering, OrderingRequirements, PhysicalSortExpr, Step,
 };
 use datafusion_physical_plan::aggregates::AggregateExec;
 use datafusion_physical_plan::execution_plan::CardinalityEffect;
@@ -278,8 +277,7 @@ fn pushdown_sorts_helper(
     };
 
     let eqp = plan.equivalence_properties();
-    let satisfy_parent =
-        eqp.ordering_satisfy_requirement(parent_requirement.first().clone())?;
+    let satisfy_parent = eqp.ordering_satisfy(parent_requirement.first().clone());
 
     if is_sort(&plan) {
         let Some(sort_ordering) = plan.output_ordering().cloned() else {
@@ -424,7 +422,10 @@ fn pushdown_sorts_helper(
             .plan
             .output_ordering()
             .cloned()
-            .unwrap_or_else(|| parent_requirement.into_single().into());
+            .unwrap_or_else(|| {
+                (parent_requirement.into_single().to_sort())
+                    .expect("requirements are not empty")
+            });
         sort_push_down = preserve_fetch_above_ordered_plan(
             sort_push_down,
             ordering,
@@ -495,7 +496,7 @@ fn pushdown_requirement_to_children(
                 // to satisfy it.
                 if !plan
                     .equivalence_properties()
-                    .ordering_satisfy_requirement(parent_required.first().clone())?
+                    .ordering_satisfy(parent_required.first().clone())
                 {
                     return Ok(None);
                 }
@@ -509,7 +510,7 @@ fn pushdown_requirement_to_children(
                 // that's the case, we block the pushdown of sort operation.
                 if !plan
                     .equivalence_properties()
-                    .ordering_satisfy_requirement(parent_required.first().clone())?
+                    .ordering_satisfy(parent_required.first().clone())
                 {
                     return Ok(None);
                 }
@@ -600,8 +601,7 @@ fn pushdown_requirement_to_children(
         let parent_ordering: Vec<PhysicalSortExpr> = parent_required
             .first()
             .iter()
-            .cloned()
-            .map(Into::into)
+            .flat_map(Step::to_sort_exprs)
             .collect();
         let eqp = smj.properties().equivalence_properties();
         match expr_source_side(eqp, parent_ordering, smj.join_type(), left_columns_len) {
@@ -645,12 +645,18 @@ fn pushdown_requirement_to_children(
         // Pushing down is not beneficial
         Ok(None)
     } else if is_sort_preserving_merge(plan) {
-        let new_ordering = LexOrdering::from(parent_required.first().clone());
-        let mut spm_eqs = plan.equivalence_properties().clone();
+        let new_ordering =
+            (parent_required.first().to_sort()).expect("requirements are not empty");
+        let spm_eqs = plan.equivalence_properties();
         let old_ordering = spm_eqs.output_ordering().unwrap();
-        // Sort preserving merge will have new ordering, one requirement above is pushed down to its below.
-        let change = spm_eqs.reorder(new_ordering)?;
-        if !change || spm_eqs.ordering_satisfy(old_ordering)? {
+        // Sort preserving merge will have new ordering, one requirement above
+        // is pushed down to its below. An ordering that already holds
+        // changes nothing.
+        let change = !spm_eqs.ordering_satisfy(new_ordering.clone());
+        if !change
+            || (spm_eqs.clone().reordered(Some(new_ordering)))
+                .ordering_satisfy(old_ordering)
+        {
             // Can push-down through SortPreservingMergeExec, because parent requirement is finer
             // than SortPreservingMergeExec output ordering.
             Ok(Some(vec![Some(parent_required)]))
@@ -687,7 +693,7 @@ fn remap_requirement_through_projection(
     OrderingRequirements::new_alternatives(remapped, soft)
 }
 
-/// Remap a single [`LexRequirement`] expressed in a [`ProjectionExec`]'s output
+/// Remap a single requirement expressed in a [`ProjectionExec`]'s output
 /// schema into its child (input) schema.
 ///
 /// Each requirement column at output index `i` is rewritten to the column the
@@ -696,19 +702,19 @@ fn remap_requirement_through_projection(
 /// expression, since that ordering cannot be expressed in the child schema.
 fn remap_lex_requirement_through_projection(
     exprs: &[ProjectionExpr],
-    req: &LexRequirement,
-) -> Option<LexRequirement> {
+    req: &Ordering,
+) -> Option<Ordering> {
     let mut child_reqs = Vec::with_capacity(req.len());
-    for sort_req in req.iter() {
-        let col = sort_req.expr.downcast_ref::<Column>()?;
-        let proj_expr = exprs.get(col.index())?;
-        let child_col = proj_expr.expr.downcast_ref::<Column>()?;
-        child_reqs.push(PhysicalSortRequirement::new(
-            Arc::new(child_col.clone()),
-            sort_req.options,
-        ));
+    for step in req.iter() {
+        child_reqs.push(step.try_map(|expr| {
+            let col = expr.downcast_ref::<Column>()?;
+            let proj_expr = exprs.get(col.index())?;
+            let child_col = proj_expr.expr.downcast_ref::<Column>()?;
+            Some(Arc::new(child_col.clone()) as _)
+        })?);
     }
-    LexRequirement::new(child_reqs)
+    let child_reqs = Ordering::new(child_reqs);
+    (!child_reqs.is_empty()).then_some(child_reqs)
 }
 
 /// Try to push sorting through  [`AggregateExec`]
@@ -749,31 +755,30 @@ fn handle_aggregate_pushdown(
 
     for req in parent_requirement {
         // Sort above AggregateExec should reference its output columns. Map each
-        // output group-by column to its original input expression.
-        let Some(column) = req.expr.downcast_ref::<Column>() else {
+        // output group-by column to its original input expression. AggregateExec
+        // does not produce output that is sorted on aggregate columns so those
+        // can not be pushed through.
+        let child = req.try_map(|expr| {
+            let column = expr.downcast_ref::<Column>()?;
+            group_input_exprs.get(column.index()).map(Arc::clone)
+        });
+        let Some(child) = child else {
             return Ok(None);
         };
-        if column.index() >= group_input_exprs.len() {
-            // AggregateExec does not produce output that is sorted on aggregate
-            // columns so those can not be pushed through.
-            return Ok(None);
-        }
-        child_requirement.push(PhysicalSortRequirement::new(
-            Arc::clone(&group_input_exprs[column.index()]),
-            req.options,
-        ));
+        child_requirement.push(child);
     }
 
-    let Some(child_requirement) = LexRequirement::new(child_requirement) else {
+    let child_requirement = Ordering::new(child_requirement);
+    if child_requirement.is_empty() {
         return Ok(None);
-    };
+    }
 
     // Keep sort above aggregate unless input ordering already satisfies the
     // mapped requirement.
     if aggregate_exec
         .input()
         .equivalence_properties()
-        .ordering_satisfy_requirement(child_requirement.iter().cloned())?
+        .ordering_satisfy(child_requirement.iter().cloned())
     {
         let child_requirements = OrderingRequirements::new(child_requirement);
         Ok(Some(vec![Some(child_requirements)]))
@@ -835,23 +840,23 @@ fn determine_children_requirement(
 
 fn try_pushdown_requirements_to_join(
     smj: &SortMergeJoinExec,
-    parent_required: LexRequirement,
+    parent_required: Ordering,
     sort_exprs: Vec<PhysicalSortExpr>,
     push_side: JoinSide,
 ) -> Result<Option<Vec<Option<OrderingRequirements>>>> {
     let mut smj_required_orderings = smj.required_input_ordering();
 
-    let ordering = LexOrdering::new(sort_exprs.clone());
+    let ordering = LexOrdering::new(sort_exprs);
     let (new_left_ordering, new_right_ordering) = match push_side {
         JoinSide::Left => {
             let mut left_eq_properties = smj.left().equivalence_properties().clone();
-            left_eq_properties.reorder(sort_exprs)?;
+            if let Some(ordering) = &ordering {
+                left_eq_properties = left_eq_properties.reordered(Some(ordering.clone()));
+            }
             let Some(left_requirement) = smj_required_orderings.swap_remove(0) else {
                 return Ok(None);
             };
-            if !left_eq_properties
-                .ordering_satisfy_requirement(left_requirement.into_single())?
-            {
+            if !left_eq_properties.ordering_satisfy(left_requirement.into_single()) {
                 return Ok(None);
             }
             // After re-ordering, requirement is still satisfied:
@@ -859,13 +864,14 @@ fn try_pushdown_requirements_to_join(
         }
         JoinSide::Right => {
             let mut right_eq_properties = smj.right().equivalence_properties().clone();
-            right_eq_properties.reorder(sort_exprs)?;
+            if let Some(ordering) = &ordering {
+                right_eq_properties =
+                    right_eq_properties.reordered(Some(ordering.clone()));
+            }
             let Some(right_requirement) = smj_required_orderings.swap_remove(1) else {
                 return Ok(None);
             };
-            if !right_eq_properties
-                .ordering_satisfy_requirement(right_requirement.into_single())?
-            {
+            if !right_eq_properties.ordering_satisfy(right_requirement.into_single()) {
                 return Ok(None);
             }
             // After re-ordering, requirement is still satisfied:
@@ -886,9 +892,9 @@ fn try_pushdown_requirements_to_join(
     let mut smj_eqs = smj.properties().equivalence_properties().clone();
     if let Some(new_output_ordering) = new_output_ordering {
         // smj will have this ordering when its input changes.
-        smj_eqs.reorder(new_output_ordering)?;
+        smj_eqs = smj_eqs.reordered(Some(new_output_ordering));
     }
-    let should_pushdown = smj_eqs.ordering_satisfy_requirement(parent_required)?;
+    let should_pushdown = smj_eqs.ordering_satisfy(parent_required);
     Ok(should_pushdown.then(|| {
         let mut required_input_ordering = smj.required_input_ordering();
         let new_req = ordering.map(Into::into);
@@ -920,12 +926,12 @@ fn expr_source_side(
         | JoinType::Full
         | JoinType::LeftMark
         | JoinType::RightMark => {
-            let eq_group = eqp.eq_group();
+            let eq_group = eqp.equalities();
             let mut right_ordering = ordering.clone();
             let (mut valid_left, mut valid_right) = (true, true);
             for (left, right) in ordering.iter_mut().zip(right_ordering.iter_mut()) {
                 let col = left.expr.downcast_ref::<Column>()?;
-                let eq_class = eq_group.get_equivalence_class(&left.expr);
+                let eq_class = eq_group.class_of(&left.expr);
                 if col.index() < left_columns_len {
                     if valid_right {
                         valid_right = eq_class.is_some_and(|cls| {
@@ -991,7 +997,7 @@ fn expr_source_side(
 ///
 /// # Returns
 ///
-/// Returns `Ok(Some(Vec<Option<LexRequirement>>))` if the sorting requirements can be
+/// Returns `Ok(Some(Vec<Option<OrderingRequirements>>))` if the sorting requirements can be
 /// pushed down, `Ok(None)` if not. On error, returns a `Result::Err`.
 fn handle_custom_pushdown(
     plan: &Arc<dyn ExecutionPlan>,
@@ -1010,12 +1016,8 @@ fn handle_custom_pushdown(
     let requirement = parent_required.into_single();
     let all_indices: HashSet<usize> = requirement
         .iter()
-        .flat_map(|order| {
-            collect_columns(&order.expr)
-                .iter()
-                .map(|col| col.index())
-                .collect::<HashSet<_>>()
-        })
+        .flat_map(|step| step.exprs().flat_map(collect_columns))
+        .map(|col| col.index())
         .collect();
 
     // Get the number of fields in each child's schema:
@@ -1054,31 +1056,34 @@ fn handle_custom_pushdown(
             .into_iter()
             .map(|req| {
                 let child_schema = plan_children[maintained_child_idx].schema();
-                let updated_columns = req
-                    .expr
-                    .transform_up(|expr| {
-                        if let Some(col) = expr.downcast_ref::<Column>() {
-                            let new_index = col.index() - sub_offset;
-                            Ok(Transformed::yes(Arc::new(Column::new(
-                                child_schema.field(new_index).name(),
-                                new_index,
-                            ))))
-                        } else {
-                            Ok(Transformed::no(expr))
-                        }
-                    })?
-                    .data;
-                Ok(PhysicalSortRequirement::new(updated_columns, req.options))
+                req.try_map_result(|expr| {
+                    Ok(Arc::clone(expr)
+                        .transform_up(|expr| {
+                            if let Some(col) = expr.downcast_ref::<Column>() {
+                                let new_index = col.index() - sub_offset;
+                                Ok(Transformed::yes(Arc::new(Column::new(
+                                    child_schema.field(new_index).name(),
+                                    new_index,
+                                ))))
+                            } else {
+                                Ok(Transformed::no(expr))
+                            }
+                        })?
+                        .data)
+                })
             })
             .collect::<Result<Vec<_>>>()?;
+        let updated_parent_req = Ordering::new(updated_parent_req);
 
         // Prepare the result, populating with the updated requirements for children that maintain order
         let result = maintains_input_order
             .iter()
             .map(|&maintains_order| {
                 if maintains_order {
-                    LexRequirement::new(updated_parent_req.clone())
-                        .map(OrderingRequirements::new)
+                    OrderingRequirements::new_alternatives(
+                        [updated_parent_req.clone()],
+                        false,
+                    )
                 } else {
                     None
                 }
@@ -1107,12 +1112,8 @@ fn handle_hash_join(
     let requirement = parent_required.into_single();
     let all_indices: HashSet<_> = requirement
         .iter()
-        .flat_map(|order| {
-            collect_columns(&order.expr)
-                .into_iter()
-                .map(|col| col.index())
-                .collect::<HashSet<_>>()
-        })
+        .flat_map(|step| step.exprs().flat_map(collect_columns))
+        .map(|col| col.index())
         .collect();
 
     let column_indices = build_join_column_index(plan);
@@ -1136,28 +1137,31 @@ fn handle_hash_join(
             .into_iter()
             .map(|req| {
                 let child_schema = plan_children[1].schema();
-                let updated_columns = req
-                    .expr
-                    .transform_up(|expr| {
-                        if let Some(col) = expr.downcast_ref::<Column>() {
-                            let index = projected_indices[col.index()].index;
-                            Ok(Transformed::yes(Arc::new(Column::new(
-                                child_schema.field(index).name(),
-                                index,
-                            ))))
-                        } else {
-                            Ok(Transformed::no(expr))
-                        }
-                    })?
-                    .data;
-                Ok(PhysicalSortRequirement::new(updated_columns, req.options))
+                req.try_map_result(|expr| {
+                    Ok(Arc::clone(expr)
+                        .transform_up(|expr| {
+                            if let Some(col) = expr.downcast_ref::<Column>() {
+                                let index = projected_indices[col.index()].index;
+                                Ok(Transformed::yes(Arc::new(Column::new(
+                                    child_schema.field(index).name(),
+                                    index,
+                                ))))
+                            } else {
+                                Ok(Transformed::no(expr))
+                            }
+                        })?
+                        .data)
+                })
             })
             .collect::<Result<Vec<_>>>()?;
 
         // Populating with the updated requirements for children that maintain order
         Ok(Some(vec![
             None,
-            LexRequirement::new(updated_parent_req).map(OrderingRequirements::new),
+            OrderingRequirements::new_alternatives(
+                [Ordering::new(updated_parent_req)],
+                false,
+            ),
         ]))
     } else {
         Ok(None)
@@ -1357,13 +1361,13 @@ mod tests {
         )
     }
 
-    /// `PhysicalSortRequirement` for `<name>@<index> <options>` in `schema`.
-    fn req(name: &str, schema: &Schema, options: SortOptions) -> PhysicalSortRequirement {
-        PhysicalSortRequirement::new(col(name, schema).unwrap(), Some(options))
+    /// A requirement step for `<name>@<index> <options>` in `schema`.
+    fn req(name: &str, schema: &Schema, options: SortOptions) -> Step {
+        Step::sort(col(name, schema).unwrap(), options)
     }
 
-    fn lex(reqs: impl IntoIterator<Item = PhysicalSortRequirement>) -> LexRequirement {
-        LexRequirement::new(reqs).unwrap()
+    fn lex(reqs: impl IntoIterator<Item = Step>) -> Ordering {
+        Ordering::new(reqs)
     }
 
     #[test]

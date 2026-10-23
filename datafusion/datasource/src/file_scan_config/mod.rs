@@ -687,7 +687,8 @@ fn project_output_partitioning(
     match partitioning {
         Partitioning::Hash(exprs, _) => {
             let projected_exprs = input_eq_properties
-                .project_expressions(exprs, mapping)
+                .equalities()
+                .project_expressions(mapping, exprs)
                 .collect::<Option<Vec<_>>>();
             projected_exprs
                 .map(|exprs| Partitioning::Hash(exprs, partition_count))
@@ -1412,7 +1413,7 @@ impl FileScanConfig {
         });
 
         for (lhs, rhs) in equal_pairs {
-            eq_properties.add_equal_conditions(lhs, rhs)?
+            eq_properties.add_equal(lhs, rhs)
         }
 
         Ok(())
@@ -2503,7 +2504,7 @@ mod tests {
         // Gather the equivalence properties from the new data source. There should
         // be no equivalence class for column c2 since it was removed by the projection.
         let eq_properties = data_source.eq_properties();
-        let eq_group = eq_properties.eq_group();
+        let eq_group = eq_properties.equalities();
 
         for class in eq_group.iter() {
             for expr in class.iter() {
@@ -4127,7 +4128,7 @@ mod tests {
                 .build();
 
                 // Act
-                let ordered = config.eq_properties().ordering_satisfy([sort.clone()])?;
+                let ordered = config.eq_properties().ordering_satisfy([sort.clone()]);
 
                 // Assert
                 assert_eq!(
@@ -4180,7 +4181,7 @@ mod tests {
                 .build();
 
                 // Act
-                let ordered = config.eq_properties().ordering_satisfy([sort.clone()])?;
+                let ordered = config.eq_properties().ordering_satisfy([sort.clone()]);
 
                 // Assert
                 assert_eq!(

@@ -273,10 +273,11 @@ mod tests {
         let schema =
             Arc::new(Schema::new(vec![Field::new("a", DataType::Float32, false)]));
 
-        let mut eqp = EquivalenceProperties::new(Arc::clone(&schema));
-        let _ = eqp.reorder([PhysicalSortExpr::new_default(
-            datafusion::physical_plan::expressions::col("a", &schema)?,
-        )]);
+        let eqp = EquivalenceProperties::new(Arc::clone(&schema)).reordered(
+            LexOrdering::new([PhysicalSortExpr::new_default(
+                datafusion::physical_plan::expressions::col("a", &schema)?,
+            )]),
+        );
         Ok(PlanProperties::new(
             eqp,
             Partitioning::RoundRobinBatch(3),

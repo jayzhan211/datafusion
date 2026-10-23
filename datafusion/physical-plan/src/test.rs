@@ -41,9 +41,7 @@ use datafusion_common::{
     Result, Statistics, assert_or_internal_err, config::ConfigOptions, project_schema,
 };
 use datafusion_execution::{SendableRecordBatchStream, TaskContext};
-use datafusion_physical_expr::equivalence::{
-    OrderingEquivalenceClass, ProjectionMapping,
-};
+use datafusion_physical_expr::equivalence::{Ordering, ProjectionMapping};
 use datafusion_physical_expr::expressions::Column;
 use datafusion_physical_expr::utils::collect_columns;
 use datafusion_physical_expr::{
@@ -354,8 +352,9 @@ impl TestMemoryExec {
             );
             let proj_eqp =
                 base_eqp.project(&projection_mapping, Arc::clone(&self.projected_schema));
-            let oeq_class: OrderingEquivalenceClass = proj_eqp.into();
-            sort_information = oeq_class.into();
+            sort_information = (proj_eqp.orderings().iter())
+                .filter_map(Ordering::to_lex)
+                .collect();
         }
 
         self.sort_information = sort_information;

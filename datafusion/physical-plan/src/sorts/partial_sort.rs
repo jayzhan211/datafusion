@@ -293,8 +293,8 @@ impl PartialSortExec {
     ) -> Result<PlanProperties> {
         // Calculate equivalence properties; i.e. reset the ordering equivalence
         // class with the new ordering:
-        let mut eq_properties = input.equivalence_properties().clone();
-        eq_properties.reorder(sort_exprs)?;
+        let eq_properties =
+            (input.equivalence_properties().clone()).reordered(Some(sort_exprs));
 
         // Get output partitioning:
         let output_partitioning =

@@ -18,9 +18,7 @@
 use std::sync::Arc;
 
 use datafusion_common::Result;
-use datafusion_physical_expr::{
-    AcrossPartitions, Distribution, LexOrdering, LexRequirement,
-};
+use datafusion_physical_expr::{Distribution, LexOrdering, Ordering, PhysicalExpr};
 use datafusion_physical_plan::coalesce_partitions::CoalescePartitionsExec;
 use datafusion_physical_plan::limit::{GlobalLimitExec, LocalLimitExec};
 use datafusion_physical_plan::repartition::RepartitionExec;
@@ -32,32 +30,31 @@ use datafusion_physical_plan::windows::{BoundedWindowAggExec, WindowAggExec};
 use datafusion_physical_plan::{ExecutionPlan, ExecutionPlanProperties};
 
 /// Builds the ordering of a sort placed above `plan` from `sort_requirements`,
-/// leaving out the requirements whose expression is constant in `plan`'s
-/// output.
+/// leaving out the steps whose expressions are constant in `plan`'s output.
 ///
-/// A constant with the same value in every partition
-/// ([`AcrossPartitions::Uniform`]) is always left out. A constant whose value
-/// differs between partitions ([`AcrossPartitions::Heterogeneous`]) is left out
-/// only when `keep_heterogeneous` is false. Callers set it when an operator
-/// compares rows from different partitions on this ordering, since there the
-/// constant still decides the order. `EquivalenceGroup::is_uniform_constant`
-/// makes the same distinction when it normalizes orderings (#23528).
+/// A constant with one value in every partition is always left out. A
+/// constant only within each partition is left out only when
+/// `keep_heterogeneous` is false. Callers set it when an operator compares
+/// rows from different partitions on this ordering, since there the constant
+/// still decides the order. `EquivalenceProperties::normalize_requirement`
+/// makes the same distinction (#23528).
 fn ordering_without_constants(
     plan: &dyn ExecutionPlan,
-    sort_requirements: LexRequirement,
+    sort_requirements: Ordering,
     keep_heterogeneous: bool,
 ) -> Option<LexOrdering> {
     let eq_properties = plan.equivalence_properties();
-    let sort_exprs = sort_requirements
+    let left_out = |e: &Arc<dyn PhysicalExpr>| {
+        if keep_heterogeneous {
+            eq_properties.global_constant(e).is_some()
+        } else {
+            eq_properties.is_constant(e)
+        }
+    };
+    let steps = sort_requirements
         .into_iter()
-        .filter(|req| match eq_properties.is_expr_constant(&req.expr) {
-            None => true,
-            Some(AcrossPartitions::Heterogeneous) => keep_heterogeneous,
-            Some(AcrossPartitions::Uniform(_)) => false,
-        })
-        .map(Into::into)
-        .collect::<Vec<_>>();
-    LexOrdering::new(sort_exprs)
+        .filter(|step| !step.exprs().all(&left_out));
+    Ordering::new(steps).to_sort()
 }
 
 /// This utility function adds a `SortExec` above an operator according to the
@@ -68,7 +65,7 @@ fn ordering_without_constants(
 /// the child plans with [`PlanContext::update_plan_from_children`].
 pub fn add_sort_above<T: Clone + Default>(
     node: PlanContext<T>,
-    sort_requirements: LexRequirement,
+    sort_requirements: Ordering,
     fetch: Option<usize>,
 ) -> PlanContext<T> {
     let preserve_partitioning = node.plan.output_partitioning().partition_count() > 1;
@@ -95,7 +92,7 @@ pub fn add_sort_above<T: Clone + Default>(
 /// from violating `SinglePartition` requirements.
 pub fn add_sort_above_with_distribution<T: Clone + Default>(
     node: PlanContext<T>,
-    sort_requirements: LexRequirement,
+    sort_requirements: Ordering,
     fetch: Option<usize>,
     required_distribution: &Distribution,
 ) -> PlanContext<T> {
@@ -145,13 +142,13 @@ pub fn add_sort_above_with_distribution<T: Clone + Default>(
 /// requirement is already satisfied no `SortExec` is added.
 pub fn add_sort_above_with_check<T: Clone + Default>(
     node: PlanContext<T>,
-    sort_requirements: LexRequirement,
+    sort_requirements: Ordering,
     fetch: Option<usize>,
 ) -> Result<PlanContext<T>> {
     if !node
         .plan
         .equivalence_properties()
-        .ordering_satisfy_requirement(sort_requirements.clone())?
+        .ordering_satisfy(sort_requirements.clone())
     {
         Ok(add_sort_above(node, sort_requirements, fetch))
     } else {
@@ -229,12 +226,11 @@ mod tests {
     }
 
     /// The requirement `c0 ASC, c1 ASC` on `plan`.
-    fn c0_c1(plan: &Arc<dyn ExecutionPlan>) -> LexRequirement {
+    fn c0_c1(plan: &Arc<dyn ExecutionPlan>) -> Ordering {
         let schema = plan.schema();
-        LexRequirement::new(["c0", "c1"].map(|name| {
+        Ordering::new(["c0", "c1"].map(|name| {
             PhysicalSortExpr::new_default(col(name, &schema).unwrap()).into()
         }))
-        .unwrap()
     }
 
     fn columns(ordering: &LexOrdering) -> Vec<String> {

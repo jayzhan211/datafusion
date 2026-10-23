@@ -56,7 +56,7 @@ use datafusion_datasource::file_scan_config::{FileScanConfig, FileScanConfigBuil
 use datafusion_datasource::sink::DataSinkExec;
 use datafusion_datasource::write::get_writer_schema;
 use datafusion_expr::dml::InsertOp;
-use datafusion_physical_expr_common::sort_expr::{LexOrdering, LexRequirement};
+use datafusion_physical_expr_common::sort_expr::{LexOrdering, Ordering};
 use datafusion_physical_plan::ExecutionPlan;
 use datafusion_session::Session;
 
@@ -637,15 +637,16 @@ impl FileFormat for ParquetFormat {
         input: Arc<dyn ExecutionPlan>,
         _state: &dyn Session,
         conf: FileSinkConfig,
-        order_requirements: Option<LexRequirement>,
+        order_requirements: Option<Ordering>,
     ) -> Result<Arc<dyn ExecutionPlan>> {
         if conf.insert_op != InsertOp::Append {
             return not_impl_err!("Overwrites are not implemented yet for Parquet");
         }
 
         // Convert ordering requirements to Parquet SortingColumns for file metadata
-        let sorting_columns = if let Some(ref requirements) = order_requirements {
-            let ordering: LexOrdering = requirements.clone().into();
+        let sorting_columns = if let Some(ordering) =
+            order_requirements.as_ref().and_then(Ordering::to_sort)
+        {
             let writer_schema = get_writer_schema(&conf);
             // In cases like `COPY (... ORDER BY ...) TO ...` the ORDER BY clause
             // may not be compatible with Parquet sorting columns (e.g. ordering on `random()`).

@@ -75,14 +75,16 @@ physical_plan
 # ordering. The aggregates still find that c, a and b are sorted (c from the
 # ordering on c, then a and b from the ordering on (a, b)), so they run in
 # partially sorted mode. The clustering mode lists those keys by their
-# position in the GROUP BY, in the order they were found: [1, 3, 2].
+# position in the GROUP BY, in the order they were found: [1, 3, 2]. Above the
+# order-preserving repartition only its merge key [a, b, c] holds, so the
+# final aggregate finds [a, b, c] there: [3, 2, 1].
 query TT
 EXPLAIN SELECT d, c, b, a, count(*) FROM t GROUP BY d, c, b, a;
 ----
 physical_plan
 01)ProjectionExec: expr=[d@0 as d, c@1 as c, b@2 as b, a@3 as a, count(Int64(1))@4 as count(*)]
-02)--AggregateExec: mode=FinalPartitioned, gby=[d@0 as d, c@1 as c, b@2 as b, a@3 as a], aggr=[count(Int64(1))], group_clustering_mode=Partial([1, 3, 2])
-03)----RepartitionExec: partitioning=Hash([d@0, c@1, b@2, a@3], 4), input_partitions=4, preserve_order=true, sort_exprs=c@1 ASC NULLS LAST, a@3 ASC NULLS LAST, b@2 ASC NULLS LAST
+02)--AggregateExec: mode=FinalPartitioned, gby=[d@0 as d, c@1 as c, b@2 as b, a@3 as a], aggr=[count(Int64(1))], group_clustering_mode=Partial([3, 2, 1])
+03)----RepartitionExec: partitioning=Hash([d@0, c@1, b@2, a@3], 4), input_partitions=4, preserve_order=true, sort_exprs=a@3 ASC NULLS LAST, b@2 ASC NULLS LAST, c@1 ASC NULLS LAST
 04)------AggregateExec: mode=Partial, gby=[d@3 as d, c@2 as c, b@1 as b, a@0 as a], aggr=[count(Int64(1))], group_clustering_mode=Partial([1, 3, 2])
 05)--------RepartitionExec: partitioning=RoundRobinBatch(4), input_partitions=1, maintains_sort_order=true
 06)----------DataSourceExec: file_groups={1 group: [[WORKSPACE_ROOT/datafusion/core/tests/data/window_2.csv]]}, projection=[a, b, c, d], output_orderings=[[a@0 ASC NULLS LAST, b@1 ASC NULLS LAST], [c@2 ASC NULLS LAST]], file_type=csv, has_header=true

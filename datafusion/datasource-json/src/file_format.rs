@@ -54,7 +54,7 @@ use datafusion_datasource::write::demux::DemuxedStreamReceiver;
 use datafusion_datasource::write::orchestration::spawn_writer_tasks_and_join;
 use datafusion_execution::{SendableRecordBatchStream, TaskContext};
 use datafusion_expr::dml::InsertOp;
-use datafusion_physical_expr_common::sort_expr::LexRequirement;
+use datafusion_physical_expr_common::sort_expr::Ordering;
 use datafusion_physical_plan::{DisplayAs, DisplayFormatType, ExecutionPlan};
 use datafusion_session::Session;
 
@@ -359,7 +359,7 @@ impl FileFormat for JsonFormat {
         input: Arc<dyn ExecutionPlan>,
         _state: &dyn Session,
         conf: FileSinkConfig,
-        order_requirements: Option<LexRequirement>,
+        order_requirements: Option<Ordering>,
     ) -> Result<Arc<dyn ExecutionPlan>> {
         if conf.insert_op != InsertOp::Append {
             return not_impl_err!("Overwrites are not implemented yet for Json");

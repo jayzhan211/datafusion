@@ -36,15 +36,13 @@ mod sp_repartition_fuzz_tests {
     use datafusion::prelude::SessionContext;
     use datafusion_common::Result;
     use datafusion_execution::{config::SessionConfig, memory_pool::MemoryConsumer};
-    use datafusion_physical_expr::ConstExpr;
-    use datafusion_physical_expr::equivalence::{
-        EquivalenceClass, EquivalenceProperties,
-    };
+    use datafusion_physical_expr::equivalence::EquivalenceProperties;
     use datafusion_physical_expr::expressions::{Column, col};
     use datafusion_physical_expr_common::physical_expr::PhysicalExpr;
     use datafusion_physical_expr_common::sort_expr::{LexOrdering, PhysicalSortExpr};
     use test_utils::add_empty_batches;
 
+    use indexmap::IndexSet;
     use itertools::izip;
     use rand::{Rng, SeedableRng, rngs::StdRng, seq::SliceRandom};
 
@@ -78,9 +76,9 @@ mod sp_repartition_fuzz_tests {
 
         let mut eq_properties = EquivalenceProperties::new(test_schema.clone());
         // Define a and f are aliases
-        eq_properties.add_equal_conditions(Arc::clone(col_a), Arc::clone(col_f))?;
+        eq_properties.add_equal(Arc::clone(col_a), Arc::clone(col_f));
         // Column e has constant value.
-        eq_properties.add_constants([ConstExpr::from(Arc::clone(col_e))])?;
+        eq_properties.add_local_constant(Arc::clone(col_e));
 
         // Randomly order columns for sorting
         let mut rng = StdRng::seed_from_u64(seed);
@@ -113,7 +111,7 @@ mod sp_repartition_fuzz_tests {
     // expressions in the equivalence classes. For other expressions in the same
     // equivalence class use same result. This util gets already calculated result, when available.
     fn get_representative_arr(
-        eq_group: &EquivalenceClass,
+        eq_group: &IndexSet<Arc<dyn PhysicalExpr>>,
         existing_vec: &[Option<ArrayRef>],
         schema: SchemaRef,
     ) -> Option<ArrayRef> {
@@ -148,8 +146,9 @@ mod sp_repartition_fuzz_tests {
         };
 
         // Fill constant columns
-        for constant in eq_properties.constants() {
-            let col = constant.expr.downcast_ref::<Column>().unwrap();
+        let constants = eq_properties.global_constants().map(|(e, _)| e);
+        for constant in constants.chain(eq_properties.local_constants()) {
+            let col = constant.downcast_ref::<Column>().unwrap();
             let (idx, _field) = schema.column_with_name(col.name()).unwrap();
             let arr =
                 Arc::new(UInt64Array::from_iter_values(vec![0; n_elem])) as ArrayRef;
@@ -157,17 +156,18 @@ mod sp_repartition_fuzz_tests {
         }
 
         // Fill columns based on ordering equivalences
-        for ordering in eq_properties.oeq_class().iter() {
+        for ordering in eq_properties.orderings().iter() {
             let (sort_columns, indices): (Vec<_>, Vec<_>) = ordering
                 .iter()
-                .map(|PhysicalSortExpr { expr, options }| {
+                .map(|step| {
+                    let (expr, options) = (step.expr(), step.options().unwrap());
                     let col = expr.downcast_ref::<Column>().unwrap();
                     let (idx, _field) = schema.column_with_name(col.name()).unwrap();
                     let arr = generate_random_array(n_elem, n_distinct);
                     (
                         SortColumn {
                             values: arr,
-                            options: Some(*options),
+                            options: Some(options),
                         },
                         idx,
                     )
@@ -181,7 +181,7 @@ mod sp_repartition_fuzz_tests {
         }
 
         // Fill columns based on equivalence groups
-        for eq_group in eq_properties.eq_group().iter() {
+        for eq_group in eq_properties.equalities().iter() {
             let representative_array =
                 get_representative_arr(eq_group, &schema_vec, schema.clone())
                     .unwrap_or_else(|| generate_random_array(n_elem, n_distinct));
@@ -236,7 +236,7 @@ mod sp_repartition_fuzz_tests {
                 .collect::<Vec<_>>();
 
             // Returns concatenated version of the all available orderings:
-            let Some(exprs) = eq_properties.oeq_class().output_ordering() else {
+            let Some(exprs) = eq_properties.output_ordering() else {
                 // We always should have an ordering due to the way we generate the schema:
                 unreachable!("No ordering found in eq_properties: {:?}", eq_properties);
             };
@@ -258,10 +258,11 @@ mod sp_repartition_fuzz_tests {
             // Contains the merged result.
             let res = concat_batches(&res[0].schema(), &res)?;
 
-            for ordering in eq_properties.oeq_class().iter() {
+            for ordering in eq_properties.orderings().iter() {
                 let err_msg = format!("error in eq properties: {eq_properties:?}");
                 let sort_columns = ordering
                     .iter()
+                    .flat_map(|step| step.to_sort_exprs())
                     .map(|sort_expr| sort_expr.evaluate_to_sort_column(&res))
                     .collect::<Result<Vec<_>>>()?;
                 let orig_columns = sort_columns

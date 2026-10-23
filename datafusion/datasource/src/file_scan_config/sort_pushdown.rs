@@ -202,7 +202,7 @@ impl FileScanConfig {
                     false
                 } else {
                     let new_eq_props = new_config.eq_properties();
-                    new_eq_props.ordering_satisfy(order.iter().cloned())?
+                    new_eq_props.ordering_satisfy(order.iter().cloned())
                 }
             }
         };
@@ -285,7 +285,7 @@ impl FileScanConfig {
             // Re-ask the FileSource if this ordering satisfies the request,
             // using eq_properties computed from the NEW (sorted) file groups.
             let new_eq_props = new_config.eq_properties();
-            if new_eq_props.ordering_satisfy(order.iter().cloned())? {
+            if new_eq_props.ordering_satisfy(order.iter().cloned()) {
                 // The sorted file order makes the ordering valid → Exact!
                 return Ok(SortOrderPushdownResult::Exact {
                     inner: Arc::new(new_config),

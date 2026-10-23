@@ -179,7 +179,7 @@ pub fn plan_with_order_breaking_variants(
             return plan_with_order_breaking_variants(node);
         } else if let Some(required_ordering) = required_ordering {
             let eqp = node.plan.equivalence_properties();
-            if eqp.ordering_satisfy_requirement(required_ordering.into_single())? {
+            if eqp.ordering_satisfy(required_ordering.into_single()) {
                 return Ok(node);
             }
         }
@@ -274,7 +274,7 @@ pub fn replace_with_order_preserving_variants(
     // If the alternate plan makes this sort unnecessary, accept the alternate:
     if let Some(ordering) = requirements.plan.output_ordering() {
         let eqp = alternate_plan.plan.equivalence_properties();
-        if !eqp.ordering_satisfy(ordering.clone())? {
+        if !eqp.ordering_satisfy(ordering.clone()) {
             // The alternate plan does not help, use faster order-breaking variants:
             alternate_plan = plan_with_order_breaking_variants(alternate_plan)?;
             alternate_plan.data = false;

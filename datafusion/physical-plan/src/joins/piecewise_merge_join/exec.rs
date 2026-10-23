@@ -15,6 +15,7 @@
 // specific language governing permissions and limitations
 // under the License.
 
+use crate::joins::utils::ordered_side;
 use arrow::array::Array;
 use arrow::{
     array::{ArrayRef, RecordBatch},
@@ -29,7 +30,7 @@ use datafusion_execution::{
     memory_pool::{MemoryConsumer, MemoryPool, MemoryReservation},
 };
 use datafusion_expr::{JoinType, Operator};
-use datafusion_physical_expr::equivalence::join_equivalence_properties;
+use datafusion_physical_expr::EquivalenceProperties;
 use datafusion_physical_expr::{
     Distribution, LexOrdering, OrderingRequirements, PhysicalExpr, PhysicalExprRef,
     PhysicalSortExpr,
@@ -442,19 +443,19 @@ impl PiecewiseMergeJoinExec {
         schema: SchemaRef,
         join_type: JoinType,
     ) -> Result<PlanProperties> {
-        let eq_properties = join_equivalence_properties(
-            buffered.equivalence_properties().clone(),
-            streamed.equivalence_properties().clone(),
+        let eq_properties = EquivalenceProperties::join(
+            buffered.equivalence_properties(),
+            streamed.equivalence_properties(),
             &join_type,
             schema,
-            &Self::maintains_input_order(join_type),
-            Some(Self::probe_side(&join_type)),
             // `PiecewiseMergeJoin`'s `on` is a range predicate (e.g. `l < r`),
             // not an equijoin key. Passing it here would register a false
             // `left == right` output equivalence, letting the optimizer drop a
             // required sort and return wrongly ordered results. Range joins add
             // no column equivalences, so pass none.
             &[],
+            ordered_side(&Self::maintains_input_order(join_type)),
+            Some(Self::probe_side(&join_type)),
         )?;
 
         let output_partitioning =

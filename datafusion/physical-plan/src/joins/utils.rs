@@ -1351,6 +1351,16 @@ impl<T: 'static> OnceFut<T> {
 /// For example in right joins, we have to use a bit map to track matched
 /// right side rows, and later enter a `EmitRightUnmatched` stage to emit
 /// unmatched right rows.
+/// The side whose input order a join keeps, from its `maintains_input_order`
+/// (`[left, right]`); a join never keeps both.
+pub(crate) fn ordered_side(maintains_input_order: &[bool]) -> Option<JoinSide> {
+    match maintains_input_order {
+        [true, false] => Some(JoinSide::Left),
+        [false, true] => Some(JoinSide::Right),
+        _ => None,
+    }
+}
+
 pub(crate) fn need_produce_right_in_final(join_type: JoinType) -> bool {
     matches!(
         join_type,
