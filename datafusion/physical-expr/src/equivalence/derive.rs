@@ -314,7 +314,7 @@ impl EquivalenceProperties {
                 Step::Group(_) => {
                     let normal = step.try_map(|e| Some(eq.normalize(Arc::clone(e))));
                     normal
-                        .is_some_and(|n| walk.match_step(&n))
+                        .is_some_and(|n| walk.match_step(&n, true))
                         .then(|| step.clone())
                 }
             };

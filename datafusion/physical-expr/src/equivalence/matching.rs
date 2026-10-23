@@ -22,7 +22,9 @@
 use std::sync::Arc;
 
 use super::equalities::Equalities;
-use super::properties::{EquivalenceProperties, NormalFacts, fixed_by, without_fixed};
+use super::properties::{
+    EquivalenceProperties, NormalFacts, fixed_by, is_fixed, without_fixed,
+};
 use crate::expressions::{Column, Literal};
 use crate::{LexOrdering, PhysicalExpr, PhysicalSortExpr};
 
@@ -128,24 +130,14 @@ impl EquivalenceProperties {
             return normal.len();
         }
         let mut walk = Walk::new(self);
-        let Some((last, steps)) = normal.split_last() else {
-            return 0;
-        };
-        for (i, step) in steps.iter().enumerate() {
-            if !walk.match_step(step) {
+        for (i, step) in normal.iter().enumerate() {
+            // Nothing follows the last step, so it is checked without pinning.
+            let pin = i + 1 < normal.len();
+            if !walk.match_step(step, pin) {
                 return i;
             }
         }
-        // Nothing follows the last step, so it is checked without pinning.
-        let last_holds = match last {
-            Step::Sort(members) => members.iter().all(|m| walk.holds(m)),
-            Step::Group(_) => walk.match_step(last),
-        };
-        if last_holds {
-            normal.len()
-        } else {
-            steps.len()
-        }
+        normal.len()
     }
 
     /// A PRIMARY KEY or UNIQUE whose columns all sit in one stored ordering
@@ -231,12 +223,9 @@ pub(super) struct Walk<'a> {
     /// pins it was found with; pins only grow, so it keeps holding.
     derived: Vec<Ordering>,
     /// For each ordering (`base`, then `derived`), the index of its first
-    /// step that pins and constants do not fix. Pins only grow, so a cursor
-    /// only moves forward.
+    /// step that pins and constants do not fix: its head (see
+    /// [`Self::heads`]). Pins only grow, so a cursor only moves forward.
     cursors: Vec<usize>,
-    /// The step at each cursor, without its determined parts; orderings
-    /// whose steps are all fixed have none.
-    heads: Vec<Step>,
 }
 
 impl<'a> Walk<'a> {
@@ -270,7 +259,6 @@ impl<'a> Walk<'a> {
             members,
             derived: vec![],
             cursors: vec![0; base.len()],
-            heads: vec![],
         };
         walk.advance();
         walk
@@ -301,14 +289,21 @@ impl<'a> Walk<'a> {
 
     /// `step` without its determined parts (see [`without_fixed`]).
     fn undetermined(&self, step: &Step) -> Option<Step> {
-        without_fixed(step, |e| self.is_determined(e))
+        without_fixed(step.clone(), |e| self.is_determined(e))
+    }
+
+    /// The step at each cursor. A head `Sort` step has no determined member
+    /// (else the cursor would have moved past it); a head `Group` step may
+    /// have some, which readers leave out. Orderings whose steps are all
+    /// fixed have none.
+    fn heads(&self) -> impl Iterator<Item = &Step> + Clone {
+        (0..self.cursors.len()).filter_map(|i| self.ordering(i).get(self.cursors[i]))
     }
 
     /// Brings the walk up to date with the pins: moves each cursor past the
     /// steps that are now fixed, runs OD reduce on the orderings whose head
-    /// may be a function of the steps after it, and refreshes the heads.
-    /// Each cursor moves forward only, so a walk over `n` steps costs `O(n)`
-    /// cursor moves in total, plus one head per ordering per pin.
+    /// may be a function of the steps after it. Each cursor moves forward
+    /// only, so a walk over `n` steps costs `O(n)` cursor moves in total.
     fn advance(&mut self) {
         loop {
             self.cursors.resize(self.base.len() + self.derived.len(), 0);
@@ -316,7 +311,7 @@ impl<'a> Walk<'a> {
                 let ordering = self.ordering(i);
                 let mut cursor = self.cursors[i];
                 while cursor < ordering.len()
-                    && self.undetermined(&ordering[cursor]).is_none()
+                    && is_fixed(&ordering[cursor], |e| self.is_determined(e))
                 {
                     cursor += 1;
                 }
@@ -348,13 +343,6 @@ impl<'a> Walk<'a> {
             }
             self.derived.extend(derived);
         }
-        self.heads = (0..self.cursors.len())
-            .filter_map(|i| {
-                let ordering = self.ordering(i);
-                let step = ordering.get(self.cursors[i])?;
-                self.undetermined(step)
-            })
-            .collect();
     }
 
     /// How `expr` is ordered among the rows that tie on the pinned
@@ -391,27 +379,29 @@ impl<'a> Walk<'a> {
         let normal = self.eq().normalize(Arc::clone(expr));
         if self.is_determined(&normal) {
             props.sort_properties = SortProperties::Singleton;
-        } else if let Some(order) = head_order(&self.heads, &normal) {
+        } else if let Some(order) = head_order(self.heads(), &normal) {
             props.sort_properties = order;
         }
         Ok(props)
     }
 
-    /// Matches one requirement step (in normal form) and pins it on
-    /// success. A `Sort` step holds if every member is ordered with
+    /// Matches one requirement step (in normal form) and, if `pin`, pins it
+    /// on success. A `Sort` step holds if every member is ordered with
     /// compatible options, or determined.
-    pub(super) fn match_step(&mut self, step: &Step) -> bool {
+    pub(super) fn match_step(&mut self, step: &Step, pin: bool) -> bool {
         match step {
             Step::Sort(members) => {
                 if !members.iter().all(|m| self.holds(m)) {
                     return false;
                 }
-                for m in members {
-                    self.pin_satisfied(Arc::clone(&m.expr));
+                if pin {
+                    for m in members {
+                        self.pin_satisfied(Arc::clone(&m.expr));
+                    }
                 }
                 true
             }
-            Step::Group(exprs) => self.match_group(exprs),
+            Step::Group(exprs) => self.match_group(exprs, pin),
         }
     }
 
@@ -430,8 +420,13 @@ impl<'a> Walk<'a> {
     /// round takes an expression that is ordered (either direction) or
     /// determined now, or else a provided `Group` head that lies inside what
     /// is left. A larger provided group is not enough: grouped on
-    /// `{p1, p2}` does not mean grouped on `{p1}`.
-    fn match_group(&mut self, exprs: &IndexSet<Arc<dyn PhysicalExpr>>) -> bool {
+    /// `{p1, p2}` does not mean grouped on `{p1}`. The last round is
+    /// pinned only if `pin`: earlier rounds need their pins.
+    fn match_group(
+        &mut self,
+        exprs: &IndexSet<Arc<dyn PhysicalExpr>>,
+        pin: bool,
+    ) -> bool {
         let mut left: Vec<_> = exprs.iter().cloned().collect();
         while !left.is_empty() {
             let ordered = left.iter().position(|e| {
@@ -439,16 +434,23 @@ impl<'a> Walk<'a> {
             });
             if let Some(i) = ordered {
                 let expr = left.remove(i);
-                self.pin_satisfied(expr);
+                if pin || !left.is_empty() {
+                    self.pin_satisfied(expr);
+                }
                 continue;
             }
-            let fits = self.heads.iter().find_map(|head| match head {
-                Step::Group(g) if g.iter().all(|e| left.contains(e)) => Some(g.clone()),
-                _ => None,
+            let fits = self.heads().find_map(|head| {
+                let Step::Group(g) = head else { return None };
+                let g: Vec<_> = g.iter().filter(|e| !self.is_determined(e)).collect();
+                g.iter()
+                    .all(|e| left.contains(e))
+                    .then(|| g.into_iter().cloned().collect::<IndexSet<_>>())
             });
             let Some(group) = fits else { return false };
             left.retain(|e| !group.contains(e));
-            group.into_iter().for_each(|e| self.pin(e));
+            if pin || !left.is_empty() {
+                group.into_iter().for_each(|e| self.pin(e));
+            }
         }
         true
     }
@@ -495,20 +497,26 @@ impl<'a> Walk<'a> {
 /// the first head it leads. Leading in both a direction and its full
 /// reverse (`ASC NULLS LAST` and `DESC NULLS FIRST`) means one value among
 /// the ties (F11).
-fn head_order(heads: &[Step], expr: &Arc<dyn PhysicalExpr>) -> Option<SortProperties> {
-    let options: Vec<SortOptions> = heads
-        .iter()
+fn head_order<'a>(
+    heads: impl Iterator<Item = &'a Step> + Clone,
+    expr: &Arc<dyn PhysicalExpr>,
+) -> Option<SortProperties> {
+    let options = heads
         .filter_map(|h| match h {
             Step::Sort(members) => members.iter().find(|m| m.expr.eq(expr)),
             Step::Group(_) => None,
         })
-        .map(|m| m.options)
-        .collect();
-    let reverse = |o: &SortOptions| SortOptions::new(!o.descending, !o.nulls_first);
-    if options.iter().any(|o| options.contains(&reverse(o))) {
+        .map(|m| m.options);
+    let mut rest = options.clone();
+    let first = rest.next()?;
+    let reverse = |o: SortOptions| SortOptions::new(!o.descending, !o.nulls_first);
+    // A pair needs a second head; most expressions lead at most one.
+    if rest.next().is_some()
+        && (options.clone()).any(|o| options.clone().any(|p| p == reverse(o)))
+    {
         return Some(SortProperties::Singleton);
     }
-    options.first().map(|o| SortProperties::Ordered(*o))
+    Some(SortProperties::Ordered(first))
 }
 
 /// OD reduce (#9812): `[c, x1..xk, ..]` also orders by `[x1..xk, ..]` if `c`
