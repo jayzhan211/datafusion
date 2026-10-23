@@ -59,9 +59,7 @@ pub mod execution_props {
 pub use aggregate::groups_accumulator::{GroupsAccumulatorAdapter, NullState};
 pub use analysis::{AnalysisContext, ExprBoundaries, analyze};
 pub use datafusion_common::SplitPoint;
-pub use equivalence::{
-    AcrossPartitions, ConstExpr, EquivalenceProperties, calculate_union,
-};
+pub use equivalence::{EquivalenceProperties, Ordering, Step};
 pub use expressions::{DynamicFilterTracker, DynamicFilterTracking};
 pub use partitioning::{
     Distribution, Partitioning, PartitioningSatisfaction, RangePartitioning,
@@ -75,8 +73,7 @@ pub use physical_expr::{
 
 pub use datafusion_physical_expr_common::physical_expr::{PhysicalExpr, PhysicalExprRef};
 pub use datafusion_physical_expr_common::sort_expr::{
-    LexOrdering, LexRequirement, OrderingRequirements, PhysicalSortExpr,
-    PhysicalSortRequirement,
+    LexOrdering, OrderingRequirements, PhysicalSortExpr,
 };
 
 pub use higher_order_function::HigherOrderFunctionExpr;

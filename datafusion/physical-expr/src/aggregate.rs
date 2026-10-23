@@ -222,7 +222,6 @@ impl AggregateExprBuilder {
     /// # use datafusion_physical_expr_common::physical_expr::PhysicalExpr;
     /// # use datafusion_physical_expr::aggregate::AggregateExprBuilder;
     /// # use datafusion_physical_expr::expressions::PhysicalSortExpr;
-    /// # use datafusion_physical_expr::PhysicalSortRequirement;
     /// #
     /// fn build_aggregate_expr() -> Result<()> {
     ///     let args = vec![Arc::new(Column::new("a", 0)) as Arc<dyn PhysicalExpr>];
