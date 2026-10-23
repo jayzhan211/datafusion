@@ -373,7 +373,8 @@ impl RangePartitioning {
             .map(|sort_expr| Arc::clone(&sort_expr.expr))
             .collect::<Vec<_>>();
         let projected_exprs = input_eq_properties
-            .project_expressions(&exprs, mapping)
+            .equalities()
+            .project_expressions(mapping, &exprs)
             .collect::<Option<Vec<_>>>()?;
         let sort_exprs = self
             .ordering
@@ -514,7 +515,7 @@ fn equivalent_exprs(
         return true;
     }
 
-    let eq_groups = eq_properties.eq_group();
+    let eq_groups = eq_properties.equalities();
     if eq_groups.is_empty() {
         return false;
     }
@@ -529,10 +530,10 @@ fn normalize_exprs(
     exprs: &[Arc<dyn PhysicalExpr>],
     eq_properties: &EquivalenceProperties,
 ) -> Vec<Arc<dyn PhysicalExpr>> {
-    let eq_groups = eq_properties.eq_group();
+    let eq_groups = eq_properties.equalities();
     exprs
         .iter()
-        .map(|expr| eq_groups.normalize_expr(Arc::clone(expr)))
+        .map(|expr| eq_groups.normalize(Arc::clone(expr)))
         .collect()
 }
 
@@ -695,7 +696,7 @@ fn range_transform_proves_key_locality(
 
     let mut range_argument_count = 0;
     for argument in function.args() {
-        if eq_properties.eq_group().exprs_equal(argument, range_key) {
+        if eq_properties.equalities().are_equal(argument, range_key) {
             range_argument_count += 1;
         } else if !argument.is::<Literal>() {
             return false;
@@ -889,7 +890,7 @@ impl Partitioning {
             return PartitioningSatisfaction::Exact;
         }
 
-        let eq_groups = eq_properties.eq_group();
+        let eq_groups = eq_properties.equalities();
         if !eq_groups.is_empty() {
             if allow_subset {
                 let normalized_partition_exprs =
@@ -921,7 +922,8 @@ impl Partitioning {
         match self {
             Partitioning::Hash(exprs, part) => {
                 let normalized_exprs = input_eq_properties
-                    .project_expressions(exprs, mapping)
+                    .equalities()
+                    .project_expressions(mapping, exprs)
                     .zip(exprs)
                     .map(|(proj_expr, expr)| {
                         proj_expr.unwrap_or_else(|| {
@@ -2523,7 +2525,7 @@ mod tests {
         );
 
         let mut eq_properties = fixture.eq_properties.clone();
-        eq_properties.add_equal_conditions(fixture.col(0), fixture.col(2))?;
+        eq_properties.add_equal(fixture.col(0), fixture.col(2));
         assert_satisfaction(
             "equivalent subset key",
             &range_a,
@@ -2534,7 +2536,7 @@ mod tests {
         );
 
         let mut eq_properties = fixture.eq_properties.clone();
-        eq_properties.add_equal_conditions(fixture.col(0), fixture.col(1))?;
+        eq_properties.add_equal(fixture.col(0), fixture.col(1));
         assert_satisfaction(
             "equivalent exact key",
             &range_a,
@@ -2713,8 +2715,8 @@ mod ordering_proto_tests {
     use datafusion_physical_expr_common::physical_expr::proto_decode::PhysicalExprDecodeCtx;
     use datafusion_physical_expr_common::physical_expr::proto_encode::PhysicalExprEncodeCtx;
     use datafusion_physical_expr_common::sort_expr::{
-        LexRequirement, PhysicalSortExpr, PhysicalSortRequirement,
-        sort_exprs_try_from_proto, sort_exprs_try_to_proto,
+        Ordering, PhysicalSortExpr, Step, sort_exprs_try_from_proto,
+        sort_exprs_try_to_proto,
     };
 
     use crate::expressions::Column;
@@ -2764,21 +2766,16 @@ mod ordering_proto_tests {
     fn sort_exprs_accepts_owned_requirements() {
         let encoder = StubEncoder::ok();
         let encode_ctx = PhysicalExprEncodeCtx::new(&encoder);
-        let requirement = LexRequirement::from([PhysicalSortRequirement::new(
+        let requirement = Ordering::from([Step::sort(
             Arc::new(Column::new("a", 0)),
-            Some(SortOptions {
+            SortOptions {
                 descending: true,
                 nulls_first: true,
-            }),
+            },
         )]);
 
-        let nodes = sort_exprs_try_to_proto(
-            requirement
-                .iter()
-                .map(|req| PhysicalSortExpr::from(req.clone())),
-            &encode_ctx,
-        )
-        .unwrap();
+        let nodes =
+            sort_exprs_try_to_proto(requirement.to_sort().unwrap(), &encode_ctx).unwrap();
 
         assert_eq!(nodes.len(), 1);
         assert!(!nodes[0].asc);

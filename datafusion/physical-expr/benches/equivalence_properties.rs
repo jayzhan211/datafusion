@@ -41,8 +41,7 @@ use arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 use criterion::{BatchSize, BenchmarkId, Criterion, criterion_group, criterion_main};
 use datafusion_physical_expr::expressions::Column;
 use datafusion_physical_expr::{
-    EquivalenceProperties, LexOrdering, PhysicalExpr, PhysicalSortExpr,
-    PhysicalSortRequirement,
+    EquivalenceProperties, LexOrdering, Ordering, PhysicalExpr, PhysicalSortExpr, Step,
 };
 
 fn schema(n_cols: usize) -> SchemaRef {
@@ -74,9 +73,7 @@ fn properties(n_classes: usize) -> EquivalenceProperties {
         vec![asc(6)],
     ]);
     for i in 0..n_classes {
-        props
-            .add_equal_conditions(col(8 + 2 * i), col(9 + 2 * i))
-            .unwrap();
+        props.add_equal(col(8 + 2 * i), col(9 + 2 * i));
     }
     props
 }
@@ -90,10 +87,8 @@ fn bench_ordering_satisfaction(c: &mut Criterion) {
     let one_key_unsatisfied = vec![asc(7)];
     let four_keys = (0..4).map(asc).collect::<Vec<_>>();
     let four_key_ordering = LexOrdering::new(four_keys.clone()).unwrap();
-    let one_req = vec![PhysicalSortRequirement::new(col(0), None)];
-    let four_reqs = (0..4)
-        .map(|i| PhysicalSortRequirement::new(col(i), None))
-        .collect::<Vec<_>>();
+    let one_req = Ordering::new([Step::group([col(0)])]);
+    let four_reqs = Ordering::new((0..4).map(|i| Step::group([col(i)])));
 
     for n_classes in [2, 8, 32] {
         let props = properties(n_classes);
@@ -104,7 +99,7 @@ fn bench_ordering_satisfaction(c: &mut Criterion) {
             |b| {
                 b.iter_batched(
                     || one_key.clone(),
-                    |keys| props.ordering_satisfy(keys).unwrap(),
+                    |keys| props.ordering_satisfy(keys),
                     BatchSize::SmallInput,
                 )
             },
@@ -114,7 +109,7 @@ fn bench_ordering_satisfaction(c: &mut Criterion) {
             |b| {
                 b.iter_batched(
                     || one_key_unsatisfied.clone(),
-                    |keys| props.ordering_satisfy(keys).unwrap(),
+                    |keys| props.ordering_satisfy(keys),
                     BatchSize::SmallInput,
                 )
             },
@@ -125,7 +120,7 @@ fn bench_ordering_satisfaction(c: &mut Criterion) {
             |b| {
                 b.iter_batched(
                     || four_keys.clone(),
-                    |keys| props.ordering_satisfy(keys).unwrap(),
+                    |keys| props.ordering_satisfy(keys),
                     BatchSize::SmallInput,
                 )
             },
@@ -135,7 +130,7 @@ fn bench_ordering_satisfaction(c: &mut Criterion) {
             |b| {
                 b.iter_batched(
                     || one_req.clone(),
-                    |reqs| props.ordering_satisfy_requirement(reqs).unwrap(),
+                    |reqs| props.ordering_satisfy(reqs),
                     BatchSize::SmallInput,
                 )
             },
@@ -145,7 +140,7 @@ fn bench_ordering_satisfaction(c: &mut Criterion) {
             |b| {
                 b.iter_batched(
                     || four_reqs.clone(),
-                    |reqs| props.ordering_satisfy_requirement(reqs).unwrap(),
+                    |reqs| props.ordering_satisfy(reqs),
                     BatchSize::SmallInput,
                 )
             },
@@ -155,7 +150,7 @@ fn bench_ordering_satisfaction(c: &mut Criterion) {
             |b| {
                 b.iter_batched(
                     || four_key_ordering.clone(),
-                    |ordering| props.extract_common_sort_prefix(ordering).unwrap(),
+                    |ordering| props.extract_common_sort_prefix(ordering),
                     BatchSize::SmallInput,
                 )
             },

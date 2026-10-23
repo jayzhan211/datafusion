@@ -23,9 +23,7 @@ use std::sync::Arc;
 
 use crate::expressions::{BinaryExpr, Column, Literal};
 use crate::tree_node::ExprContext;
-use crate::{
-    AcrossPartitions, ConstExpr, EquivalenceProperties, PhysicalExpr, PhysicalSortExpr,
-};
+use crate::{EquivalenceProperties, PhysicalExpr, PhysicalSortExpr};
 
 use arrow::datatypes::Schema;
 use datafusion_common::tree_node::{
@@ -46,62 +44,43 @@ pub fn split_conjunction(
     split_impl(Operator::And, predicate, vec![])
 }
 
-impl ConstExpr {
-    /// Collects predicate-derived constants from equality conjunctions.
-    ///
-    /// For each equality predicate of the form `lhs = rhs`, if either side is
-    /// already known constant according to `input_eqs`, or is a literal, then
-    /// the other side is also constant and will be returned as a [`ConstExpr`].
-    ///
-    /// Literals are treated as uniform constants across partitions, so
-    /// `col = literal` produces a constant for `col` with the literal value.
-    ///
-    /// For example, given predicate `a = 5 AND b = c` where `c` is already
-    /// known constant, this returns constants for both `a` (Uniform with value
-    /// 5) and `b` (propagating `c`'s across-partitions value).
-    pub fn collect_predicate_constants(
-        input_eqs: &EquivalenceProperties,
+impl EquivalenceProperties {
+    /// Records the constants that the equality conjuncts of `predicate`
+    /// imply. In `lhs = rhs`, if one side is a literal or a constant of
+    /// `input`, the other side is constant too, in the same scope: `a = 5`
+    /// makes `a` the all-partition constant 5, and `b = c` with `c` constant
+    /// in each partition makes `b` constant in each partition.
+    pub fn add_predicate_constants(
+        &mut self,
+        input: &EquivalenceProperties,
         predicate: &Arc<dyn PhysicalExpr>,
-    ) -> Vec<ConstExpr> {
-        /// Returns the `AcrossPartitions` value for `expr` if it is constant:
-        /// either already known constant in `input_eqs`, or a `Literal`
-        /// (which is inherently constant across all partitions).
-        fn expr_constant_or_literal(
-            expr: &Arc<dyn PhysicalExpr>,
-            input_eqs: &EquivalenceProperties,
-        ) -> Option<AcrossPartitions> {
-            input_eqs.is_expr_constant(expr).or_else(|| {
-                expr.downcast_ref::<Literal>()
-                    .map(|l| AcrossPartitions::Uniform(Some(l.value().clone())))
-            })
-        }
-
-        let mut constants = Vec::new();
+    ) {
+        let is_known =
+            |e: &Arc<dyn PhysicalExpr>| e.is::<Literal>() || input.is_constant(e);
         for conjunction in split_conjunction(predicate) {
-            if let Some(binary) = conjunction.downcast_ref::<BinaryExpr>()
-                && binary.op() == &Operator::Eq
-            {
-                // Check if either side is constant — either already known
-                // constant from the input equivalence properties, or a literal
-                // value (which is inherently constant across all partitions).
-                let left_const = expr_constant_or_literal(binary.left(), input_eqs);
-                let right_const = expr_constant_or_literal(binary.right(), input_eqs);
-
-                if let Some(left_across) = left_const {
-                    // LEFT is constant, so RIGHT must also be constant.
-                    // Use RIGHT's known across value if available, otherwise
-                    // propagate LEFT's (e.g. Uniform from a literal).
-                    let across = right_const.unwrap_or(left_across);
-                    constants.push(ConstExpr::new(Arc::clone(binary.right()), across));
-                } else if let Some(right_across) = right_const {
-                    // RIGHT is constant, so LEFT must also be constant.
-                    constants
-                        .push(ConstExpr::new(Arc::clone(binary.left()), right_across));
-                }
+            let Some(binary) = conjunction.downcast_ref::<BinaryExpr>() else {
+                continue;
+            };
+            if binary.op() != &Operator::Eq {
+                continue;
+            }
+            let (left, right) = (binary.left(), binary.right());
+            let (known, other) = if is_known(left) {
+                (left, right)
+            } else if is_known(right) {
+                (right, left)
+            } else {
+                continue;
+            };
+            if is_known(other) {
+                // Already constant: it keeps its own scope.
+                continue;
+            }
+            match input.global_constant(known) {
+                Some(value) => self.add_constant(Arc::clone(other), value),
+                None => self.add_local_constant(Arc::clone(other)),
             }
         }
-
-        constants
     }
 }
 
@@ -619,27 +598,26 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn test_collect_predicate_constants_propagates_uniform_literal_value() -> Result<()> {
+    fn test_predicate_constants_propagate_uniform_literal_value() -> Result<()> {
         let schema = Arc::new(Schema::new(vec![Field::new(
             "ticker",
             DataType::Utf8,
             false,
         )]));
+        let ticker = col("ticker", schema.as_ref())?;
         let predicate = binary(
-            col("ticker", schema.as_ref())?,
+            Arc::clone(&ticker),
             Operator::Eq,
             lit(ScalarValue::Utf8(Some("NGJ26".to_string()))),
             schema.as_ref(),
         )?;
-        let eq_properties = EquivalenceProperties::new(schema);
+        let input = EquivalenceProperties::new(schema);
+        let mut eq_properties = input.clone();
+        eq_properties.add_predicate_constants(&input, &predicate);
 
-        let constants =
-            ConstExpr::collect_predicate_constants(&eq_properties, &predicate);
-
-        assert_eq!(constants.len(), 1);
         assert_eq!(
-            constants[0].across_partitions,
-            AcrossPartitions::Uniform(Some(ScalarValue::Utf8(Some("NGJ26".to_string()))))
+            eq_properties.global_constant(&ticker),
+            Some(Some(ScalarValue::Utf8(Some("NGJ26".to_string()))))
         );
 
         Ok(())

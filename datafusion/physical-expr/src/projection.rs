@@ -1517,6 +1517,7 @@ pub(crate) mod tests {
     use std::collections::HashMap;
 
     use super::*;
+    use crate::equivalence::tests::assert_orderings_equivalent;
     use crate::equivalence::{EquivalenceProperties, convert_to_orderings};
     use crate::expressions::{BinaryExpr, CastExpr, col};
     use crate::utils::tests::TestScalarUDF;
@@ -2001,16 +2002,13 @@ pub(crate) mod tests {
             let expected = convert_to_orderings(&expected);
 
             let projected_eq = eq_properties.project(&projection_mapping, output_schema);
-            let orderings = projected_eq.oeq_class();
+            let orderings = projected_eq.orderings();
 
             let err_msg = format!(
                 "test_idx: {idx:?}, actual: {orderings:?}, expected: {expected:?}, projection_mapping: {projection_mapping:?}"
             );
 
-            assert_eq!(orderings.len(), expected.len(), "{err_msg}");
-            for expected_ordering in &expected {
-                assert!(orderings.contains(expected_ordering), "{}", err_msg)
-            }
+            assert_orderings_equivalent(&projected_eq, &expected, &err_msg);
         }
 
         Ok(())
@@ -2188,16 +2186,13 @@ pub(crate) mod tests {
 
             let projected_eq =
                 eq_properties.project(&projection_mapping, Arc::clone(&output_schema));
-            let orderings = projected_eq.oeq_class();
+            let orderings = projected_eq.orderings();
 
             let err_msg = format!(
                 "test idx: {idx:?}, actual: {orderings:?}, expected: {expected:?}, projection_mapping: {projection_mapping:?}"
             );
 
-            assert_eq!(orderings.len(), expected.len(), "{err_msg}");
-            for expected_ordering in &expected {
-                assert!(orderings.contains(expected_ordering), "{}", err_msg)
-            }
+            assert_orderings_equivalent(&projected_eq, &expected, &err_msg);
         }
         Ok(())
     }
@@ -2305,7 +2300,7 @@ pub(crate) mod tests {
         for (orderings, equal_columns, expected) in test_cases {
             let mut eq_properties = EquivalenceProperties::new(Arc::clone(&schema));
             for (lhs, rhs) in equal_columns {
-                eq_properties.add_equal_conditions(Arc::clone(lhs), Arc::clone(rhs))?;
+                eq_properties.add_equal(Arc::clone(lhs), Arc::clone(rhs));
             }
 
             let orderings = convert_to_orderings(&orderings);
@@ -2315,16 +2310,13 @@ pub(crate) mod tests {
 
             let projected_eq =
                 eq_properties.project(&projection_mapping, Arc::clone(&output_schema));
-            let orderings = projected_eq.oeq_class();
+            let orderings = projected_eq.orderings();
 
             let err_msg = format!(
                 "actual: {orderings:?}, expected: {expected:?}, projection_mapping: {projection_mapping:?}"
             );
 
-            assert_eq!(orderings.len(), expected.len(), "{err_msg}");
-            for expected_ordering in &expected {
-                assert!(orderings.contains(expected_ordering), "{}", err_msg)
-            }
+            assert_orderings_equivalent(&projected_eq, &expected, &err_msg);
         }
 
         Ok(())

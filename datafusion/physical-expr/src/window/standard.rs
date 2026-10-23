@@ -321,7 +321,7 @@ pub(crate) fn add_new_ordering_expr_with_partition_by(
         // expressions and existing ordering expressions are equal (w.r.t.
         // set equality), we can prefix the ordering of `self.expr` with
         // the existing ordering.
-        let (mut ordering, _) = eqp.find_longest_permutation(partition_by)?;
+        let (mut ordering, _) = eqp.longest_permutation(partition_by);
         if ordering.len() == partition_by.len() {
             ordering.push(expr);
             eqp.add_ordering(ordering);
