@@ -2332,9 +2332,10 @@ fn test_constants_share_values() -> Result<()> {
     Ok(())
 }
 
-/// X4, as on main (class.rs `add_constant` at 61c34724fc): a new constant
-/// that is in no class and not yet a constant becomes equal to the first
-/// all-partition constant with the same value, an unknown value included.
+/// As in the previous implementation (`add_constant` in class.rs): a new
+/// constant that is in no class and not yet a constant becomes equal to the
+/// first all-partition constant with the same value, an unknown value
+/// included.
 /// One that is already a constant (here a per-partition one) is not.
 #[test]
 fn test_same_value_constants_become_equal() -> Result<()> {
@@ -2364,7 +2365,7 @@ fn test_same_value_constants_become_equal() -> Result<()> {
     Ok(())
 }
 
-/// A long ordering asked about all of its steps (review S4: each pin used to
+/// A long ordering asked about all of its steps (each pin used to
 /// rebuild every ordering). Answers must not change: the whole ordering
 /// holds, a requirement with one step out of place holds up to that step,
 /// and the sorted permutation of the reversed columns is all of them.

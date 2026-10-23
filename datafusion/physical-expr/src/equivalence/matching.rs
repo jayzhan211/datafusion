@@ -15,8 +15,8 @@
 // specific language governing permissions and limitations
 // under the License.
 
-//! The ordering questions: Q1 (does a requirement hold?), Q2 (how much of it
-//! holds?) and Q3 (which permutation of some expressions holds?). All three
+//! The ordering questions: does a requirement hold, how much of it
+//! holds, and which permutation of some expressions holds. All three
 //! walk the provided orderings with one [`Walk`].
 
 use std::sync::Arc;
@@ -37,7 +37,7 @@ use datafusion_physical_expr_common::sort_expr::{Ordering, Step, options_compati
 use indexmap::IndexSet;
 
 impl EquivalenceProperties {
-    /// Q1: whether each partition is sorted (or grouped) as `requirement`
+    /// Whether each partition is sorted (or grouped) as `requirement`
     /// asks.
     pub fn ordering_satisfy(
         &self,
@@ -47,7 +47,7 @@ impl EquivalenceProperties {
         normal.is_empty() || self.satisfied_len(&normal) == normal.len()
     }
 
-    /// Q2: the longest prefix of `ordering` that holds, in normal form, and
+    /// The longest prefix of `ordering` that holds, in normal form, and
     /// whether that is all of it.
     pub fn extract_common_sort_prefix(
         &self,
@@ -59,7 +59,7 @@ impl EquivalenceProperties {
         (prefix.collect(), len == normal.len())
     }
 
-    /// Q3: the longest permutation of `exprs` that the data is sorted by,
+    /// The longest permutation of `exprs` that the data is sorted by,
     /// with the index of each chosen expression in `exprs`. Each round takes
     /// every expression that is ordered (or constant) now, in input order,
     /// then pins them; constants come back `ASC NULLS FIRST`. With orderings
@@ -496,7 +496,7 @@ impl<'a> Walk<'a> {
 /// How `expr` is ordered as a member of a head `Sort` step: the options of
 /// the first head it leads. Leading in both a direction and its full
 /// reverse (`ASC NULLS LAST` and `DESC NULLS FIRST`) means one value among
-/// the ties (F11).
+/// the ties.
 fn head_order<'a>(
     heads: impl Iterator<Item = &'a Step> + Clone,
     expr: &Arc<dyn PhysicalExpr>,
