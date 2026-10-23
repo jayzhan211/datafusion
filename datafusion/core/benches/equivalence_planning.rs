@@ -16,8 +16,9 @@
 // under the License.
 
 //! Planning time of shapes that stress equivalence properties: many
-//! declared orderings asked many ordering questions, and deep chains of
-//! aliasing projections. SQL only, so the same file runs against any
+//! declared orderings asked many ordering questions, one long ordering
+//! asked about all of its columns, and deep chains of aliasing
+//! projections. SQL only, so the same file runs against any
 //! version of `EquivalenceProperties`.
 
 use std::hint::black_box;
@@ -72,6 +73,22 @@ fn ordering_queries(n_orderings: usize, len: usize) -> Vec<String> {
         .collect()
 }
 
+/// One table ordered by all of its `len` columns, asked about all of them:
+/// ORDER BY the whole ordering, and GROUP BY it in reverse (the sorted
+/// permutation is found one round per column).
+fn long_ordering_queries(len: usize) -> Vec<String> {
+    let cols: Vec<_> = (0..len).map(|j| format!("c{j}")).collect();
+    let rev: Vec<_> = cols.iter().rev().cloned().collect();
+    vec![
+        format!("SELECT {all} FROM t ORDER BY {all}", all = cols.join(", ")),
+        format!(
+            "SELECT {all}, count(*) FROM t GROUP BY {rev}",
+            all = cols.join(", "),
+            rev = rev.join(", "),
+        ),
+    ]
+}
+
 /// `depth` nested projections that alias every column (and add a cast of the
 /// first), with an ORDER BY on the outermost names.
 fn alias_chain_query(n_cols: usize, depth: usize) -> String {
@@ -120,6 +137,15 @@ fn criterion_benchmark(c: &mut Criterion) {
             BenchmarkId::new("many_orderings", format!("{n_orderings}x{len}")),
             |b| b.iter(|| queries.iter().for_each(|q| physical_plan(&ctx, &rt, q))),
         );
+    }
+
+    for len in [50, 200] {
+        let ctx = SessionContext::new();
+        register_ordered_table(&ctx, 1, len);
+        let queries = long_ordering_queries(len);
+        group.bench_function(BenchmarkId::new("long_ordering", len), |b| {
+            b.iter(|| queries.iter().for_each(|q| physical_plan(&ctx, &rt, q)))
+        });
     }
 
     for (n_cols, depth) in [(16, 8), (64, 16), (200, 8)] {

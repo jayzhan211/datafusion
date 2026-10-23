@@ -707,7 +707,7 @@ fn test_output_req_after_projection() -> Result<()> {
     let csv = create_simple_csv_exec();
     let sort_req: Arc<dyn ExecutionPlan> = Arc::new(OutputRequirementExec::new(
         csv,
-        Some(OrderingRequirements::new(
+        OrderingRequirements::new(
             [
                 Step::sort(Arc::new(Column::new("b", 1)), SortOptions::default()),
                 Step::sort(
@@ -720,7 +720,7 @@ fn test_output_req_after_projection() -> Result<()> {
                 ),
             ]
             .into(),
-        )),
+        ),
         Distribution::KeyPartitioned(vec![
             Arc::new(Column::new("a", 0)),
             Arc::new(Column::new("b", 1)),
@@ -777,7 +777,8 @@ fn test_output_req_after_projection() -> Result<()> {
             ),
         ]
         .into(),
-    );
+    )
+    .unwrap();
     assert_eq!(
         after_optimize
             .downcast_ref::<OutputRequirementExec>()

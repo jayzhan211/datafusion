@@ -608,10 +608,12 @@ fn forces_unbounded_sort<'a>(
         .map(|(expr, options)| PhysicalSortExpr::new(Arc::clone(expr), *options));
     // A repartition of a multi-partition input drops its per-partition
     // constants, so do not rely on them to satisfy the ordering.
-    // The facts after an order-preserving repartition of the input.
     let mut eq_properties = input.equivalence_properties().clone();
     if input.output_partitioning().partition_count() > 1 {
-        eq_properties = eq_properties.merged(input.output_ordering().cloned());
+        // behavior kept: every ordering stays; only the constants go.
+        let orderings = eq_properties.orderings().to_vec();
+        eq_properties = eq_properties.merged(None);
+        eq_properties.add_orderings(orderings);
     }
     Ok(!eq_properties.ordering_satisfy(sort_exprs))
 }

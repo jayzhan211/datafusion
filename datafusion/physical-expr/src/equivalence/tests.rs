@@ -2331,3 +2331,102 @@ fn test_constants_share_values() -> Result<()> {
 
     Ok(())
 }
+
+/// X4, as on main (class.rs `add_constant` at 61c34724fc): a new constant
+/// that is in no class and not yet a constant becomes equal to the first
+/// all-partition constant with the same value, an unknown value included.
+/// One that is already a constant (here a per-partition one) is not.
+#[test]
+fn test_same_value_constants_become_equal() -> Result<()> {
+    let schema = create_test_schema()?;
+    let [a, b, c, d, e] = ["a", "b", "c", "d", "e"].map(|n| col(n, &schema).unwrap());
+    let mut props = EquivalenceProperties::new(Arc::clone(&schema));
+    props.add_constant(Arc::clone(&a), None);
+    props.add_constant(Arc::clone(&b), None);
+    assert!(
+        props.equalities().are_equal(&a, &b),
+        "unknown values: {props}"
+    );
+
+    props.add_constant(Arc::clone(&c), Some(ScalarValue::Int32(Some(1))));
+    props.add_local_constant(Arc::clone(&d));
+    props.add_constant(Arc::clone(&d), Some(ScalarValue::Int32(Some(1))));
+    assert!(
+        !props.equalities().are_equal(&c, &d),
+        "already constant: {props}"
+    );
+
+    props.add_constant(Arc::clone(&e), Some(ScalarValue::Int32(Some(1))));
+    assert!(
+        props.equalities().are_equal(&c, &e),
+        "known values: {props}"
+    );
+    Ok(())
+}
+
+/// A long ordering asked about all of its steps (review S4: each pin used to
+/// rebuild every ordering). Answers must not change: the whole ordering
+/// holds, a requirement with one step out of place holds up to that step,
+/// and the sorted permutation of the reversed columns is all of them.
+#[test]
+fn test_long_ordering_questions() -> Result<()> {
+    let n = 200;
+    let fields: Vec<_> = (0..n)
+        .map(|i| Field::new(format!("c{i}"), DataType::Int32, true))
+        .collect();
+    let schema = Arc::new(Schema::new(fields));
+    let cols: Vec<_> = (0..n)
+        .map(|i| col(&format!("c{i}"), &schema).unwrap())
+        .collect();
+    let sorts: Vec<_> = cols
+        .iter()
+        .map(|c| PhysicalSortExpr::new_default(Arc::clone(c)))
+        .collect();
+    let props =
+        EquivalenceProperties::new_with_orderings(Arc::clone(&schema), [sorts.clone()]);
+    assert!(props.ordering_satisfy(sorts.clone()));
+
+    let mut swapped = sorts.clone();
+    swapped.swap(150, 151);
+    let (prefix, all) =
+        props.extract_common_sort_prefix(LexOrdering::new(swapped).unwrap());
+    assert_eq!((prefix.len(), all), (150, false));
+
+    let reversed: Vec<_> = cols.iter().rev().cloned().collect();
+    let (permutation, indices) = props.longest_permutation(&reversed);
+    assert_eq!(permutation, sorts);
+    assert_eq!(indices, (0..n).rev().collect::<Vec<_>>());
+    Ok(())
+}
+
+/// A union keeps two members in one step only if they are strict images of
+/// each other on every row of both inputs. Two per-partition constants are
+/// not: rows of two partitions can agree on `a` and differ on `x`, so after
+/// a merge on `a`, `x` would not be sorted.
+#[test]
+fn test_union_members_need_all_partition_facts() -> Result<()> {
+    let schema = create_test_schema()?;
+    let [a, x] = ["a", "b"].map(|n| col(n, &schema).unwrap());
+    let sort = |e: &Arc<dyn PhysicalExpr>| PhysicalSortExpr::new_default(Arc::clone(e));
+    let mut lhs = EquivalenceProperties::new(Arc::clone(&schema));
+    lhs.add_ordering([Step::Sort(vec![sort(&a), sort(&x)])]);
+    let mut rhs = EquivalenceProperties::new(Arc::clone(&schema));
+    rhs.add_local_constant(Arc::clone(&a));
+    rhs.add_local_constant(Arc::clone(&x));
+
+    let union = EquivalenceProperties::union(vec![lhs, rhs], Arc::clone(&schema))?;
+    assert!(union.ordering_satisfy([sort(&a)]), "{union}");
+    let together = union
+        .orderings()
+        .iter()
+        .flat_map(|o| o.iter())
+        .any(|s| matches!(s, Step::Sort(m) if m.len() > 1));
+    assert!(!together, "{union}");
+
+    let merged = union.merged(LexOrdering::new([sort(&a)]));
+    assert!(
+        !merged.ordering_satisfy([sort(&a), sort(&x).desc()]),
+        "{merged}"
+    );
+    Ok(())
+}

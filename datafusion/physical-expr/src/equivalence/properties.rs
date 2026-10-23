@@ -23,7 +23,7 @@ use std::sync::{Arc, OnceLock};
 use super::equalities::Equalities;
 use super::matching::derived_orderings;
 use crate::expressions::{Literal, with_new_schema};
-use crate::{LexOrdering, PhysicalExpr};
+use crate::{LexOrdering, PhysicalExpr, PhysicalSortExpr};
 
 use arrow::datatypes::SchemaRef;
 use datafusion_common::{Constraints, HashMap, Result, ScalarValue, plan_err};
@@ -85,6 +85,8 @@ pub struct EquivalenceProperties {
     facts: Facts,
     /// The facts in normal form, computed on the first question and dropped
     /// by [`Self::facts_mut`], so every mutator invalidates it in one place.
+    /// It depends on `schema` too, which only `with_extended_schema`
+    /// changes in place (see there).
     /// It exists for planning time: optimizer rules ask the same node many
     /// questions, and wide schemas make normalizing each time quadratic
     /// (#17261, #13748).
@@ -98,8 +100,14 @@ pub(super) struct Facts {
     /// True in every partition.
     pub(super) global: GlobalFacts,
     /// True inside each partition on its own. Only [`EquivalenceProperties::merged`]
-    /// (everything) and [`EquivalenceProperties::reordered`] (orderings) remove
-    /// local facts, so partition scope is handled in two places.
+    /// (everything) and [`EquivalenceProperties::reordered`] (orderings)
+    /// remove local facts. Which one applies is the operator's call: an
+    /// operator whose output partition reads several input partitions calls
+    /// `merged`, except two kept from before, which keep the input's
+    /// per-partition constants: `SortExec` without `preserve_partitioning`
+    /// (calls `reordered`; UNKNOWN U7) and the collected build side of a
+    /// join (CollectLeft hash join, nested loop and cross join keep the left
+    /// side's constants).
     pub(super) local: LocalFacts,
 }
 
@@ -118,7 +126,8 @@ pub(super) struct LocalFacts {
     pub(super) constants: IndexSet<Arc<dyn PhysicalExpr>>,
     /// Orderings exactly as producers declared them (scan `WITH ORDER`,
     /// sort, merge key, window, aggregate) or as projection, join and union
-    /// translated them. Never one that is a prefix of another.
+    /// translated them. Never empty, and never one that is a prefix of
+    /// another (both kept by [`EquivalenceProperties::add_ordering`]).
     pub(super) orderings: Vec<Ordering>,
 }
 
@@ -152,7 +161,8 @@ impl EquivalenceProperties {
         }
     }
 
-    /// Each partition is sorted by each of `orderings`.
+    /// Each partition is sorted by each of `orderings` (see
+    /// [`Self::add_ordering`] for what a step with several members means).
     pub fn new_with_orderings(
         schema: SchemaRef,
         orderings: impl IntoIterator<Item = impl IntoIterator<Item = impl Into<Step>>>,
@@ -243,16 +253,15 @@ impl EquivalenceProperties {
         if expr.is::<Literal>() {
             return;
         }
-        // behavior kept: two expressions with the same known value are equal (X4).
-        let same_value = value.as_ref().and_then(|v| {
-            let unclassed = self.facts.eq.class_of(&expr).is_none();
-            let mut others = self.facts.global.constants.iter();
-            let other = others.find(|(e, w)| w.as_ref() == Some(v) && !e.eq(&&expr));
-            unclassed
-                .then_some(other)
-                .flatten()
-                .map(|(e, _)| Arc::clone(e))
-        });
+        // behavior kept (X4): a constant that is new (in no class, not yet a
+        // constant) becomes equal to the first all-partition constant with
+        // the same value, two unknown values counting as the same.
+        let is_new = self.facts.eq.class_of(&expr).is_none()
+            && !self.facts.global.constants.contains_key(&expr)
+            && !self.facts.local.constants.contains(&expr);
+        let same_value = (self.facts.global.constants.iter())
+            .find(|(_, other_value)| is_new && **other_value == value)
+            .map(|(other, _)| Arc::clone(other));
         let facts = self.facts_mut();
         if let Some(other) = same_value {
             facts.eq.add(other, Arc::clone(&expr));
@@ -270,6 +279,14 @@ impl EquivalenceProperties {
     }
 
     /// A producer declares that each partition is sorted by `ordering`.
+    /// An empty ordering, or a prefix of a stored one, adds nothing.
+    ///
+    /// A `Sort` step with several members claims that they are strict
+    /// images of each other on every row (equal on one means equal on all),
+    /// not only sorted alike: walks pin them together, and merges keep them
+    /// with the key. Projection builds such steps and checks it; any other
+    /// caller must make sure of it, as it cannot be checked here (the
+    /// members are usually plain output columns).
     pub fn add_ordering(&mut self, ordering: impl IntoIterator<Item = impl Into<Step>>) {
         let ordering = Ordering::new(ordering.into_iter().map(Into::into));
         let orderings = &self.facts.local.orderings;
@@ -293,11 +310,13 @@ impl EquivalenceProperties {
     /// more than one input partition (SortPreservingMerge,
     /// CoalescePartitions, a Repartition). Per-partition facts do not
     /// survive. If the merge keeps an order, `sorted_by` is the only ordering
-    /// left.
+    /// left, with the strict images the input knows for each of its
+    /// expressions (`with_members`).
     ///
     /// Sound over one input partition too, but it loses facts there; such
     /// callers keep their input's facts instead.
     pub fn merged(mut self, sorted_by: Option<LexOrdering>) -> Self {
+        let sorted_by = sorted_by.map(|key| self.with_members(key));
         self.facts_mut().local = LocalFacts::default();
         if let Some(key) = sorted_by {
             self.add_ordering(key);
@@ -305,11 +324,45 @@ impl EquivalenceProperties {
         self
     }
 
+    /// `key` as an ordering whose steps also hold the other members of each
+    /// stored `Sort` step that a key expression is a member of (in normal
+    /// form, with the same options). Members are strict images of each
+    /// other on every row (see [`Step::Sort`]), so data sorted by `key` is
+    /// sorted by them too: after `CAST(a) AS x`, a merge on `a` keeps `x`.
+    fn with_members(&self, key: LexOrdering) -> Ordering {
+        let normal = &self.normal().orderings;
+        let multi: Vec<_> = (normal.iter().flat_map(|o| o.iter()))
+            .filter_map(|step| match step {
+                Step::Sort(members) if members.len() > 1 => Some(members),
+                _ => None,
+            })
+            .collect();
+        if multi.is_empty() {
+            return key.into();
+        }
+        let steps = key.into_iter().map(|sort| {
+            let expr = self.facts.eq.normalize(Arc::clone(&sort.expr));
+            let canonical = PhysicalSortExpr::new(expr, sort.options);
+            let mut members = vec![sort];
+            for step in multi.iter().filter(|m| m.contains(&canonical)) {
+                for member in step.iter() {
+                    if *member != canonical && !members.contains(member) {
+                        members.push(member.clone());
+                    }
+                }
+            }
+            Step::Sort(members)
+        });
+        Ordering::new(steps)
+    }
+
     /// The facts after rows move within each partition: a sort by
     /// `sorted_by`, or (`None`) an operator that emits rows in no particular
     /// order. Orderings are replaced; constants and equalities stay, as rows
     /// keep their values. A sort that the data already satisfies changes
-    /// nothing, so the orderings that implied it stay too (X36).
+    /// nothing, so the orderings that implied it stay too (X36). Assumes
+    /// rows stay in their partition; `SortExec` without
+    /// `preserve_partitioning` calls it anyway (see `Facts::local`).
     pub fn reordered(mut self, sorted_by: Option<LexOrdering>) -> Self {
         match sorted_by {
             Some(key) if self.ordering_satisfy(key.clone()) => {}
@@ -358,6 +411,8 @@ impl EquivalenceProperties {
         &self,
         requirement: impl IntoIterator<Item = impl Into<Step>>,
     ) -> Ordering {
+        // Not `fixed_by`: a function of all-partition constants is constant
+        // only per partition (X6), so it stays too.
         let is_global = |e: &Arc<dyn PhysicalExpr>| {
             e.is::<Literal>()
                 || matches!(self.normal().constants.get(e), Some(Scope::Global(_)))
@@ -365,15 +420,7 @@ impl EquivalenceProperties {
         let steps = requirement.into_iter().map(Into::into);
         let normal = steps.filter_map(|step: Step| {
             let step = step.try_map(|e| Some(self.facts.eq.normalize(Arc::clone(e))))?;
-            match step {
-                Step::Sort(members) if members.iter().any(|m| is_global(&m.expr)) => None,
-                Step::Sort(members) => Some(Step::Sort(members)),
-                Step::Group(exprs) => {
-                    let exprs: IndexSet<_> =
-                        exprs.into_iter().filter(|e| !is_global(e)).collect();
-                    (!exprs.is_empty()).then_some(Step::Group(exprs))
-                }
-            }
+            without_fixed(&step, is_global)
         });
         Ordering::new(normal)
     }
@@ -394,8 +441,17 @@ impl EquivalenceProperties {
     /// The same facts over `schema`, which extends the current schema with
     /// columns appended at the end (window and ranking outputs), so every
     /// column index stays valid.
+    ///
+    /// The normal-form memo is kept: it reads the schema only for the types
+    /// of the columns the facts mention (OD reduce), and those keep their
+    /// index and type. Keeping it saves rebuilding it for every window
+    /// expression.
     pub fn with_extended_schema(mut self, schema: SchemaRef) -> Self {
-        debug_assert!(schema.fields.len() >= self.schema.fields.len());
+        debug_assert!(
+            (self.schema.fields.iter().zip(schema.fields.iter()))
+                .all(|(old, new)| old.data_type() == new.data_type())
+                && schema.fields.len() >= self.schema.fields.len()
+        );
         self.schema = schema;
         self
     }
@@ -466,7 +522,9 @@ impl NormalFacts {
         };
         for ordering in &facts.local.orderings {
             let steps = ordering.iter().filter_map(|s| s.try_map(|e| Some(norm(e))));
-            let steps: Vec<_> = steps.filter_map(|s| normal.unfixed(s)).collect();
+            let constant = |e: &Arc<dyn PhysicalExpr>| normal.is_constant(e);
+            let steps: Vec<_> =
+                steps.filter_map(|s| without_fixed(&s, constant)).collect();
             let ordering = Ordering::new(steps);
             if !ordering.is_empty() && !normal.orderings.contains(&ordering) {
                 normal.orderings.push(ordering);
@@ -480,25 +538,41 @@ impl NormalFacts {
     /// Whether `expr` (in normal form) has one value inside each partition:
     /// a literal, a constant, or a function of such (X6).
     pub(super) fn is_constant(&self, expr: &Arc<dyn PhysicalExpr>) -> bool {
-        if expr.is::<Literal>() || self.constants.contains_key(expr) {
-            return true;
-        }
-        let children = expr.children();
-        !children.is_empty() && children.into_iter().all(|c| self.is_constant(c))
+        fixed_by(expr, &|e| self.constants.contains_key(e))
     }
+}
 
-    /// `step` without what constants fix: `None` for a `Sort` step with a
-    /// constant member (its members are strict images, so all are constant),
-    /// and a `Group` step loses its constant expressions.
-    fn unfixed(&self, step: Step) -> Option<Step> {
-        match step {
-            Step::Sort(m) if m.iter().any(|m| self.is_constant(&m.expr)) => None,
-            Step::Sort(m) => Some(Step::Sort(m)),
-            Step::Group(g) => {
-                let g: IndexSet<_> =
-                    g.into_iter().filter(|e| !self.is_constant(e)).collect();
-                (!g.is_empty()).then_some(Step::Group(g))
-            }
+/// Whether `expr` has one value wherever each expression that `known`
+/// accepts has one: a literal, such an expression, or a function of such.
+/// Constants (with `known` = stored constants) and the expressions a walk
+/// has determined (stored constants and pins) are both this rule.
+pub(super) fn fixed_by(
+    expr: &Arc<dyn PhysicalExpr>,
+    known: &dyn Fn(&Arc<dyn PhysicalExpr>) -> bool,
+) -> bool {
+    if expr.is::<Literal>() || known(expr) {
+        return true;
+    }
+    let children = expr.children();
+    !children.is_empty() && children.into_iter().all(|c| fixed_by(c, known))
+}
+
+/// `step` without what `fixed` fixes: `None` for a `Sort` step with a fixed
+/// member (its members are strict images of each other, so all are fixed),
+/// and a `Group` step without its fixed expressions (`None` if that is all
+/// of them). One rule for requirements (`fixed` = all-partition constants,
+/// V2), stored orderings (any constant) and walks (constants and pins).
+pub(super) fn without_fixed(
+    step: &Step,
+    fixed: impl Fn(&Arc<dyn PhysicalExpr>) -> bool,
+) -> Option<Step> {
+    match step {
+        Step::Sort(members) if members.iter().any(|m| fixed(&m.expr)) => None,
+        Step::Sort(_) => Some(step.clone()),
+        Step::Group(exprs) => {
+            let exprs: IndexSet<_> =
+                exprs.iter().filter(|e| !fixed(e)).cloned().collect();
+            (!exprs.is_empty()).then_some(Step::Group(exprs))
         }
     }
 }

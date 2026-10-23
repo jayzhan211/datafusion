@@ -1345,22 +1345,24 @@ impl<T: 'static> OnceFut<T> {
     }
 }
 
-/// Should we use a bitmap to track each incoming right batch's each row's
-/// 'joined' status.
-///
-/// For example in right joins, we have to use a bit map to track matched
-/// right side rows, and later enter a `EmitRightUnmatched` stage to emit
-/// unmatched right rows.
 /// The side whose input order a join keeps, from its `maintains_input_order`
 /// (`[left, right]`); a join never keeps both.
 pub(crate) fn ordered_side(maintains_input_order: &[bool]) -> Option<JoinSide> {
     match maintains_input_order {
         [true, false] => Some(JoinSide::Left),
         [false, true] => Some(JoinSide::Right),
-        _ => None,
+        [false, false] => None,
+        [true, true] => unreachable!("Cannot maintain ordering of both sides"),
+        _ => unreachable!("Join operators can not have more than two children"),
     }
 }
 
+/// Should we use a bitmap to track each incoming right batch's each row's
+/// 'joined' status.
+///
+/// For example in right joins, we have to use a bit map to track matched
+/// right side rows, and later enter a `EmitRightUnmatched` stage to emit
+/// unmatched right rows.
 pub(crate) fn need_produce_right_in_final(join_type: JoinType) -> bool {
     matches!(
         join_type,
@@ -5859,5 +5861,13 @@ mod tests {
             ),
             Inexact(10)
         );
+    }
+
+    /// A join keeps the order of one side at most, as on main
+    /// (`join_equivalence_properties`).
+    #[test]
+    #[should_panic(expected = "Cannot maintain ordering of both sides")]
+    fn ordered_side_rejects_both_sides() {
+        ordered_side(&[true, true]);
     }
 }

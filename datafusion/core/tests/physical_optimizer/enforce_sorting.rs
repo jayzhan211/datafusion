@@ -542,7 +542,7 @@ fn union_with_mix_of_presorted_and_explicitly_resorted_inputs_impl(
     .into();
     let physical_plan = Arc::new(OutputRequirementExec::new(
         coalesced,
-        Some(OrderingRequirements::new(requirement)),
+        OrderingRequirements::new(requirement),
         Distribution::SinglePartition,
         None,
     ));
@@ -1201,7 +1201,7 @@ async fn test_soft_hard_requirements_with_multiple_soft_requirements_and_output_
     .into();
     let physical_plan = Arc::new(OutputRequirementExec::new(
         bounded_window2,
-        Some(OrderingRequirements::new(requirement)),
+        OrderingRequirements::new(requirement),
         Distribution::SinglePartition,
         None,
     ));

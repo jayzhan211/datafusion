@@ -5928,7 +5928,7 @@ mod tests {
         );
         assert_eq!(
             aggregate.required_input_ordering(),
-            vec![Some(OrderingRequirements::new_soft(input_ordering.into()))]
+            vec![OrderingRequirements::new_soft(input_ordering.into())]
         );
         Ok(())
     }
