@@ -51,12 +51,11 @@ use datafusion_common::tree_node::{
 use datafusion_common::{JoinSide, Result, internal_err, plan_err};
 use datafusion_execution::TaskContext;
 use datafusion_expr::ExpressionPlacement;
-use datafusion_physical_expr::EquivalenceProperties;
 use datafusion_physical_expr::equivalence::ProjectionMapping;
 use datafusion_physical_expr::projection::Projector;
 use datafusion_physical_expr_common::physical_expr::{PhysicalExprRef, fmt_sql};
 use datafusion_physical_expr_common::sort_expr::{
-    LexOrdering, LexRequirement, PhysicalSortExpr,
+    LexOrdering, Ordering, PhysicalSortExpr,
 };
 // Re-exported from datafusion-physical-expr for backwards compatibility
 // We recommend updating your imports to use datafusion-physical-expr directly
@@ -184,33 +183,6 @@ impl ProjectionExec {
         input: Arc<dyn ExecutionPlan>,
         overrides_metadata: bool,
     ) -> Result<Self> {
-        Self::try_from_projector_with_eq_group(projector, input, None, overrides_metadata)
-    }
-
-    /// As [`Self::try_from_projector`], but `reuse_from` may carry the previous
-    /// child's equivalence properties together with the projection they produced,
-    /// letting [`EquivalenceProperties::project_reusing`] skip reprojecting a
-    /// group that has not changed.
-    ///
-    /// Projecting an equivalence group is a pure function of the group and the
-    /// mapping, so reuse is sound exactly when both are unchanged.
-    ///
-    /// The caller establishes the first by comparing the old and new child
-    /// groups. The second holds because the mapping comes from
-    /// `projector.projection()`, carried over untouched, and from the child's
-    /// schema, which `ProjectionMapping::try_new` consults only for field names
-    /// and indices -- never for types or nullability. So a child differing only
-    /// in nullability keeps the same mapping. A child that renamed or reordered
-    /// those fields would change the group too, since its members are `Column`s
-    /// carrying those names, and the comparison above would reject it; were one
-    /// to slip through anyway, `try_new`'s name assertion errors out rather than
-    /// letting a stale group into the plan.
-    fn try_from_projector_with_eq_group(
-        projector: Projector,
-        input: Arc<dyn ExecutionPlan>,
-        reuse_from: Option<(&EquivalenceProperties, &EquivalenceProperties)>,
-        overrides_metadata: bool,
-    ) -> Result<Self> {
         // Construct a map from the input expressions to the output expression of the Projection
         let projection_mapping =
             projector.projection().projection_mapping(&input.schema())?;
@@ -218,7 +190,6 @@ impl ProjectionExec {
             &input,
             &projection_mapping,
             Arc::clone(projector.output_schema()),
-            reuse_from,
         )?;
         Ok(Self {
             projector,
@@ -249,21 +220,10 @@ impl ProjectionExec {
         input: &Arc<dyn ExecutionPlan>,
         projection_mapping: &ProjectionMapping,
         schema: SchemaRef,
-        reuse_from: Option<(&EquivalenceProperties, &EquivalenceProperties)>,
     ) -> Result<PlanProperties> {
-        // Calculate equivalence properties. Whether the group is reprojected or
-        // handed back is the only thing reuse changes; everything below is
-        // common, so the two paths cannot drift apart.
+        // Calculate equivalence properties:
         let input_eq_properties = input.equivalence_properties();
-        let eq_properties = match reuse_from {
-            Some((previous, cached)) => input_eq_properties.project_reusing(
-                projection_mapping,
-                schema,
-                previous,
-                cached,
-            ),
-            None => input_eq_properties.project(projection_mapping, schema),
-        };
+        let eq_properties = input_eq_properties.project(projection_mapping, schema);
         // Calculate output partitioning, which needs to respect aliases:
         let output_partitioning = input
             .output_partitioning()
@@ -403,33 +363,14 @@ impl ExecutionPlan for ProjectionExec {
                 ..Self::clone(&*self)
             })),
             ChildrenPropertiesMode::Recompute => {
-                // `Keep` above requires the child's properties to be unchanged
-                // outright. A rule that introduces a sort below this projection
-                // does not qualify, yet the child's *equivalence group* is still
-                // identical: sorting changes which orderings hold, not which
-                // expressions are equal to one another. Projecting that group
-                // again would reproduce the group already cached here, so reuse
-                // it and derive only the orderings.
-                // Hand over what this projection was built from and what that
-                // produced; `project_reusing` decides whether the group can be
-                // carried over and falls back to a full projection otherwise.
-                let reuse_from = Some((
-                    self.input.equivalence_properties(),
-                    self.cache.equivalence_properties(),
-                ));
                 let input = children.swap_remove(0);
                 let projector = self.projector.clone();
                 let overrides_metadata = ProjectionExec::compute_overrides_metadata(
                     &projector,
                     input.schema().as_ref(),
                 )?;
-                ProjectionExec::try_from_projector_with_eq_group(
-                    projector,
-                    input,
-                    reuse_from,
-                    overrides_metadata,
-                )
-                .map(|p| Arc::new(p) as _)
+                ProjectionExec::try_from_projector(projector, input, overrides_metadata)
+                    .map(|p| Arc::new(p) as _)
             }
         }
     }
@@ -1165,19 +1106,29 @@ pub fn update_ordering(
 /// Updates the given lexicographic requirement according to given projected
 /// expressions using the [`update_expr`] function.
 pub fn update_ordering_requirement(
-    reqs: LexRequirement,
+    reqs: Ordering,
     projected_exprs: &[ProjectionExpr],
-) -> Result<Option<LexRequirement>> {
-    let mut updated_exprs = Vec::with_capacity(reqs.len());
-    for mut sort_expr in reqs.into_iter() {
-        let Some(updated_expr) = update_expr(&sort_expr.expr, projected_exprs, false)?
-        else {
+) -> Result<Option<Ordering>> {
+    let mut updated_steps = Vec::with_capacity(reqs.len());
+    for step in reqs.into_iter() {
+        let mut error = None;
+        let updated = step.try_map(|e| match update_expr(e, projected_exprs, false) {
+            Ok(updated) => updated,
+            Err(e) => {
+                error = Some(e);
+                None
+            }
+        });
+        if let Some(e) = error {
+            return Err(e);
+        }
+        let Some(updated) = updated else {
             return Ok(None);
         };
-        sort_expr.expr = updated_expr;
-        updated_exprs.push(sort_expr);
+        updated_steps.push(updated);
     }
-    Ok(LexRequirement::new(updated_exprs))
+    let updated = Ordering::new(updated_steps);
+    Ok((!updated.is_empty()).then_some(updated))
 }
 
 /// Downcasts all the expressions in `exprs` to `Column`s. If any of the given
@@ -2678,16 +2629,15 @@ mod tests {
         let actual_props = actual.properties().equivalence_properties();
         let expected_props = expected.properties().equivalence_properties();
         assert!(
-            actual_props
-                .eq_group()
-                .has_same_classes(expected_props.eq_group()),
+            actual_props.equalities().to_string()
+                == expected_props.equalities().to_string(),
             "equivalence group: {:?} vs {:?}",
-            actual_props.eq_group(),
-            expected_props.eq_group()
+            actual_props.equalities(),
+            expected_props.equalities()
         );
         assert_eq!(
-            actual_props.oeq_class(),
-            expected_props.oeq_class(),
+            actual_props.orderings(),
+            expected_props.orderings(),
             "orderings"
         );
         assert_eq!(
@@ -2730,18 +2680,16 @@ mod tests {
         let sorted_props = sorted.properties().equivalence_properties();
 
         assert!(
-            !child_props.eq_group().is_empty(),
+            !child_props.equalities().is_empty(),
             "the filter did not produce an equivalence class"
         );
         assert!(
-            child_props
-                .eq_group()
-                .has_same_classes(sorted_props.eq_group()),
+            child_props.equalities().to_string() == sorted_props.equalities().to_string(),
             "sorting altered the equivalence group"
         );
         assert_ne!(
-            child_props.oeq_class(),
-            sorted_props.oeq_class(),
+            child_props.orderings(),
+            sorted_props.orderings(),
             "sorting did not alter the orderings"
         );
 
@@ -2776,7 +2724,7 @@ mod tests {
             !projection
                 .properties()
                 .equivalence_properties()
-                .eq_group()
+                .equalities()
                 .is_empty(),
             "the projection carries no equivalence class, nothing is being reused"
         );
@@ -2784,7 +2732,7 @@ mod tests {
             projection
                 .properties()
                 .equivalence_properties()
-                .oeq_class()
+                .orderings()
                 .is_empty(),
             "the unsorted projection was already ordered"
         );
@@ -2792,7 +2740,7 @@ mod tests {
             !replaced
                 .properties()
                 .equivalence_properties()
-                .oeq_class()
+                .orderings()
                 .is_empty(),
             "the sort did not introduce an ordering"
         );
@@ -2835,13 +2783,13 @@ mod tests {
             child
                 .properties()
                 .equivalence_properties()
-                .eq_group()
-                .has_same_classes(
-                    tightened_child
-                        .properties()
-                        .equivalence_properties()
-                        .eq_group()
-                ),
+                .equalities()
+                .to_string()
+                == tightened_child
+                    .properties()
+                    .equivalence_properties()
+                    .equalities()
+                    .to_string(),
             "nullability moved the equivalence group, so the fast path is no longer under test"
         );
 
@@ -2876,13 +2824,16 @@ mod tests {
         )?;
 
         assert!(
-            !replaced
+            replaced
                 .properties()
                 .equivalence_properties()
-                .eq_group()
-                .has_same_classes(
-                    projection.properties().equivalence_properties().eq_group()
-                ),
+                .equalities()
+                .to_string()
+                != projection
+                    .properties()
+                    .equivalence_properties()
+                    .equalities()
+                    .to_string(),
             "the projection kept the previous child's equivalence group"
         );
 

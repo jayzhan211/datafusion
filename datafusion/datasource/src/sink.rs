@@ -28,7 +28,7 @@ use datafusion_common::tree_node::TreeNodeRecursion;
 use datafusion_common::{Result, assert_eq_or_internal_err};
 use datafusion_execution::TaskContext;
 use datafusion_physical_expr::{Distribution, EquivalenceProperties, PhysicalExpr};
-use datafusion_physical_expr_common::sort_expr::{LexRequirement, OrderingRequirements};
+use datafusion_physical_expr_common::sort_expr::{Ordering, OrderingRequirements};
 use datafusion_physical_plan::metrics::MetricsSet;
 use datafusion_physical_plan::stream::RecordBatchStreamAdapter;
 use datafusion_physical_plan::{
@@ -113,7 +113,7 @@ pub struct DataSinkExec {
     /// Schema describing the structure of the output data.
     count_schema: SchemaRef,
     /// Optional required sort order for output data.
-    sort_order: Option<LexRequirement>,
+    sort_order: Option<Ordering>,
     cache: Arc<PlanProperties>,
 }
 
@@ -133,7 +133,7 @@ impl DataSinkExec {
     pub fn new(
         input: Arc<dyn ExecutionPlan>,
         sink: Arc<dyn DataSink>,
-        sort_order: Option<LexRequirement>,
+        sort_order: Option<Ordering>,
     ) -> Self {
         let count_schema = make_count_schema();
         let cache = Self::create_schema(&input, count_schema);
@@ -157,7 +157,7 @@ impl DataSinkExec {
     }
 
     /// Optional sort order for output data
-    pub fn sort_order(&self) -> &Option<LexRequirement> {
+    pub fn sort_order(&self) -> &Option<Ordering> {
         &self.sort_order
     }
 
@@ -176,8 +176,8 @@ impl DataSinkExec {
             .map(|requirements| {
                 requirements
                     .iter()
-                    .map(|requirement| {
-                        let expr: PhysicalSortExpr = requirement.to_owned().into();
+                    .flat_map(|requirement| requirement.to_sort_exprs())
+                    .map(|expr: PhysicalSortExpr| {
                         Ok(protobuf::PhysicalSortExprNode {
                             expr: Some(Box::new(ctx.encode_expr(&expr.expr)?)),
                             asc: !expr.options.descending,
@@ -202,7 +202,7 @@ impl DataSinkExec {
         >,
         ctx: &datafusion_physical_plan::proto::ExecutionPlanDecodeCtx<'_>,
         schema: &Schema,
-    ) -> Result<Option<LexRequirement>> {
+    ) -> Result<Option<Ordering>> {
         use arrow::compute::SortOptions;
         use datafusion_physical_expr::PhysicalSortExpr;
 
@@ -227,7 +227,8 @@ impl DataSinkExec {
                 })
             })
             .collect::<Result<Vec<_>>>()?;
-        Ok(LexRequirement::new(sort_exprs.into_iter().map(Into::into)))
+        let ordering = Ordering::from_sort_exprs(sort_exprs);
+        Ok((!ordering.is_empty()).then_some(ordering))
     }
 
     fn create_schema(

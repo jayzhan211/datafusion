@@ -15,6 +15,7 @@
 // specific language governing permissions and limitations
 // under the License.
 
+use crate::joins::utils::ordered_side;
 use std::collections::HashMap;
 use std::fmt;
 use std::mem::size_of;
@@ -93,9 +94,7 @@ use datafusion_execution::TaskContext;
 use datafusion_execution::memory_pool::{MemoryConsumer, MemoryReservation};
 use datafusion_expr::Accumulator;
 use datafusion_functions_aggregate_common::min_max::{MaxAccumulator, MinAccumulator};
-use datafusion_physical_expr::equivalence::{
-    ProjectionMapping, join_equivalence_properties,
-};
+use datafusion_physical_expr::equivalence::{EquivalenceProperties, ProjectionMapping};
 use datafusion_physical_expr::expressions::{Column, DynamicFilterPhysicalExpr, lit};
 use datafusion_physical_expr::projection::{ProjectionRef, combine_projections};
 use datafusion_physical_expr::{PhysicalExpr, PhysicalExprRef};
@@ -1432,14 +1431,14 @@ impl HashJoinExec {
         projection: Option<&[usize]>,
     ) -> Result<PlanProperties> {
         // Calculate equivalence properties:
-        let mut eq_properties = join_equivalence_properties(
-            left.equivalence_properties().clone(),
-            right.equivalence_properties().clone(),
+        let mut eq_properties = EquivalenceProperties::join(
+            left.equivalence_properties(),
+            right.equivalence_properties(),
             &join_type,
             Arc::clone(schema),
-            &Self::maintains_input_order(join_type),
-            Some(Self::probe_side()),
             on,
+            ordered_side(&Self::maintains_input_order(join_type)),
+            Some(Self::probe_side()),
         )?;
 
         let mut output_partitioning = match mode {

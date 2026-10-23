@@ -58,7 +58,7 @@ use datafusion_common::Result;
 use datafusion_common::plan_err;
 use datafusion_common::tree_node::Transformed;
 use datafusion_physical_expr::{Distribution, Partitioning};
-use datafusion_physical_expr_common::sort_expr::{LexOrdering, LexRequirement};
+use datafusion_physical_expr_common::sort_expr::{LexOrdering, Ordering};
 use datafusion_physical_plan::coalesce_partitions::CoalescePartitionsExec;
 use datafusion_physical_plan::limit::{GlobalLimitExec, LocalLimitExec};
 use datafusion_physical_plan::repartition::RepartitionExec;
@@ -214,7 +214,7 @@ pub fn replace_with_partial_sort(
 
     let mut common_prefix_length = 0;
     while child_eq_properties
-        .ordering_satisfy(sort_exprs[0..=common_prefix_length].iter().cloned())?
+        .ordering_satisfy(sort_exprs[0..=common_prefix_length].iter().cloned())
     {
         common_prefix_length += 1;
     }
@@ -335,7 +335,7 @@ pub fn parallelize_sorts(
     {
         // Take the initial sort expressions and requirements
         let (sort_exprs, fetch) = get_sort_exprs(&requirements.plan)?;
-        let sort_reqs = LexRequirement::from(sort_exprs.clone());
+        let sort_reqs = Ordering::from(sort_exprs.clone());
         let sort_exprs = sort_exprs.clone();
 
         // If there is a connection between a `CoalescePartitionsExec` and a
@@ -432,7 +432,7 @@ pub fn ensure_sorting(
         if let Some(required) = required_ordering {
             let eq_properties = child.plan.equivalence_properties();
             let req = required.into_single();
-            if !eq_properties.ordering_satisfy_requirement(req.clone())? {
+            if !eq_properties.ordering_satisfy(req.clone()) {
                 // Make sure we preserve the ordering requirements:
                 if physical_ordering.is_some() {
                     child = update_child_to_remove_unnecessary_sort(idx, child, plan)?;
@@ -497,7 +497,7 @@ fn analyze_immediate_sort_removal(
     let properties = sort_exec.properties();
     if let Some(ordering) = properties.output_ordering().cloned() {
         let eqp = sort_input.equivalence_properties();
-        if !eqp.ordering_satisfy(ordering)? {
+        if !eqp.ordering_satisfy(ordering) {
             return Ok(Transformed::no(node));
         }
     }

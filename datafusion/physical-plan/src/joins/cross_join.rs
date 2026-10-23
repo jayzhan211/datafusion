@@ -18,6 +18,7 @@
 //! Defines the cross join plan for loading the left side of the cross join
 //! and producing batches in parallel for the right partitions
 
+use datafusion_physical_expr::EquivalenceProperties;
 use std::future::poll_fn;
 use std::sync::Arc;
 
@@ -50,7 +51,6 @@ use datafusion_common::{
 use datafusion_execution::memory_pool::{MemoryConsumer, MemoryReservation};
 use datafusion_execution::{TaskContext, TryEmitter, async_try_stream};
 use datafusion_physical_expr::PhysicalExpr;
-use datafusion_physical_expr::equivalence::join_equivalence_properties;
 
 use futures::{StreamExt, TryStreamExt};
 use num_traits::Zero;
@@ -152,14 +152,15 @@ impl CrossJoinExec {
         // Calculate equivalence properties
         // TODO: Check equivalence properties of cross join, it may preserve
         //       ordering in some cases.
-        let eq_properties = join_equivalence_properties(
-            left.equivalence_properties().clone(),
-            right.equivalence_properties().clone(),
-            &JoinType::Full,
+        // No row is padded with NULLs, so this is an inner join without keys.
+        let eq_properties = EquivalenceProperties::join(
+            left.equivalence_properties(),
+            right.equivalence_properties(),
+            &JoinType::Inner,
             schema,
-            &[false, false],
-            None,
             &[],
+            None,
+            None,
         )?;
 
         // Get output partitioning:

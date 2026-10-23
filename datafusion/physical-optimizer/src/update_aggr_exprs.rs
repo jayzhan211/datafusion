@@ -24,7 +24,7 @@ use datafusion_common::config::ConfigOptions;
 use datafusion_common::tree_node::{Transformed, TransformedResult, TreeNode};
 use datafusion_common::{Result, plan_datafusion_err};
 use datafusion_physical_expr::aggregate::AggregateFunctionExpr;
-use datafusion_physical_expr::{EquivalenceProperties, PhysicalSortRequirement};
+use datafusion_physical_expr::{EquivalenceProperties, Step};
 use datafusion_physical_plan::aggregates::{
     AggregateExec, AggregateInputMode, concat_slices,
 };
@@ -108,12 +108,7 @@ impl PhysicalOptimizerRule for OptimizeAggregateOrder {
                         get_ordered_partition_by_indices(&groupby_exprs, input)?;
                     indices
                         .iter()
-                        .map(|&idx| {
-                            PhysicalSortRequirement::new(
-                                Arc::clone(&groupby_exprs[idx]),
-                                None,
-                            )
-                        })
+                        .map(|&idx| Step::group([Arc::clone(&groupby_exprs[idx])]))
                         .collect::<Vec<_>>()
                 } else {
                     vec![]
@@ -163,7 +158,7 @@ impl PhysicalOptimizerRule for OptimizeAggregateOrder {
 /// passed through.
 fn try_convert_aggregate_if_better(
     aggr_exprs: Vec<Arc<AggregateFunctionExpr>>,
-    prefix_requirement: &[PhysicalSortRequirement],
+    prefix_requirement: &[Step],
     eq_properties: &EquivalenceProperties,
 ) -> Result<Vec<Arc<AggregateFunctionExpr>>> {
     aggr_exprs
@@ -177,22 +172,22 @@ fn try_convert_aggregate_if_better(
             if !aggr_expr.order_sensitivity().is_beneficial() {
                 Ok(aggr_expr)
             } else if !order_bys.is_empty() {
-                if eq_properties.ordering_satisfy_requirement(concat_slices(
+                if eq_properties.ordering_satisfy(concat_slices(
                     prefix_requirement,
                     &order_bys
                         .iter()
                         .map(|e| e.clone().into())
                         .collect::<Vec<_>>(),
-                ))? {
+                )) {
                     // Existing ordering satisfies the aggregator requirements:
                     aggr_expr.with_beneficial_ordering(true)?.map(Arc::new)
-                } else if eq_properties.ordering_satisfy_requirement(concat_slices(
+                } else if eq_properties.ordering_satisfy(concat_slices(
                     prefix_requirement,
                     &order_bys
                         .iter()
                         .map(|e| e.reverse().into())
                         .collect::<Vec<_>>(),
-                ))? {
+                )) {
                     // Converting to reverse enables more efficient execution
                     // given the existing ordering (if possible):
                     aggr_expr

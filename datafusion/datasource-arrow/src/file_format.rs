@@ -48,7 +48,7 @@ use datafusion_datasource::write::{
 use datafusion_datasource::{TableSchema, TableSchemaBuilder};
 use datafusion_execution::{SendableRecordBatchStream, TaskContext};
 use datafusion_expr::dml::InsertOp;
-use datafusion_physical_expr_common::sort_expr::LexRequirement;
+use datafusion_physical_expr_common::sort_expr::Ordering;
 
 use crate::source::ArrowSource;
 use async_trait::async_trait;
@@ -270,7 +270,7 @@ impl FileFormat for ArrowFormat {
         input: Arc<dyn ExecutionPlan>,
         _state: &dyn Session,
         conf: FileSinkConfig,
-        order_requirements: Option<LexRequirement>,
+        order_requirements: Option<Ordering>,
     ) -> Result<Arc<dyn ExecutionPlan>> {
         if conf.insert_op != InsertOp::Append {
             return not_impl_err!("Overwrites are not implemented yet for Arrow format");

@@ -196,12 +196,10 @@ use datafusion_expr::{Accumulator, Aggregate, AggregateMetrics};
 use datafusion_physical_expr::aggregate::AggregateFunctionExpr;
 use datafusion_physical_expr::equivalence::ProjectionMapping;
 use datafusion_physical_expr::expressions::{Column, DynamicFilterPhysicalExpr, lit};
-use datafusion_physical_expr::{
-    ConstExpr, EquivalenceProperties, physical_exprs_contains,
-};
+use datafusion_physical_expr::{EquivalenceProperties, physical_exprs_contains};
 use datafusion_physical_expr_common::physical_expr::{PhysicalExpr, fmt_sql};
 use datafusion_physical_expr_common::sort_expr::{
-    LexOrdering, LexRequirement, OrderingRequirements, PhysicalSortRequirement,
+    LexOrdering, Ordering, OrderingRequirements, Step,
 };
 
 use datafusion_expr::utils::AggregateOrderSensitivity;
@@ -1112,11 +1110,10 @@ impl AggregateExec {
         self.group_clustering_mode = GroupClusteringMode::None;
         self.required_input_ordering = None;
         // Keep unchanged properties so parent aggregates do not need rebuilding.
-        if !self.cache.eq_properties.oeq_class().is_empty()
+        if !self.cache.eq_properties.orderings().is_empty()
             || self.cache.emission_type != EmissionType::Final
         {
-            let mut equivalence = self.cache.eq_properties.clone();
-            equivalence.clear_orderings();
+            let equivalence = self.cache.eq_properties.clone().reordered(None);
             let cache = Arc::make_mut(&mut self.cache);
             cache.set_eq_properties(equivalence);
             cache.emission_type = EmissionType::Final;
@@ -1309,11 +1306,11 @@ impl AggregateExec {
         // work more efficiently.
         // Copy the `PhysicalSortExpr`s to retain the sort options.
         let (new_sort_exprs, indices) =
-            input_eq_properties.find_longest_permutation(&groupby_exprs)?;
+            input_eq_properties.longest_permutation(&groupby_exprs);
 
         let mut new_requirements = new_sort_exprs
             .into_iter()
-            .map(PhysicalSortRequirement::from)
+            .map(Step::from)
             .collect::<Vec<_>>();
 
         let req = get_finer_aggregate_exprs_requirement(
@@ -1324,8 +1321,10 @@ impl AggregateExec {
         )?;
         new_requirements.extend(req);
 
-        let required_input_ordering =
-            LexRequirement::new(new_requirements).map(OrderingRequirements::new_soft);
+        let required_input_ordering = OrderingRequirements::new_alternatives(
+            [Ordering::new(new_requirements)],
+            true,
+        );
 
         // Constant expressions never change, so they cannot mark a completed group.
         // Exclude them from both the ordering indices and the group expression count.
@@ -1338,15 +1337,13 @@ impl AggregateExec {
             .into_iter()
             .filter(|idx| {
                 group_by.groups.iter().all(|group| !group[*idx])
-                    && input_eq_properties
-                        .is_expr_constant(&groupby_exprs[*idx])
-                        .is_none()
+                    && !input_eq_properties.is_constant(&groupby_exprs[*idx])
             })
             .collect();
 
         let num_non_constant_groupby_exprs = groupby_exprs
             .iter()
-            .filter(|expr| input_eq_properties.is_expr_constant(expr).is_none())
+            .filter(|expr| !input_eq_properties.is_constant(expr))
             .count();
         let mut group_clustering_mode = if indices.len() == num_non_constant_groupby_exprs
             && !indices.is_empty()
@@ -1832,7 +1829,7 @@ impl AggregateExec {
         // not establish an output ordering. Keep this consistent with
         // `maintains_input_order`.
         if *group_clustering_mode == GroupClusteringMode::None {
-            eq_properties.clear_orderings();
+            eq_properties = eq_properties.reordered(None);
         }
 
         // True no-group aggregates produce only one row in each output
@@ -1841,11 +1838,10 @@ impl AggregateExec {
         // their output schema can include grouping-set columns before the
         // aggregate columns, so this aggregate-column mapping does not apply.
         if is_true_no_grouping {
-            let new_constants = aggr_exprs.iter().enumerate().map(|(idx, func)| {
+            for (idx, func) in aggr_exprs.iter().enumerate() {
                 let column = Arc::new(Column::new(func.name(), idx));
-                ConstExpr::from(column as Arc<dyn PhysicalExpr>)
-            });
-            eq_properties.add_constants(new_constants)?;
+                eq_properties.add_local_constant(column);
+            }
         }
 
         // Group by expression will be a distinct value after the aggregation.
@@ -3341,7 +3337,7 @@ fn determine_finer(
 ///
 /// # Returns
 ///
-/// A `Result<Vec<PhysicalSortRequirement>>` instance, which is the requirement
+/// A `Result<Vec<Step>>` instance, which is the requirement
 /// that satisfies all the aggregate requirements. Returns an error in case of
 /// conflicting requirements.
 pub fn get_finer_aggregate_exprs_requirement(
@@ -3349,7 +3345,7 @@ pub fn get_finer_aggregate_exprs_requirement(
     group_by: &PhysicalGroupBy,
     eq_properties: &EquivalenceProperties,
     agg_mode: &AggregateMode,
-) -> Result<Vec<PhysicalSortRequirement>> {
+) -> Result<Vec<Step>> {
     let mut requirement = None;
 
     // First try and find a match for all hard and soft requirements.
@@ -3363,7 +3359,7 @@ pub fn get_finer_aggregate_exprs_requirement(
                 agg_mode,
                 include_soft_requirement,
             )
-            .and_then(|o| eq_properties.normalize_sort_exprs(o)) else {
+            .and_then(|o| eq_properties.normalize_requirement(o).to_sort()) else {
                 // There is no aggregate ordering requirement, or it is trivially
                 // satisfied -- we can skip this expression.
                 continue;
@@ -3376,7 +3372,7 @@ pub fn get_finer_aggregate_exprs_requirement(
             if let Some(finer) = forward_finer {
                 if !finer {
                     continue;
-                } else if eq_properties.ordering_satisfy(aggr_req.clone())? {
+                } else if eq_properties.ordering_satisfy(aggr_req.clone()) {
                     requirement = Some(aggr_req);
                     continue;
                 }
@@ -3388,7 +3384,7 @@ pub fn get_finer_aggregate_exprs_requirement(
                     agg_mode,
                     include_soft_requirement,
                 )
-                .and_then(|o| eq_properties.normalize_sort_exprs(o)) else {
+                .and_then(|o| eq_properties.normalize_requirement(o).to_sort()) else {
                     // The reverse requirement is trivially satisfied -- just reverse
                     // the expression and continue with the next one:
                     *aggr_expr = Arc::new(reverse_aggr_expr);
@@ -3403,7 +3399,7 @@ pub fn get_finer_aggregate_exprs_requirement(
                 {
                     if !finer {
                         *aggr_expr = Arc::new(reverse_aggr_expr);
-                    } else if eq_properties.ordering_satisfy(rev_aggr_req.clone())? {
+                    } else if eq_properties.ordering_satisfy(rev_aggr_req.clone()) {
                         *aggr_expr = Arc::new(reverse_aggr_expr);
                         requirement = Some(rev_aggr_req);
                     } else {
@@ -3426,7 +3422,7 @@ pub fn get_finer_aggregate_exprs_requirement(
         }
     }
 
-    Ok(requirement.map_or_else(Vec::new, |o| o.into_iter().map(Into::into).collect()))
+    Ok(requirement.map_or_else(Vec::new, |o| o.into_iter().map(Step::from).collect()))
 }
 
 /// Returns physical expressions for arguments to evaluate against a batch.
@@ -6972,7 +6968,7 @@ mod tests {
         let col_c = &col("c", &test_schema)?;
         let mut eq_properties = EquivalenceProperties::new(Arc::clone(&test_schema));
         // Columns a and b are equal.
-        eq_properties.add_equal_conditions(Arc::clone(col_a), Arc::clone(col_b))?;
+        eq_properties.add_equal(Arc::clone(col_a), Arc::clone(col_b));
         // Aggregate requirements are
         // [None], [a ASC], [a ASC, b ASC, c ASC], [a ASC, b ASC] respectively
         let order_by_exprs = vec![
@@ -7008,8 +7004,8 @@ mod tests {
         ];
 
         let common_requirement = vec![
-            PhysicalSortRequirement::new(Arc::clone(col_a), Some(options)),
-            PhysicalSortRequirement::new(Arc::clone(col_c), Some(options)),
+            Step::sort(Arc::clone(col_a), options),
+            Step::sort(Arc::clone(col_c), options),
         ];
         let mut aggr_exprs = order_by_exprs
             .into_iter()

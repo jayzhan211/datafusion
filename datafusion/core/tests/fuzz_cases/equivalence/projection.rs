@@ -18,6 +18,7 @@
 use crate::fuzz_cases::equivalence::utils::{
     TestScalarUDF, apply_projection, contains_overflowable_arithmetic,
     create_random_schema, generate_table_for_eq_properties, is_table_same_after_sort,
+    sort_choices,
 };
 use arrow::compute::SortOptions;
 use datafusion_common::Result;
@@ -82,17 +83,19 @@ fn project_orderings_random() -> Result<()> {
                 )?;
 
                 // Make sure each ordering after projection is valid.
-                for ordering in projected_eq.oeq_class().iter() {
+                for ordering in projected_eq.orderings().iter() {
                     let err_msg = format!(
                         "Error in test case ordering:{ordering:?}, eq_properties {eq_properties}, proj_exprs: {proj_exprs:?}",
                     );
                     // Since ordered section satisfies schema, we expect
                     // that result will be same after sort (e.g sort was unnecessary).
-                    assert!(
-                        is_table_same_after_sort(ordering.clone(), &projected_batch)?,
-                        "{}",
-                        err_msg
-                    );
+                    for choice in sort_choices(ordering) {
+                        assert!(
+                            is_table_same_after_sort(choice, &projected_batch)?,
+                            "{}",
+                            err_msg
+                        );
+                    }
                 }
             }
         }
@@ -195,10 +198,10 @@ fn ordering_satisfy_after_projection_random() -> Result<()> {
                                 })
                                 .cloned(),
                         );
-                        if projected_eq.ordering_satisfy(ordering)? {
+                        if projected_eq.ordering_satisfy(ordering) {
                             assert!(expected, "{err_msg}");
                         } else if let Some(prefix) = conclusive_prefix
-                            && !projected_eq.ordering_satisfy(prefix)?
+                            && !projected_eq.ordering_satisfy(prefix)
                         {
                             assert!(!expected, "{err_msg}");
                         }

@@ -74,8 +74,7 @@ use datafusion_physical_plan::operator_statistics::{
 };
 
 use datafusion_physical_expr::{
-    AcrossPartitions, ConstExpr, Distribution, Partitioning, RangePartitioning,
-    SplitPoint,
+    Distribution, Partitioning, RangePartitioning, SplitPoint,
 };
 use datafusion_physical_plan::coalesce_partitions::CoalescePartitionsExec;
 use datafusion_physical_plan::execution_plan::ExecutionPlan;
@@ -1277,10 +1276,7 @@ struct PerPartitionConstantExec {
 impl PerPartitionConstantExec {
     fn try_new(input: Arc<dyn ExecutionPlan>, column: &str) -> Result<Self> {
         let mut eq_properties = input.equivalence_properties().clone();
-        eq_properties.add_constants([ConstExpr::new(
-            col(column, &input.schema())?,
-            AcrossPartitions::Heterogeneous,
-        )])?;
+        eq_properties.add_local_constant(col(column, &input.schema())?);
         let cache = PlanProperties::new(
             eq_properties,
             input.output_partitioning().clone(),

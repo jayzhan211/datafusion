@@ -40,7 +40,7 @@ use datafusion_expr_common::operator::Operator;
 use datafusion_expr::{JoinType, SortExpr};
 use datafusion_execution::object_store::ObjectStoreUrl;
 use datafusion_physical_expr_common::sort_expr::{
-    LexOrdering, PhysicalSortExpr, PhysicalSortRequirement, OrderingRequirements
+    LexOrdering, PhysicalSortExpr, Step, OrderingRequirements
 };
 use datafusion_physical_expr::{Distribution, Partitioning, PhysicalExpr};
 use datafusion_physical_expr::expressions::{col, BinaryExpr, Column, NotExpr};
@@ -535,9 +535,9 @@ fn union_with_mix_of_presorted_and_explicitly_resorted_inputs_impl(
     let coalesced = coalesce_partitions_exec(union);
 
     // Required sorted / single partitioned output
-    let requirement = [PhysicalSortRequirement::new(
+    let requirement = [Step::sort(
         col("nullable_col", &schema)?,
-        Some(SortOptions::new(false, true)),
+        SortOptions::new(false, true),
     )]
     .into();
     let physical_plan = Arc::new(OutputRequirementExec::new(
@@ -1194,9 +1194,9 @@ async fn test_soft_hard_requirements_with_multiple_soft_requirements_and_output_
         partition_bys2,
         bounded_window,
     );
-    let requirement = [PhysicalSortRequirement::new(
+    let requirement = [Step::sort(
         col("non_nullable_col", &schema)?,
-        Some(SortOptions::new(false, true)),
+        SortOptions::new(false, true),
     )]
     .into();
     let physical_plan = Arc::new(OutputRequirementExec::new(
@@ -3483,7 +3483,7 @@ async fn test_passthrough_wrapper_projection_keeps_ordering() -> Result<()> {
 
     let sort_satisfied = projection
         .equivalence_properties()
-        .ordering_satisfy(ordering.clone())?;
+        .ordering_satisfy(ordering.clone());
 
     let plan_str = displayable(projection.as_ref()).indent(true).to_string();
     assert!(

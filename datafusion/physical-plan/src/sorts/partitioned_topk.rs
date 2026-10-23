@@ -42,7 +42,6 @@ use datafusion_common::tree_node::TreeNodeRecursion;
 use datafusion_execution::TaskContext;
 use datafusion_execution::runtime_env::RuntimeEnv;
 use datafusion_physical_expr::PhysicalExpr;
-use datafusion_physical_expr::equivalence::EquivalenceProperties;
 use datafusion_physical_expr::expressions::Column;
 use datafusion_physical_expr_common::sort_expr::{LexOrdering, PhysicalSortExpr};
 use futures::StreamExt;
@@ -350,17 +349,17 @@ impl PartitionedTopKExec {
         // the input's, so the input's properties have to be re-hung under the
         // new schema rather than cloned (the same reason
         // `window_equivalence_properties` does this for `BoundedWindowAggExec`).
-        let mut eq_properties = match ranking_field {
+        let eq_properties = match ranking_field {
             None => input.equivalence_properties().clone(),
             Some(_) => {
                 let output_schema =
                     partitioned_topk_output_schema(&input.schema(), ranking_field);
-                EquivalenceProperties::new(output_schema)
-                    .extend(input.equivalence_properties().clone())?
+                (input.equivalence_properties().clone())
+                    .with_extended_schema(output_schema)
             }
         };
         let partition_exprs = sort_exprs[..partition_prefix_len].to_vec();
-        eq_properties.reorder(sort_exprs)?;
+        let mut eq_properties = eq_properties.reordered(Some(sort_exprs));
 
         if let Some(field) = ranking_field {
             // The ranking column is the last one, appended by
@@ -730,10 +729,10 @@ mod tests {
         assert!(eq.ordering_satisfy([
             PhysicalSortExpr::new(Arc::clone(&pk), asc_nulls_last),
             PhysicalSortExpr::new(Arc::clone(&rn), asc_nulls_last),
-        ])?);
+        ]));
         // ... but only within a partition: `rn` restarts at 1 per key, so it is
         // not a global ordering on its own.
-        assert!(!eq.ordering_satisfy([PhysicalSortExpr::new(rn, asc_nulls_last)])?);
+        assert!(!eq.ordering_satisfy([PhysicalSortExpr::new(rn, asc_nulls_last)]));
         Ok(())
     }
 
@@ -812,7 +811,7 @@ mod tests {
                 .ordering_satisfy([
                     PhysicalSortExpr::new(pk, asc_nulls_last),
                     PhysicalSortExpr::new(rn, asc_nulls_last),
-                ])?
+                ])
         );
         Ok(())
     }

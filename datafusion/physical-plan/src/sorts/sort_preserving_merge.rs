@@ -174,8 +174,12 @@ impl SortPreservingMergeExec {
         };
 
         let mut eq_properties = input.equivalence_properties().clone();
-        eq_properties.clear_per_partition_constants();
-        eq_properties.add_ordering(ordering);
+        if input_partitions > 1 {
+            eq_properties = eq_properties.merged(Some(ordering));
+        } else {
+            // Nothing is merged; the input already satisfies `ordering`.
+            eq_properties.add_ordering(ordering);
+        }
         PlanProperties::new(
             eq_properties,                        // Equivalence Properties
             Partitioning::UnknownPartitioning(1), // Output Partitioning

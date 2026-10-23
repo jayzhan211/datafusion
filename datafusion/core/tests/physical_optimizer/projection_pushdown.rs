@@ -39,7 +39,7 @@ use datafusion_physical_expr::expressions::{
 use datafusion_physical_expr::{Distribution, Partitioning, ScalarFunctionExpr};
 use datafusion_physical_expr_common::physical_expr::PhysicalExpr;
 use datafusion_physical_expr_common::sort_expr::{
-    OrderingRequirements, PhysicalSortExpr, PhysicalSortRequirement,
+    OrderingRequirements, PhysicalSortExpr, Step,
 };
 use datafusion_physical_optimizer::PhysicalOptimizerRule;
 use datafusion_physical_optimizer::output_requirements::OutputRequirementExec;
@@ -709,17 +709,14 @@ fn test_output_req_after_projection() -> Result<()> {
         csv,
         Some(OrderingRequirements::new(
             [
-                PhysicalSortRequirement::new(
-                    Arc::new(Column::new("b", 1)),
-                    Some(SortOptions::default()),
-                ),
-                PhysicalSortRequirement::new(
+                Step::sort(Arc::new(Column::new("b", 1)), SortOptions::default()),
+                Step::sort(
                     Arc::new(BinaryExpr::new(
                         Arc::new(Column::new("c", 2)),
                         Operator::Plus,
                         Arc::new(Column::new("a", 0)),
                     )),
-                    Some(SortOptions::default()),
+                    SortOptions::default(),
                 ),
             ]
             .into(),
@@ -769,17 +766,14 @@ fn test_output_req_after_projection() -> Result<()> {
 
     let expected_reqs = OrderingRequirements::new(
         [
-            PhysicalSortRequirement::new(
-                Arc::new(Column::new("b", 2)),
-                Some(SortOptions::default()),
-            ),
-            PhysicalSortRequirement::new(
+            Step::sort(Arc::new(Column::new("b", 2)), SortOptions::default()),
+            Step::sort(
                 Arc::new(BinaryExpr::new(
                     Arc::new(Column::new("c", 0)),
                     Operator::Plus,
                     Arc::new(Column::new("new_a", 1)),
                 )),
-                Some(SortOptions::default()),
+                SortOptions::default(),
             ),
         ]
         .into(),

@@ -34,7 +34,7 @@ use datafusion::datasource::physical_plan::{
 use datafusion::datasource::sink::{DataSink, DataSinkExec};
 use datafusion::execution::TaskContext;
 use datafusion::parquet::file::metadata::SortingColumn;
-use datafusion::physical_expr::{LexRequirement, PhysicalSortRequirement};
+use datafusion::physical_expr::{Ordering, Step};
 use datafusion::physical_plan::expressions::Column;
 use datafusion::physical_plan::placeholder_row::PlaceholderRowExec;
 use datafusion::physical_plan::proto::ExecutionPlanEncodeCtx;
@@ -126,9 +126,9 @@ fn data_sink_exec_delegates_to_sink_proto_hook() -> Result<()> {
     let sink = Arc::new(ProtoHookSink {
         schema: Arc::clone(&input_schema),
     });
-    let sort_order = [PhysicalSortRequirement::new(
+    let sort_order: Ordering = [Step::sort(
         Arc::new(Column::new("value", 0)),
-        Some(SortOptions::default()),
+        SortOptions::default(),
     )]
     .into();
     let plan = Arc::new(DataSinkExec::new(input, sink, Some(sort_order)));
@@ -225,12 +225,12 @@ fn roundtrip_json_sink() -> Result<()> {
         file_sink_config,
         JsonWriterOptions::new_with_level(CompressionTypeVariant::ZSTD, 7),
     ));
-    let sort_order: LexRequirement = [PhysicalSortRequirement::new(
+    let sort_order: Ordering = [Step::sort(
         Arc::new(Column::new("plan_type", 0)),
-        Some(SortOptions {
+        SortOptions {
             descending: true,
             nulls_first: false,
-        }),
+        },
     )]
     .into();
 
@@ -314,12 +314,12 @@ fn roundtrip_csv_sink() -> Result<()> {
         file_sink_config,
         CsvWriterOptions::new_with_level(writer_options, CompressionTypeVariant::ZSTD, 7),
     ));
-    let sort_order: LexRequirement = [PhysicalSortRequirement::new(
+    let sort_order: Ordering = [Step::sort(
         Arc::new(Column::new("plan_type", 0)),
-        Some(SortOptions {
+        SortOptions {
             descending: true,
             nulls_first: false,
-        }),
+        },
     )]
     .into();
 
@@ -440,12 +440,12 @@ fn roundtrip_parquet_sink() -> Result<()> {
         file_extension: "parquet".into(),
         file_output_mode: FileOutputMode::Automatic,
     };
-    let sort_order: LexRequirement = [PhysicalSortRequirement::new(
+    let sort_order: Ordering = [Step::sort(
         Arc::new(Column::new("plan_type", 0)),
-        Some(SortOptions {
+        SortOptions {
             descending: true,
             nulls_first: false,
-        }),
+        },
     )]
     .into();
 

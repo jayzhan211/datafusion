@@ -574,18 +574,18 @@ fn range_join_key_positions(
         .collect::<Vec<_>>();
 
     expected_expr_positions(join_keys, &expected).or_else(|| {
-        let eq_group = input.equivalence_properties().eq_group();
+        let eq_group = input.equivalence_properties().equalities();
         if eq_group.is_empty() {
             return None;
         }
 
         let normalized_keys = join_keys
             .iter()
-            .map(|expr| eq_group.normalize_expr(Arc::clone(expr)))
+            .map(|expr| eq_group.normalize(Arc::clone(expr)))
             .collect::<Vec<_>>();
         let normalized_expected = expected
             .iter()
-            .map(|expr| eq_group.normalize_expr(Arc::clone(expr)))
+            .map(|expr| eq_group.normalize(Arc::clone(expr)))
             .collect::<Vec<_>>();
 
         expected_expr_positions(&normalized_keys, &normalized_expected)
@@ -608,11 +608,12 @@ fn forces_unbounded_sort<'a>(
         .map(|(expr, options)| PhysicalSortExpr::new(Arc::clone(expr), *options));
     // A repartition of a multi-partition input drops its per-partition
     // constants, so do not rely on them to satisfy the ordering.
+    // The facts after an order-preserving repartition of the input.
     let mut eq_properties = input.equivalence_properties().clone();
     if input.output_partitioning().partition_count() > 1 {
-        eq_properties.clear_per_partition_constants();
+        eq_properties = eq_properties.merged(input.output_ordering().cloned());
     }
-    Ok(!eq_properties.ordering_satisfy(sort_exprs)?)
+    Ok(!eq_properties.ordering_satisfy(sort_exprs))
 }
 
 /// Returns the non-identity permutation that aligns `on` with a
@@ -712,7 +713,7 @@ fn try_reorder(
     expected: &[Arc<dyn PhysicalExpr>],
     equivalence_properties: &EquivalenceProperties,
 ) -> (JoinKeyPairs, Option<Vec<usize>>) {
-    let eq_groups = equivalence_properties.eq_group();
+    let eq_groups = equivalence_properties.equalities();
     let mut normalized_expected = vec![];
     let mut normalized_left_keys = vec![];
     let mut normalized_right_keys = vec![];
@@ -723,22 +724,22 @@ fn try_reorder(
         || physical_exprs_equal(expected, &join_keys.right_keys)
     {
         return (join_keys, Some(vec![]));
-    } else if !equivalence_properties.eq_group().is_empty() {
+    } else if !equivalence_properties.equalities().is_empty() {
         normalized_expected = expected
             .iter()
-            .map(|e| eq_groups.normalize_expr(Arc::clone(e)))
+            .map(|e| eq_groups.normalize(Arc::clone(e)))
             .collect();
 
         normalized_left_keys = join_keys
             .left_keys
             .iter()
-            .map(|e| eq_groups.normalize_expr(Arc::clone(e)))
+            .map(|e| eq_groups.normalize(Arc::clone(e)))
             .collect();
 
         normalized_right_keys = join_keys
             .right_keys
             .iter()
-            .map(|e| eq_groups.normalize_expr(Arc::clone(e)))
+            .map(|e| eq_groups.normalize(Arc::clone(e)))
             .collect();
 
         if physical_exprs_equal(&normalized_expected, &normalized_left_keys)
@@ -1854,7 +1855,7 @@ pub fn ensure_distribution_with_stats(
                     let ordering_satisfied = context
                         .plan
                         .equivalence_properties()
-                        .ordering_satisfy_requirement(sort_req.clone())?;
+                        .ordering_satisfy(sort_req.clone());
 
                     if (!ordering_satisfied || !order_preserving_variants_desirable)
                         && !streaming_benefit

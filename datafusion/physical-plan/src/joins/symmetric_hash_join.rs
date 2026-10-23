@@ -25,6 +25,7 @@
 //! This plan uses the [`OneSideHashJoiner`] object to facilitate join calculations
 //! for both its children.
 
+use datafusion_physical_expr::EquivalenceProperties;
 use std::fmt::{self, Debug};
 use std::mem::{size_of, size_of_val};
 use std::sync::Arc;
@@ -76,7 +77,6 @@ use datafusion_common::{
 use datafusion_execution::TaskContext;
 use datafusion_execution::memory_pool::MemoryConsumer;
 use datafusion_expr::interval_arithmetic::Interval;
-use datafusion_physical_expr::equivalence::join_equivalence_properties;
 use datafusion_physical_expr::intervals::cp_solver::ExprIntervalGraph;
 use datafusion_physical_expr_common::physical_expr::{PhysicalExprRef, fmt_sql};
 use datafusion_physical_expr_common::sort_expr::{LexOrdering, OrderingRequirements};
@@ -268,15 +268,15 @@ impl SymmetricHashJoinExec {
         join_on: JoinOnRef,
     ) -> Result<PlanProperties> {
         // Calculate equivalence properties:
-        let eq_properties = join_equivalence_properties(
-            left.equivalence_properties().clone(),
-            right.equivalence_properties().clone(),
+        let eq_properties = EquivalenceProperties::join(
+            left.equivalence_properties(),
+            right.equivalence_properties(),
             &join_type,
             schema,
-            &[false, false],
+            join_on,
+            None,
             // Has alternating probe side
             None,
-            join_on,
         )?;
 
         let output_partitioning =

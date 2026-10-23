@@ -28,15 +28,16 @@ use datafusion_expr::sort_properties::{ExprProperties, SortProperties};
 use datafusion_expr::{
     ColumnarValue, Operator, ScalarFunctionArgs, ScalarUDFImpl, Signature, Volatility,
 };
+use datafusion_physical_expr::EquivalenceProperties;
 use datafusion_physical_expr::equivalence::{
-    EquivalenceClass, ProjectionMapping, convert_to_orderings,
+    ProjectionMapping, Step, convert_to_orderings,
 };
-use datafusion_physical_expr::{ConstExpr, EquivalenceProperties};
 use datafusion_physical_expr_common::physical_expr::PhysicalExpr;
 use datafusion_physical_expr_common::sort_expr::{LexOrdering, PhysicalSortExpr};
 use datafusion_physical_plan::expressions::{BinaryExpr, Column, col};
 
-use itertools::izip;
+use indexmap::IndexSet;
+use itertools::{Itertools, izip};
 use rand::prelude::*;
 
 /// Projects the input schema based on the given projection mapping.
@@ -95,9 +96,9 @@ pub fn create_random_schema(seed: u64) -> Result<(SchemaRef, EquivalenceProperti
 
     let mut eq_properties = EquivalenceProperties::new(Arc::clone(&test_schema));
     // Define a and f are aliases
-    eq_properties.add_equal_conditions(Arc::clone(col_a), Arc::clone(col_f))?;
+    eq_properties.add_equal(Arc::clone(col_a), Arc::clone(col_f));
     // Column e has constant value.
-    eq_properties.add_constants([ConstExpr::from(Arc::clone(col_e))])?;
+    eq_properties.add_local_constant(Arc::clone(col_e));
 
     // Randomly order columns for sorting
     let mut rng = StdRng::seed_from_u64(seed);
@@ -170,36 +171,36 @@ fn add_equal_conditions_test() -> Result<()> {
     let col_y = Arc::new(Column::new("y", 4)) as _;
 
     // a and b are aliases
-    eq_properties.add_equal_conditions(Arc::clone(&col_a), Arc::clone(&col_b))?;
-    assert_eq!(eq_properties.eq_group().len(), 1);
+    eq_properties.add_equal(Arc::clone(&col_a), Arc::clone(&col_b));
+    assert_eq!(eq_properties.equalities().len(), 1);
 
     // This new entry is redundant, size shouldn't increase
-    eq_properties.add_equal_conditions(Arc::clone(&col_b), Arc::clone(&col_a))?;
-    assert_eq!(eq_properties.eq_group().len(), 1);
-    let eq_groups = eq_properties.eq_group().iter().next().unwrap();
+    eq_properties.add_equal(Arc::clone(&col_b), Arc::clone(&col_a));
+    assert_eq!(eq_properties.equalities().len(), 1);
+    let eq_groups = eq_properties.equalities().iter().next().unwrap();
     assert_eq!(eq_groups.len(), 2);
     assert!(eq_groups.contains(&col_a));
     assert!(eq_groups.contains(&col_b));
 
     // b and c are aliases. Existing equivalence class should expand,
     // however there shouldn't be any new equivalence class
-    eq_properties.add_equal_conditions(Arc::clone(&col_b), Arc::clone(&col_c))?;
-    assert_eq!(eq_properties.eq_group().len(), 1);
-    let eq_groups = eq_properties.eq_group().iter().next().unwrap();
+    eq_properties.add_equal(Arc::clone(&col_b), Arc::clone(&col_c));
+    assert_eq!(eq_properties.equalities().len(), 1);
+    let eq_groups = eq_properties.equalities().iter().next().unwrap();
     assert_eq!(eq_groups.len(), 3);
     assert!(eq_groups.contains(&col_a));
     assert!(eq_groups.contains(&col_b));
     assert!(eq_groups.contains(&col_c));
 
     // This is a new set of equality. Hence equivalent class count should be 2.
-    eq_properties.add_equal_conditions(Arc::clone(&col_x), Arc::clone(&col_y))?;
-    assert_eq!(eq_properties.eq_group().len(), 2);
+    eq_properties.add_equal(Arc::clone(&col_x), Arc::clone(&col_y));
+    assert_eq!(eq_properties.equalities().len(), 2);
 
     // This equality bridges distinct equality sets.
     // Hence equivalent class count should decrease from 2 to 1.
-    eq_properties.add_equal_conditions(Arc::clone(&col_x), Arc::clone(&col_a))?;
-    assert_eq!(eq_properties.eq_group().len(), 1);
-    let eq_groups = eq_properties.eq_group().iter().next().unwrap();
+    eq_properties.add_equal(Arc::clone(&col_x), Arc::clone(&col_a));
+    assert_eq!(eq_properties.equalities().len(), 1);
+    let eq_groups = eq_properties.equalities().iter().next().unwrap();
     assert_eq!(eq_groups.len(), 5);
     assert!(eq_groups.contains(&col_a));
     assert!(eq_groups.contains(&col_b));
@@ -292,7 +293,7 @@ pub fn is_table_same_after_sort(
 // expressions in the equivalence classes. For other expressions in the same
 // equivalence class use same result. This util gets already calculated result, when available.
 fn get_representative_arr(
-    eq_group: &EquivalenceClass,
+    eq_group: &IndexSet<Arc<dyn PhysicalExpr>>,
     existing_vec: &[Option<ArrayRef>],
     schema: SchemaRef,
 ) -> Option<ArrayRef> {
@@ -336,7 +337,7 @@ pub fn create_test_params() -> Result<(SchemaRef, EquivalenceProperties)> {
     let col_f = &col("f", &test_schema)?;
     let col_g = &col("g", &test_schema)?;
     let mut eq_properties = EquivalenceProperties::new(Arc::clone(&test_schema));
-    eq_properties.add_equal_conditions(Arc::clone(col_a), Arc::clone(col_c))?;
+    eq_properties.add_equal(Arc::clone(col_a), Arc::clone(col_c));
 
     let option_asc = SortOptions {
         descending: false,
@@ -384,8 +385,9 @@ pub fn generate_table_for_eq_properties(
     };
 
     // Fill constant columns
-    for constant in eq_properties.constants() {
-        let col = constant.expr.downcast_ref::<Column>().unwrap();
+    let constants = eq_properties.global_constants().map(|(e, _)| e);
+    for constant in constants.chain(eq_properties.local_constants()) {
+        let col = constant.downcast_ref::<Column>().unwrap();
         let (idx, _field) = schema.column_with_name(col.name()).unwrap();
         let arr =
             Arc::new(Float64Array::from_iter_values(vec![0 as f64; n_elem])) as ArrayRef;
@@ -393,17 +395,18 @@ pub fn generate_table_for_eq_properties(
     }
 
     // Fill columns based on ordering equivalences
-    for ordering in eq_properties.oeq_class().iter() {
+    for ordering in eq_properties.orderings().iter() {
         let (sort_columns, indices): (Vec<_>, Vec<_>) = ordering
             .iter()
-            .map(|PhysicalSortExpr { expr, options }| {
+            .map(|step| {
+                let (expr, options) = (step.expr(), step.options().unwrap());
                 let col = expr.downcast_ref::<Column>().unwrap();
                 let (idx, _field) = schema.column_with_name(col.name()).unwrap();
                 let arr = generate_random_array(n_elem, n_distinct);
                 (
                     SortColumn {
                         values: arr,
-                        options: Some(*options),
+                        options: Some(options),
                     },
                     idx,
                 )
@@ -417,7 +420,7 @@ pub fn generate_table_for_eq_properties(
     }
 
     // Fill columns based on equivalence groups
-    for eq_group in eq_properties.eq_group().iter() {
+    for eq_group in eq_properties.equalities().iter() {
         let representative_array =
             get_representative_arr(eq_group, &schema_vec, Arc::clone(schema))
                 .unwrap_or_else(|| generate_random_array(n_elem, n_distinct));
@@ -609,4 +612,21 @@ impl ScalarUDFImpl for TestScalarUDF {
         };
         Ok(ColumnarValue::Array(arr))
     }
+}
+
+/// Every way to read `ordering` as plain sort expressions: one member per
+/// `Sort` step (members are strict images of each other, so each choice must
+/// hold on its own).
+pub fn sort_choices(
+    ordering: &datafusion_physical_expr::equivalence::Ordering,
+) -> Vec<LexOrdering> {
+    ordering
+        .iter()
+        .map(|step| match step {
+            Step::Sort(members) => members.clone(),
+            Step::Group(_) => panic!("orderings in these tests have no groups"),
+        })
+        .multi_cartesian_product()
+        .filter_map(LexOrdering::new)
+        .collect()
 }

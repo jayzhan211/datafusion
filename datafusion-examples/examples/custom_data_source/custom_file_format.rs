@@ -37,7 +37,7 @@ use datafusion::{
     },
     error::Result,
     execution::session_state::SessionStateBuilder,
-    physical_expr_common::sort_expr::LexRequirement,
+    physical_expr_common::sort_expr::Ordering,
     physical_plan::ExecutionPlan,
     prelude::SessionContext,
 };
@@ -156,7 +156,7 @@ impl FileFormat for TSVFileFormat {
         input: Arc<dyn ExecutionPlan>,
         state: &dyn Session,
         conf: FileSinkConfig,
-        order_requirements: Option<LexRequirement>,
+        order_requirements: Option<Ordering>,
     ) -> Result<Arc<dyn ExecutionPlan>> {
         self.csv_file_format
             .create_writer_physical_plan(input, state, conf, order_requirements)

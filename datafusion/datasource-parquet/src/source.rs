@@ -74,7 +74,7 @@ use log::warn;
 
 #[cfg(feature = "parquet_encryption")]
 use datafusion_execution::parquet_encryption::EncryptionFactory;
-use datafusion_physical_expr_common::sort_expr::{LexOrdering, PhysicalSortExpr};
+use datafusion_physical_expr_common::sort_expr::{LexOrdering, PhysicalSortExpr, Step};
 use itertools::Itertools;
 use object_store::ObjectStore;
 use parquet::arrow::RowNumber;
@@ -966,7 +966,7 @@ impl FileSource for ParquetSource {
         // Parquet metadata guarantees within-file ordering, so if the ordering matches
         // we can return Exact. FileScanConfig will verify that files within each group
         // are non-overlapping before declaring the entire scan as Exact.
-        if eq_properties.ordering_satisfy(order.iter().cloned())? {
+        if eq_properties.ordering_satisfy(order.iter().cloned()) {
             return Ok(SortOrderPushdownResult::Exact {
                 inner: Arc::new(self.clone()) as Arc<dyn FileSource>,
             });
@@ -984,7 +984,7 @@ impl FileSource for ParquetSource {
         // is already in prefix order the stats-based reorder is mostly
         // a no-op anyway, so the trade-off is plainly bad.
         for prefix_len in 1..order.len() {
-            if eq_properties.ordering_satisfy(order[..prefix_len].iter().cloned())? {
+            if eq_properties.ordering_satisfy(order[..prefix_len].iter().cloned()) {
                 return Ok(SortOrderPushdownResult::Unsupported);
             }
         }
@@ -1031,15 +1031,19 @@ impl FileSource for ParquetSource {
         // the request can be tested against the reversed orderings
         // via the same `ordering_satisfy` API.
         let reversed_eq_properties = {
-            let mut new = eq_properties.clone();
-            new.clear_orderings();
+            let mut new = eq_properties.clone().reordered(None);
             let reversed_orderings = eq_properties
-                .oeq_class()
+                .orderings()
                 .iter()
                 .map(|ordering| {
                     ordering
                         .iter()
-                        .map(|expr| expr.reverse())
+                        .map(|step| match step {
+                            Step::Sort(members) => {
+                                Step::Sort(members.iter().map(|m| m.reverse()).collect())
+                            }
+                            Step::Group(_) => step.clone(),
+                        })
                         .collect::<Vec<_>>()
                 })
                 .collect::<Vec<_>>();
@@ -1047,7 +1051,7 @@ impl FileSource for ParquetSource {
             new
         };
         let reversed_satisfies =
-            reversed_eq_properties.ordering_satisfy(order.iter().cloned())?;
+            reversed_eq_properties.ordering_satisfy(order.iter().cloned());
         let sort_order = LexOrdering::new(order.iter().cloned());
         let column_in_file_schema = sort_order.as_ref().is_some_and(|s| {
             s.first().expr.downcast_ref::<Column>().is_some_and(|col| {

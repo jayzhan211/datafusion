@@ -69,8 +69,8 @@ use datafusion_physical_expr::expressions::{
 use datafusion_physical_expr::intervals::utils::check_support;
 use datafusion_physical_expr::utils::collect_columns;
 use datafusion_physical_expr::{
-    AcrossPartitions, AnalysisContext, ConstExpr, ExprBoundaries, PhysicalExpr, analyze,
-    conjunction, split_conjunction,
+    AnalysisContext, ExprBoundaries, PhysicalExpr, analyze, conjunction,
+    split_conjunction,
 };
 
 use datafusion_physical_expr_common::physical_expr::fmt_sql;
@@ -557,28 +557,24 @@ impl FilterExec {
         let mut eq_properties = input.equivalence_properties().clone();
         let (equal_pairs, _) = collect_columns_from_predicate_inner(predicate);
         for (lhs, rhs) in equal_pairs {
-            eq_properties.add_equal_conditions(Arc::clone(lhs), Arc::clone(rhs))?
+            eq_properties.add_equal(Arc::clone(lhs), Arc::clone(rhs))
         }
         // Add the columns that have only one viable value (singleton) after
         // filtering to constants.
-        let constants = collect_columns(predicate)
+        let singletons = collect_columns(predicate)
             .into_iter()
-            .filter(|column| stats.column_statistics[column.index()].is_singleton())
-            .map(|column| {
-                let value = stats.column_statistics[column.index()]
-                    .min_value
-                    .get_value();
-                let expr = Arc::new(column) as _;
-                ConstExpr::new(expr, AcrossPartitions::Uniform(value.cloned()))
-            });
-        // This is for statistics
-        eq_properties.add_constants(constants)?;
+            .filter(|column| stats.column_statistics[column.index()].is_singleton());
+        for column in singletons {
+            let value = stats.column_statistics[column.index()]
+                .min_value
+                .get_value()
+                .cloned();
+            // This is for statistics
+            eq_properties.add_constant(Arc::new(column), value);
+        }
         // This is for logical constant (for example: a = '1', then a could be marked as a constant)
         // to do: how to deal with multiple situation to represent = (for example c1 between 0 and 0)
-        eq_properties.add_constants(ConstExpr::collect_predicate_constants(
-            input.equivalence_properties(),
-            predicate,
-        ))?;
+        eq_properties.add_predicate_constants(input.equivalence_properties(), predicate);
 
         let mut output_partitioning = input.output_partitioning().clone();
         // If contains projection, update the PlanProperties.

@@ -571,7 +571,7 @@ impl MemorySourceConfig {
         target_partitions: usize,
         output_ordering: LexOrdering,
     ) -> Result<Option<Vec<Vec<RecordBatch>>>> {
-        if !self.eq_properties().ordering_satisfy(output_ordering)? {
+        if !self.eq_properties().ordering_satisfy(output_ordering) {
             Ok(None)
         } else {
             let total_num_batches =
@@ -1059,8 +1059,8 @@ mod memory_source_tests {
             &expected_output_order
         );
         let eq_properties = mem_exec.properties().equivalence_properties();
-        assert!(eq_properties.oeq_class().contains(&sort1));
-        assert!(eq_properties.oeq_class().contains(&sort2));
+        assert!(eq_properties.orderings().contains(&sort1.clone().into()));
+        assert!(eq_properties.orderings().contains(&sort2.clone().into()));
         Ok(())
     }
 }

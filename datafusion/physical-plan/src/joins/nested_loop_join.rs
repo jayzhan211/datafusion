@@ -17,6 +17,8 @@
 
 //! [`NestedLoopJoinExec`]: joins without equijoin (equality predicates).
 
+use crate::joins::utils::ordered_side;
+use datafusion_physical_expr::EquivalenceProperties;
 use std::fmt::Formatter;
 use std::ops::{BitOr, ControlFlow};
 use std::sync::Arc;
@@ -78,9 +80,7 @@ use datafusion_execution::memory_pool::{MemoryConsumer, MemoryPool, MemoryReserv
 use datafusion_execution::{SpillFile, TaskContext};
 use datafusion_expr::JoinType;
 use datafusion_physical_expr::PhysicalExpr;
-use datafusion_physical_expr::equivalence::{
-    ProjectionMapping, join_equivalence_properties,
-};
+use datafusion_physical_expr::equivalence::ProjectionMapping;
 use datafusion_physical_expr::expressions::DynamicFilterPhysicalExpr;
 
 use datafusion_physical_expr::projection::{ProjectionRef, combine_projections};
@@ -393,15 +393,15 @@ impl NestedLoopJoinExec {
         projection: Option<&[usize]>,
     ) -> Result<PlanProperties> {
         // Calculate equivalence properties:
-        let mut eq_properties = join_equivalence_properties(
-            left.equivalence_properties().clone(),
-            right.equivalence_properties().clone(),
+        let mut eq_properties = EquivalenceProperties::join(
+            left.equivalence_properties(),
+            right.equivalence_properties(),
             &join_type,
             Arc::clone(schema),
-            &Self::maintains_input_order(join_type),
-            None,
             // No on columns in nested loop join
             &[],
+            ordered_side(&Self::maintains_input_order(join_type)),
+            None,
         )?;
 
         let mut output_partitioning =

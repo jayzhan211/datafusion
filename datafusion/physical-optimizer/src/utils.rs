@@ -18,7 +18,7 @@
 use std::sync::Arc;
 
 use datafusion_common::Result;
-use datafusion_physical_expr::{Distribution, LexOrdering, LexRequirement};
+use datafusion_physical_expr::{Distribution, Ordering};
 use datafusion_physical_plan::coalesce_partitions::CoalescePartitionsExec;
 use datafusion_physical_plan::limit::{GlobalLimitExec, LocalLimitExec};
 use datafusion_physical_plan::repartition::RepartitionExec;
@@ -37,18 +37,15 @@ use datafusion_physical_plan::{ExecutionPlan, ExecutionPlanProperties};
 /// the child plans with [`PlanContext::update_plan_from_children`].
 pub fn add_sort_above<T: Clone + Default>(
     node: PlanContext<T>,
-    sort_requirements: LexRequirement,
+    sort_requirements: Ordering,
     fetch: Option<usize>,
 ) -> PlanContext<T> {
-    let mut sort_reqs: Vec<_> = sort_requirements.into();
-    sort_reqs.retain(|sort_expr| {
-        node.plan
-            .equivalence_properties()
-            .is_expr_constant(&sort_expr.expr)
-            .is_none()
-    });
-    let sort_exprs = sort_reqs.into_iter().map(Into::into).collect::<Vec<_>>();
-    let Some(ordering) = LexOrdering::new(sort_exprs) else {
+    // Any constant may be dropped here, including per-partition ones (#26454).
+    let eq_properties = node.plan.equivalence_properties();
+    let sort_reqs = sort_requirements
+        .into_iter()
+        .filter(|step| !step.exprs().all(|e| eq_properties.is_constant(e)));
+    let Some(ordering) = Ordering::new(sort_reqs).to_sort() else {
         return node;
     };
     let mut new_sort = SortExec::new(ordering, Arc::clone(&node.plan)).with_fetch(fetch);
@@ -64,19 +61,16 @@ pub fn add_sort_above<T: Clone + Default>(
 /// from violating `SinglePartition` requirements.
 pub fn add_sort_above_with_distribution<T: Clone + Default>(
     node: PlanContext<T>,
-    sort_requirements: LexRequirement,
+    sort_requirements: Ordering,
     fetch: Option<usize>,
     required_distribution: &Distribution,
 ) -> PlanContext<T> {
-    let mut sort_reqs: Vec<_> = sort_requirements.into();
-    sort_reqs.retain(|sort_expr| {
-        node.plan
-            .equivalence_properties()
-            .is_expr_constant(&sort_expr.expr)
-            .is_none()
-    });
-    let sort_exprs = sort_reqs.into_iter().map(Into::into).collect::<Vec<_>>();
-    let Some(ordering) = LexOrdering::new(sort_exprs) else {
+    // Any constant may be dropped here, including per-partition ones (#26454).
+    let eq_properties = node.plan.equivalence_properties();
+    let sort_reqs = sort_requirements
+        .into_iter()
+        .filter(|step| !step.exprs().all(|e| eq_properties.is_constant(e)));
+    let Some(ordering) = Ordering::new(sort_reqs).to_sort() else {
         return node;
     };
     let input_has_multiple_partitions =
@@ -113,13 +107,13 @@ pub fn add_sort_above_with_distribution<T: Clone + Default>(
 /// requirement is already satisfied no `SortExec` is added.
 pub fn add_sort_above_with_check<T: Clone + Default>(
     node: PlanContext<T>,
-    sort_requirements: LexRequirement,
+    sort_requirements: Ordering,
     fetch: Option<usize>,
 ) -> Result<PlanContext<T>> {
     if !node
         .plan
         .equivalence_properties()
-        .ordering_satisfy_requirement(sort_requirements.clone())?
+        .ordering_satisfy(sort_requirements.clone())
     {
         Ok(add_sort_above(node, sort_requirements, fetch))
     } else {
