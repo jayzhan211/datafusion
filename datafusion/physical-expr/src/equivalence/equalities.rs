@@ -34,7 +34,7 @@ use indexmap::{IndexMap, IndexSet};
 
 /// Disjoint classes of expressions that are equal on every row.
 ///
-/// Invariants, kept by [`Self::add`], the only writer:
+/// Invariants, kept by `add`, the only writer:
 /// - classes are disjoint and have at least two members;
 /// - no member is a `Literal` (`a = 5` is a constant, see
 ///   `EquivalenceProperties::add_equal`);

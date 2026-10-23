@@ -236,6 +236,25 @@ ORDER BY b, c;
 3 75
 3 76
 
+# Union where each side orders a column the other leaves unordered: x is a
+# strict image of a on the left side only, y on the right side only. Both
+# sides are sorted by a, so the union is too.
+query TT
+EXPLAIN SELECT a, CAST(a AS BIGINT) x, CAST(d AS BIGINT) y FROM t
+UNION ALL
+SELECT a, CAST(d AS BIGINT) x, CAST(a AS BIGINT) y FROM t
+ORDER BY a;
+----
+physical_plan
+01)SortPreservingMergeExec: [a@0 ASC NULLS LAST]
+02)--UnionExec
+03)----ProjectionExec: expr=[a@0 as a, CAST(a@0 AS Int64) as x, CAST(d@1 AS Int64) as y]
+04)------RepartitionExec: partitioning=RoundRobinBatch(4), input_partitions=1, maintains_sort_order=true
+05)--------DataSourceExec: file_groups={1 group: [[WORKSPACE_ROOT/datafusion/core/tests/data/window_2.csv]]}, projection=[a, d], output_ordering=[a@0 ASC NULLS LAST], file_type=csv, has_header=true
+06)----ProjectionExec: expr=[a@0 as a, CAST(d@1 AS Int64) as x, CAST(a@0 AS Int64) as y]
+07)------RepartitionExec: partitioning=RoundRobinBatch(4), input_partitions=1, maintains_sort_order=true
+08)--------DataSourceExec: file_groups={1 group: [[WORKSPACE_ROOT/datafusion/core/tests/data/window_2.csv]]}, projection=[a, d], output_ordering=[a@0 ASC NULLS LAST], file_type=csv, has_header=true
+
 # Cross join keeps the left side's constants and orderings.
 statement ok
 CREATE TABLE small(x INT) AS VALUES (1), (2);
@@ -490,6 +509,29 @@ set datafusion.optimizer.prefer_existing_sort = false;
 
 statement ok
 set datafusion.optimizer.repartition_file_scans = true;
+
+# A merge keeps the strict images of its key: x = CAST(a) is sorted wherever
+# a is, so after the order-preserving repartition on a, b, c the window's
+# PARTITION BY x ORDER BY b holds without a sort (an unbounded input could
+# not be sorted).
+statement ok
+CREATE UNBOUNDED EXTERNAL TABLE t_inf (a0 INTEGER, a INTEGER, b INTEGER, c INTEGER, d INTEGER)
+STORED AS CSV
+WITH ORDER (a ASC, b ASC, c ASC)
+LOCATION '../core/tests/data/window_2.csv'
+OPTIONS ('format.has_header' 'true');
+
+query TT
+EXPLAIN SELECT a, x, SUM(c) OVER (PARTITION BY x ORDER BY b) s
+FROM (SELECT CAST(a AS BIGINT) x, a, b, c FROM t_inf);
+----
+physical_plan
+01)ProjectionExec: expr=[a@1 as a, x@0 as x, sum(t_inf.c) PARTITION BY [x] ORDER BY [t_inf.b ASC NULLS LAST] RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW@4 as s]
+02)--BoundedWindowAggExec: wdw=[sum(t_inf.c) PARTITION BY [x] ORDER BY [t_inf.b ASC NULLS LAST] RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW: Field { "sum(t_inf.c) PARTITION BY [x] ORDER BY [t_inf.b ASC NULLS LAST] RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW": nullable Int64 }, frame: RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW], mode=[Sorted]
+03)----RepartitionExec: partitioning=Hash([x@0], 2), input_partitions=2, preserve_order=true, sort_exprs=a@1 ASC NULLS LAST, b@2 ASC NULLS LAST, c@3 ASC NULLS LAST, x@0 ASC NULLS LAST
+04)------ProjectionExec: expr=[CAST(a@0 AS Int64) as x, a@0 as a, b@1 as b, c@2 as c]
+05)--------RepartitionExec: partitioning=RoundRobinBatch(2), input_partitions=1, maintains_sort_order=true
+06)----------StreamingTableExec: partition_sizes=1, projection=[a, b, c], infinite_source=true, output_ordering=[a@0 ASC NULLS LAST, b@1 ASC NULLS LAST, c@2 ASC NULLS LAST]
 
 # A merge keeps an all-partition constant: b = 1 holds in every partition.
 query TT

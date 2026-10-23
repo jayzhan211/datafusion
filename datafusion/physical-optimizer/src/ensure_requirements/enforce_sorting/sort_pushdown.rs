@@ -766,8 +766,7 @@ fn handle_aggregate_pushdown(
         .equivalence_properties()
         .ordering_satisfy(child_requirement.iter().cloned())
     {
-        let child_requirements = OrderingRequirements::new(child_requirement);
-        Ok(Some(vec![Some(child_requirements)]))
+        Ok(Some(vec![OrderingRequirements::new(child_requirement)]))
     } else {
         Ok(None)
     }
@@ -1366,7 +1365,8 @@ mod tests {
         let required = OrderingRequirements::new(lex([
             req("score", &out, DESC),
             req("a", &out, ASC),
-        ]));
+        ]))
+        .unwrap();
 
         let remapped =
             remap_requirement_through_projection(&projection, &required).unwrap();
@@ -1375,7 +1375,8 @@ mod tests {
         let expected = OrderingRequirements::new(lex([
             req("c", &child, DESC),
             req("a", &child, ASC),
-        ]));
+        ]))
+        .unwrap();
         assert_eq!(remapped, expected);
     }
 
@@ -1385,11 +1386,13 @@ mod tests {
         let out = projection.schema();
         let child = child_schema();
 
-        let required = OrderingRequirements::new_soft(lex([req("score", &out, DESC)]));
+        let required =
+            OrderingRequirements::new_soft(lex([req("score", &out, DESC)])).unwrap();
         let remapped =
             remap_requirement_through_projection(&projection, &required).unwrap();
 
-        let expected = OrderingRequirements::new_soft(lex([req("c", &child, DESC)]));
+        let expected =
+            OrderingRequirements::new_soft(lex([req("c", &child, DESC)])).unwrap();
         assert_eq!(remapped, expected);
         // Hardness/softness is preserved through the remap.
         assert!(matches!(remapped, OrderingRequirements::Soft(_)));
@@ -1402,7 +1405,8 @@ mod tests {
         let child = child_schema();
 
         // Two alternatives: `score@1 DESC` or `a@0 ASC, value@2 ASC`.
-        let mut required = OrderingRequirements::new(lex([req("score", &out, DESC)]));
+        let mut required =
+            OrderingRequirements::new(lex([req("score", &out, DESC)])).unwrap();
         required.add_alternative(lex([req("a", &out, ASC), req("value", &out, ASC)]));
 
         let remapped =
@@ -1425,7 +1429,7 @@ mod tests {
 
         // Alt 1 (`a@0 ASC`) is expressible below the projection; alt 2
         // (`computed@1 DESC`) maps to `b + c` and is not.
-        let mut required = OrderingRequirements::new(lex([req("a", &out, ASC)]));
+        let mut required = OrderingRequirements::new(lex([req("a", &out, ASC)])).unwrap();
         required.add_alternative(lex([req("computed", &out, DESC)]));
 
         let remapped =
@@ -1444,7 +1448,8 @@ mod tests {
         let out = projection.schema();
 
         // The only required column maps to a computed expression -> decline.
-        let required = OrderingRequirements::new(lex([req("computed", &out, DESC)]));
+        let required =
+            OrderingRequirements::new(lex([req("computed", &out, DESC)])).unwrap();
         assert!(remap_requirement_through_projection(&projection, &required).is_none());
     }
 
@@ -1453,7 +1458,8 @@ mod tests {
         let projection = computed_projection();
         let out = projection.schema();
 
-        let mut required = OrderingRequirements::new(lex([req("computed", &out, DESC)]));
+        let mut required =
+            OrderingRequirements::new(lex([req("computed", &out, DESC)])).unwrap();
         required.add_alternative(lex([req("computed", &out, ASC)]));
 
         assert!(remap_requirement_through_projection(&projection, &required).is_none());

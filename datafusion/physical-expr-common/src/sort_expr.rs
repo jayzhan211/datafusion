@@ -29,7 +29,7 @@ use crate::physical_expr::{PhysicalExpr, fmt_sql};
 use arrow::compute::kernels::sort::{SortColumn, SortOptions};
 use arrow::datatypes::Schema;
 use arrow::record_batch::RecordBatch;
-use datafusion_common::Result;
+use datafusion_common::{HashMap, Result};
 use datafusion_expr_common::columnar_value::ColumnarValue;
 use indexmap::IndexSet;
 /// Represents Sort operation for a column in a RecordBatch
@@ -322,11 +322,12 @@ pub enum Step {
     /// Sorted by each member, with that member's options. Never empty.
     ///
     /// In an ordering the data provides, the members are strict images of
-    /// each other (two rows equal on one member are equal on all), so one
-    /// member's value fixes the others. Only projection builds more than one
-    /// member, and it checks strictness on the member alone (one input
-    /// ordered, nothing else pinned). In a requirement, every member must
-    /// hold; requirements built in-tree have one member.
+    /// each other on every row (two rows equal on one member are equal on
+    /// all), so one member's value fixes the others wherever the step
+    /// appears. Projection builds more than one member and checks strictness
+    /// on the member alone (one input ordered, nothing else pinned); union
+    /// and merges only keep or cut down such steps. In a requirement, every
+    /// member must hold; requirements built in-tree have one member.
     Sort(Vec<PhysicalSortExpr>),
     /// Rows with equal values of `exprs` are contiguous; nothing is said
     /// about the order between those groups. Never empty.
@@ -743,9 +744,29 @@ impl From<LexOrdering> for Vec<PhysicalSortExpr> {
 /// Invariant: no step repeats only expressions of earlier steps (such a step
 /// holds trivially, because the earlier steps fix its value), so these are
 /// dropped on construction, as `LexOrdering` drops duplicate expressions.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Default)]
 pub struct Ordering {
     steps: Vec<Step>,
+    /// How many steps each expression appears in, so that [`Self::push`]
+    /// checks the invariant without scanning the steps. Derived from
+    /// `steps`; equality and `Debug` ignore it.
+    seen: HashMap<Arc<dyn PhysicalExpr>, usize>,
+}
+
+impl PartialEq for Ordering {
+    fn eq(&self, other: &Self) -> bool {
+        self.steps == other.steps
+    }
+}
+
+impl Eq for Ordering {}
+
+impl fmt::Debug for Ordering {
+    fn fmt(&self, f: &mut Formatter) -> fmt::Result {
+        f.debug_struct("Ordering")
+            .field("steps", &self.steps)
+            .finish()
+    }
 }
 
 impl Ordering {
@@ -765,17 +786,27 @@ impl Ordering {
 
     /// Appends `step` unless every expression in it appeared earlier.
     pub fn push(&mut self, step: Step) {
-        let seen = |e: &Arc<dyn PhysicalExpr>| {
-            self.steps.iter().any(|s| s.exprs().any(|x| x.eq(e)))
-        };
-        if !step.exprs().all(seen) {
-            self.steps.push(step);
+        if step.exprs().all(|e| self.seen.contains_key(e)) {
+            return;
         }
+        for expr in step.exprs() {
+            *self.seen.entry(Arc::clone(expr)).or_default() += 1;
+        }
+        self.steps.push(step);
     }
 
     /// Removes and returns the last step.
     pub fn pop(&mut self) -> Option<Step> {
-        self.steps.pop()
+        let step = self.steps.pop()?;
+        for expr in step.exprs() {
+            if let Some(count) = self.seen.get_mut(expr) {
+                *count -= 1;
+                if *count == 0 {
+                    self.seen.remove(expr);
+                }
+            }
+        }
+        Some(step)
     }
 
     /// Whether `prefix` is a prefix of this ordering.
@@ -784,14 +815,21 @@ impl Ordering {
     }
 
     /// The provided ordering as sort expressions (Q6, merge keys): the first
-    /// member of each `Sort` step, stopping at the first `Group` step, since
-    /// merging grouped streams does not keep groups contiguous.
+    /// member of each `Sort` step, then the other members (each is fixed by
+    /// the first member of its step, so it adds no order, but it names the
+    /// images a reader may ask for, as the separate orderings did before),
+    /// stopping at the first `Group` step, since merging grouped streams does
+    /// not keep groups contiguous.
     pub fn to_lex(&self) -> Option<LexOrdering> {
-        let sorts = self.steps.iter().map_while(|step| match step {
-            Step::Sort(members) => Some(members[0].clone()),
-            Step::Group(_) => None,
-        });
-        LexOrdering::new(sorts)
+        let sorts: Vec<_> = (self.steps.iter())
+            .map_while(|step| match step {
+                Step::Sort(members) => Some(members),
+                Step::Group(_) => None,
+            })
+            .collect();
+        let firsts = sorts.iter().map(|members| members[0].clone());
+        let others = (sorts.iter()).flat_map(|members| members[1..].iter().cloned());
+        LexOrdering::new(firsts.chain(others))
     }
 
     /// A sort that satisfies this requirement (see [`Step::to_sort_exprs`]).
@@ -904,6 +942,9 @@ impl Display for Ordering {
 /// It is non-degenerate: it holds at least one non-empty ordering. The
 /// absence of an input ordering requirement is represented by a `None` value
 /// in `ExecutionPlan` APIs, which return an `Option<OrderingRequirements>`.
+/// The constructors return `None` for empty input and `add_alternative`
+/// skips an empty ordering, so this holds in release builds too; only
+/// writing through `DerefMut` can break it.
 #[derive(Debug, Clone, PartialEq)]
 pub enum OrderingRequirements {
     /// The operator is not able to work without one of these requirements.
@@ -933,18 +974,16 @@ impl OrderingRequirements {
         })
     }
 
-    /// Creates a new instance with a single hard requirement, which must not
-    /// be empty.
-    pub fn new(requirement: Ordering) -> Self {
-        debug_assert!(!requirement.is_empty());
-        Self::Hard(vec![requirement])
+    /// Creates a new instance with a single hard requirement. If it is empty,
+    /// returns `None` (no requirement).
+    pub fn new(requirement: Ordering) -> Option<Self> {
+        Self::new_alternatives([requirement], false)
     }
 
-    /// Creates a new instance with a single soft requirement, which must not
-    /// be empty.
-    pub fn new_soft(requirement: Ordering) -> Self {
-        debug_assert!(!requirement.is_empty());
-        Self::Soft(vec![requirement])
+    /// Creates a new instance with a single soft requirement. If it is empty,
+    /// returns `None` (no requirement).
+    pub fn new_soft(requirement: Ordering) -> Option<Self> {
+        Self::new_alternatives([requirement], true)
     }
 
     /// Adds an alternative requirement to the list of alternatives.
@@ -982,15 +1021,10 @@ impl OrderingRequirements {
     }
 }
 
-impl From<Ordering> for OrderingRequirements {
-    fn from(requirement: Ordering) -> Self {
-        Self::new(requirement)
-    }
-}
-
 impl From<LexOrdering> for OrderingRequirements {
+    /// A `LexOrdering` is never empty, so neither is the requirement.
     fn from(ordering: LexOrdering) -> Self {
-        Self::new(ordering.into())
+        Self::Hard(vec![ordering.into()])
     }
 }
 
@@ -1015,6 +1049,17 @@ impl DerefMut for OrderingRequirements {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Review S6: an empty requirement used to be accepted outside debug
+    /// builds (`debug_assert!` only), and callers `expect` a first sort.
+    #[test]
+    fn test_ordering_requirements_are_never_empty() {
+        assert!(OrderingRequirements::new(Ordering::default()).is_none());
+        assert!(OrderingRequirements::new_soft(Ordering::default()).is_none());
+        assert!(OrderingRequirements::new_alternatives([], false).is_none());
+        let empty = [Ordering::default(), Ordering::default()];
+        assert!(OrderingRequirements::new_alternatives(empty, true).is_none());
+    }
 
     #[test]
     fn test_is_reversed_sort_options() {

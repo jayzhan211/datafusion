@@ -22,7 +22,7 @@
 use std::sync::Arc;
 
 use super::equalities::Equalities;
-use super::properties::{EquivalenceProperties, NormalFacts};
+use super::properties::{EquivalenceProperties, NormalFacts, fixed_by, without_fixed};
 use crate::expressions::{Column, Literal};
 use crate::{LexOrdering, PhysicalExpr, PhysicalSortExpr};
 
@@ -88,9 +88,14 @@ impl EquivalenceProperties {
             if round.is_empty() {
                 break;
             }
-            for (sort_expr, i) in &round {
-                walk.pin(Arc::clone(&sort_expr.expr));
+            for (_, i) in &round {
                 left.shift_remove(i);
+            }
+            // The last round needs no pins: nothing is left to ask about.
+            if !left.is_empty() {
+                for (sort_expr, _) in &round {
+                    walk.pin(Arc::clone(&sort_expr.expr));
+                }
             }
             result.extend(round);
         }
@@ -123,12 +128,24 @@ impl EquivalenceProperties {
             return normal.len();
         }
         let mut walk = Walk::new(self);
-        for (i, step) in normal.iter().enumerate() {
+        let Some((last, steps)) = normal.split_last() else {
+            return 0;
+        };
+        for (i, step) in steps.iter().enumerate() {
             if !walk.match_step(step) {
                 return i;
             }
         }
-        normal.len()
+        // Nothing follows the last step, so it is checked without pinning.
+        let last_holds = match last {
+            Step::Sort(members) => members.iter().all(|m| walk.holds(m)),
+            Step::Group(_) => walk.match_step(last),
+        };
+        if last_holds {
+            normal.len()
+        } else {
+            steps.len()
+        }
     }
 
     /// A PRIMARY KEY or UNIQUE whose columns all sit in one stored ordering
@@ -206,10 +223,19 @@ pub(super) struct Walk<'a> {
     /// Expressions with one value among the rows that tie on everything
     /// matched so far, in normal form.
     pinned: HashSet<Arc<dyn PhysicalExpr>>,
+    /// The other members of each multi-member `Sort` step of `base`, by
+    /// member: pinning one pins them.
+    members: HashMap<Arc<dyn PhysicalExpr>, Vec<Arc<dyn PhysicalExpr>>>,
     /// Orderings OD reduce finds once pins have moved a head (see
-    /// [`derived_orderings`]).
+    /// [`derived_orderings`]). Each holds among the rows that tie on the
+    /// pins it was found with; pins only grow, so it keeps holding.
     derived: Vec<Ordering>,
-    /// The first step of each ordering that pins and constants do not fix.
+    /// For each ordering (`base`, then `derived`), the index of its first
+    /// step that pins and constants do not fix. Pins only grow, so a cursor
+    /// only moves forward.
+    cursors: Vec<usize>,
+    /// The step at each cursor, without its determined parts; orderings
+    /// whose steps are all fixed have none.
     heads: Vec<Step>,
 }
 
@@ -224,21 +250,40 @@ impl<'a> Walk<'a> {
     }
 
     fn with_orderings(props: &'a EquivalenceProperties, base: &'a [Ordering]) -> Self {
-        let normal = props.normal();
+        let mut members: HashMap<_, Vec<_>> = HashMap::new();
+        for step in base.iter().flat_map(|o| o.iter()) {
+            if let Step::Sort(sorts) = step
+                && sorts.len() > 1
+            {
+                for sort in sorts {
+                    let others = sorts.iter().filter(|m| !m.expr.eq(&sort.expr));
+                    let entry = members.entry(Arc::clone(&sort.expr)).or_default();
+                    entry.extend(others.map(|m| Arc::clone(&m.expr)));
+                }
+            }
+        }
         let mut walk = Self {
             props,
-            normal,
+            normal: props.normal(),
             base,
             pinned: HashSet::new(),
+            members,
             derived: vec![],
+            cursors: vec![0; base.len()],
             heads: vec![],
         };
-        walk.heads = walk.compute_heads();
+        walk.advance();
         walk
     }
 
     fn eq(&self) -> &Equalities {
         self.props.equalities()
+    }
+
+    fn ordering(&self, i: usize) -> &Ordering {
+        self.base
+            .get(i)
+            .unwrap_or_else(|| &self.derived[i - self.base.len()])
     }
 
     fn orderings(&self) -> impl Iterator<Item = &Ordering> {
@@ -249,38 +294,67 @@ impl<'a> Walk<'a> {
     /// on the pinned expressions: a literal, a constant, a pinned
     /// expression, or a function of such.
     pub(super) fn is_determined(&self, expr: &Arc<dyn PhysicalExpr>) -> bool {
-        if expr.is::<Literal>()
-            || self.pinned.contains(expr)
-            || self.normal.constants.contains_key(expr)
-        {
-            return true;
-        }
-        let children = expr.children();
-        !children.is_empty() && children.into_iter().all(|c| self.is_determined(c))
+        fixed_by(expr, &|e| {
+            self.pinned.contains(e) || self.normal.constants.contains_key(e)
+        })
     }
 
-    /// `step` without its determined parts: `None` for a `Sort` step with a
-    /// determined member (its members are strict images, so all are), and a
-    /// `Group` step without its determined expressions.
+    /// `step` without its determined parts (see [`without_fixed`]).
     fn undetermined(&self, step: &Step) -> Option<Step> {
-        match step {
-            Step::Sort(m) if m.iter().any(|m| self.is_determined(&m.expr)) => None,
-            Step::Sort(_) => Some(step.clone()),
-            Step::Group(g) => {
-                let g: IndexSet<_> = g
-                    .iter()
-                    .filter(|e| !self.is_determined(e))
-                    .cloned()
-                    .collect();
-                (!g.is_empty()).then_some(Step::Group(g))
-            }
-        }
+        without_fixed(step, |e| self.is_determined(e))
     }
 
-    fn compute_heads(&self) -> Vec<Step> {
-        self.orderings()
-            .filter_map(|o| o.iter().find_map(|s| self.undetermined(s)))
-            .collect()
+    /// Brings the walk up to date with the pins: moves each cursor past the
+    /// steps that are now fixed, runs OD reduce on the orderings whose head
+    /// may be a function of the steps after it, and refreshes the heads.
+    /// Each cursor moves forward only, so a walk over `n` steps costs `O(n)`
+    /// cursor moves in total, plus one head per ordering per pin.
+    fn advance(&mut self) {
+        loop {
+            self.cursors.resize(self.base.len() + self.derived.len(), 0);
+            for i in 0..self.cursors.len() {
+                let ordering = self.ordering(i);
+                let mut cursor = self.cursors[i];
+                while cursor < ordering.len()
+                    && self.undetermined(&ordering[cursor]).is_none()
+                {
+                    cursor += 1;
+                }
+                self.cursors[i] = cursor;
+            }
+            if self.pinned.is_empty() {
+                // The stored orderings were reduced when they were built.
+                break;
+            }
+            let rests: Vec<Ordering> = (0..self.cursors.len())
+                .filter(|&i| {
+                    let ordering = self.ordering(i);
+                    let cursor = self.cursors[i];
+                    cursor < ordering.len() && may_reduce(self.eq(), &ordering[cursor])
+                })
+                .map(|i| {
+                    let steps = self.ordering(i)[self.cursors[i]..].iter();
+                    steps.filter_map(|s| self.undetermined(s)).collect()
+                })
+                .collect();
+            if rests.is_empty() {
+                break;
+            }
+            let known: Vec<&Ordering> = self.orderings().chain(&rests).collect();
+            let derived =
+                derived_orderings(self.eq(), self.props.schema(), &rests, &known);
+            if derived.is_empty() {
+                break;
+            }
+            self.derived.extend(derived);
+        }
+        self.heads = (0..self.cursors.len())
+            .filter_map(|i| {
+                let ordering = self.ordering(i);
+                let step = ordering.get(self.cursors[i])?;
+                self.undetermined(step)
+            })
+            .collect();
     }
 
     /// How `expr` is ordered among the rows that tie on the pinned
@@ -329,14 +403,8 @@ impl<'a> Walk<'a> {
     pub(super) fn match_step(&mut self, step: &Step) -> bool {
         match step {
             Step::Sort(members) => {
-                for m in members {
-                    let nullable = m.expr.nullable(self.props.schema()).unwrap_or(true);
-                    match self.order_of(&m.expr).sort_properties {
-                        SortProperties::Singleton => {}
-                        SortProperties::Ordered(o)
-                            if options_compatible(&o, &m.options, nullable) => {}
-                        _ => return false,
-                    }
+                if !members.iter().all(|m| self.holds(m)) {
+                    return false;
                 }
                 for m in members {
                     self.pin_satisfied(Arc::clone(&m.expr));
@@ -344,6 +412,17 @@ impl<'a> Walk<'a> {
                 true
             }
             Step::Group(exprs) => self.match_group(exprs),
+        }
+    }
+
+    /// Whether the data is sorted as `sort` asks at this point of the walk:
+    /// ordered with compatible options, or determined.
+    pub(super) fn holds(&self, sort: &PhysicalSortExpr) -> bool {
+        let nullable = sort.expr.nullable(self.props.schema()).unwrap_or(true);
+        match self.order_of(&sort.expr).sort_properties {
+            SortProperties::Singleton => true,
+            SortProperties::Ordered(o) => options_compatible(&o, &sort.options, nullable),
+            SortProperties::Unordered => false,
         }
     }
 
@@ -378,7 +457,7 @@ impl<'a> Walk<'a> {
     /// fixes: if it is strictly order preserving, equal outputs mean equal
     /// ordered inputs, so `CAST(a)` fixes `a`. Strictness is judged before
     /// the expression itself is pinned.
-    fn pin_satisfied(&mut self, expr: Arc<dyn PhysicalExpr>) {
+    pub(super) fn pin_satisfied(&mut self, expr: Arc<dyn PhysicalExpr>) {
         let mut stack = vec![expr];
         while let Some(expr) = stack.pop() {
             if self.order_of(&expr).strictly_order_preserving {
@@ -404,24 +483,11 @@ impl<'a> Walk<'a> {
             if !self.pinned.insert(Arc::clone(&expr)) {
                 continue;
             }
-            for step in self.orderings().flat_map(|o| o.iter()) {
-                if let Step::Sort(members) = step
-                    && members.len() > 1
-                    && members.iter().any(|m| m.expr.eq(&expr))
-                {
-                    stack.extend(members.iter().map(|m| Arc::clone(&m.expr)));
-                }
+            if let Some(others) = self.members.get(&expr) {
+                stack.extend(others.iter().cloned());
             }
         }
-        let undetermined: Vec<Ordering> = self
-            .orderings()
-            .map(|o| o.iter().filter_map(|s| self.undetermined(s)).collect())
-            .collect();
-        let known: Vec<&Ordering> = self.orderings().chain(&undetermined).collect();
-        let derived =
-            derived_orderings(self.eq(), self.props.schema(), &undetermined, &known);
-        self.derived.extend(derived);
-        self.heads = self.compute_heads();
+        self.advance();
     }
 }
 
@@ -471,6 +537,18 @@ pub(super) fn derived_orderings(
         }
     }
     result
+}
+
+/// A cheap first test for [`derived_from_next`]: whether `head` is a `Sort`
+/// step with a member that is, or is equal to, a function of something.
+fn may_reduce(eq: &Equalities, head: &Step) -> bool {
+    let Step::Sort(members) = head else {
+        return false;
+    };
+    members.iter().any(|m| match eq.class_of(&m.expr) {
+        Some(class) => class.iter().any(|e| !e.children().is_empty()),
+        None => !m.expr.children().is_empty(),
+    })
 }
 
 /// Whether the head of `ordering` is a lexicographic function of the steps

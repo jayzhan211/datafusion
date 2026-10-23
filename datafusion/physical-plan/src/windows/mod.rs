@@ -908,7 +908,7 @@ mod tests {
                     if let Some(alts) = expected.as_mut() {
                         alts.add_alternative(requirements);
                     } else {
-                        expected = Some(OrderingRequirements::new(requirements));
+                        expected = OrderingRequirements::new(requirements);
                     }
                 }
             }

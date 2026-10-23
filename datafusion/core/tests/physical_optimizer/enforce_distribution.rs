@@ -1464,6 +1464,66 @@ fn range_join_key_alignment_ignores_per_partition_constants() -> Result<()> {
 }
 
 #[test]
+fn range_join_key_alignment_sees_every_ordering_of_an_unbounded_input() -> Result<()> {
+    // Unbounded Range([a, b]) inputs sorted by (c, d) and, separately, by
+    // (a, b). The second ordering satisfies the range order, so realigning
+    // the keys from (b, a) to (a, b) adds no sort and needs no exchange.
+    let input = || -> Result<Arc<dyn ExecutionPlan>> {
+        let schema = schema();
+        let ordering = |names: [&str; 2]| -> Result<LexOrdering> {
+            let sort = |name| -> Result<PhysicalSortExpr> {
+                Ok(PhysicalSortExpr::new(
+                    col(name, &schema)?,
+                    SortOptions::default(),
+                ))
+            };
+            Ok([sort(names[0])?, sort(names[1])?].into())
+        };
+        let partitioning = range_partitioning_multi(
+            &[("a", SortOptions::default()), ("b", SortOptions::default())],
+            &[&[10, 0], &[20, 0], &[30, 0]],
+        )?;
+        let partitions = (0..partitioning.partition_count())
+            .map(|_| {
+                Arc::new(TestStreamPartition {
+                    schema: Arc::clone(&schema),
+                }) as _
+            })
+            .collect();
+        let exec = StreamingTableExec::try_new(
+            Arc::clone(&schema),
+            partitions,
+            None,
+            vec![ordering(["c", "d"])?, ordering(["a", "b"])?],
+            true,
+            None,
+        )?
+        .with_output_partitioning(partitioning)?;
+        Ok(Arc::new(exec))
+    };
+    let left = input()?;
+    let right = input()?;
+    let join_on: JoinOn = vec![
+        (col("b", &left.schema())?, col("b", &right.schema())?),
+        (col("a", &left.schema())?, col("a", &right.schema())?),
+    ];
+    let join = sort_merge_join_exec(left, right, &join_on, &JoinType::Inner);
+
+    check_range_join_key_alignment(join, |plan| {
+        insta::allow_duplicates! {
+            assert_plan!(
+                plan,
+                @r"
+            SortMergeJoinExec: join_type=Inner, on=[(a@0, a@0), (b@1, b@1)]
+              StreamingTableExec: partition_sizes=4, projection=[a, b, c, d, e], infinite_source=true, output_partitioning=Range([a@0 ASC, b@1 ASC], [(10, 0), (20, 0), (30, 0)], 4), output_orderings=[[c@2 ASC, d@3 ASC], [a@0 ASC, b@1 ASC]]
+              StreamingTableExec: partition_sizes=4, projection=[a, b, c, d, e], infinite_source=true, output_partitioning=Range([a@0 ASC, b@1 ASC], [(10, 0), (20, 0), (30, 0)], 4), output_orderings=[[c@2 ASC, d@3 ASC], [a@0 ASC, b@1 ASC]]
+            "
+            );
+        }
+    })
+}
+
+#[test]
 fn range_join_key_alignment_skips_single_partition_range() -> Result<()> {
     // A single-partition Range layout has nothing to co-partition with, so
     // realigning the keys would only replace the existing (b, a) order with

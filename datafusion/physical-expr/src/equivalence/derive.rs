@@ -39,7 +39,7 @@ impl EquivalenceProperties {
     ///   of one source, plus targets of equal sources.
     /// - Constants: each target of a constant source, with the source's scope.
     /// - Orderings: each ordering in normal form, step by step (see
-    ///   [`Self::project_ordering`]).
+    ///   `project_ordering`).
     /// - Keys: projected onto the output columns.
     pub fn project(&self, mapping: &ProjectionMapping, schema: SchemaRef) -> Self {
         let mut facts = Facts {
@@ -105,10 +105,12 @@ impl EquivalenceProperties {
     ///   (`a / 2` for `a`), ends its own ordering: the output prefix plus
     ///   that source's targets.
     /// - The ordering stops at the first step with no output member.
+    /// - A `Group` step goes on only if every expression in it has an
+    ///   output (the mapping rewrites it as is); otherwise the ordering stops.
     ///
     /// Orderings are projected one at a time, so an output ordered only by
-    /// two orderings together is not found; no in-tree expression is
-    /// ordered that way (L5).
+    /// two orderings together is not found here; [`Self::project`] adds a
+    /// one-step ordering for such an output, but nothing longer (L5).
     fn project_ordering(
         &self,
         ordering: &Ordering,
@@ -214,20 +216,23 @@ impl EquivalenceProperties {
                 continue;
             };
             match (l, r) {
+                // behavior kept: two unknown values count as equal (C5, U1).
                 (Scope::Global(a), Scope::Global(b)) if a == b => {
                     out.add_constant(expr, a.clone())
                 }
                 _ => out.add_local_constant(expr),
             }
         }
-        // Each normal ordering of one side that the other side satisfies,
-        // or that fills its gaps with constants of the other side
+        // Each normal ordering of one side, cut down to the step members the
+        // other side has too (`members_in_common`), that the other side
+        // satisfies, or that fills its gaps with constants of the other side
         // (`augment`), or else its longest prefix that does.
         for (side, other) in [(lhs, rhs), (rhs, lhs)] {
             let side_constants = side.constant_exprs();
             let other_constants = other.constant_exprs();
             for ordering in &side.normal().orderings {
-                let mut candidate = ordering.clone();
+                let (mut candidate, truncated) = other.members_in_common(ordering);
+                out.add_orderings(truncated);
                 while !candidate.is_empty() {
                     if other.ordering_satisfy(candidate.clone()) {
                         out.add_ordering(candidate);
@@ -253,6 +258,75 @@ impl EquivalenceProperties {
             }
         }
         out
+    }
+
+    /// `ordering`, a normal ordering of another union input, with each `Sort`
+    /// step cut down to the members that this input orders there too. A
+    /// step's members are strict images of each other on every row (see
+    /// [`Step::Sort`]), so a member stays only if it and the step's first
+    /// kept member fix each other on every row here as well: equal, members
+    /// of one step here, or an all-partition constant (a per-partition one
+    /// fixes nothing across partitions). One that this input orders but
+    /// does not tie to the first ends a truncated ordering of its own
+    /// (returned second). Cutting stops at the first step this input does
+    /// not order; the caller's prefix popping handles what follows. An
+    /// ordering of one-member steps comes back unchanged.
+    fn members_in_common(&self, ordering: &Ordering) -> (Ordering, Vec<Ordering>) {
+        let eq = self.equalities();
+        let fixes =
+            |a: &Arc<dyn PhysicalExpr>, b: &Arc<dyn PhysicalExpr>| {
+                let (a, b) = (eq.normalize(Arc::clone(a)), eq.normalize(Arc::clone(b)));
+                let together = (self.normal().orderings.iter().flat_map(|o| o.iter()))
+                    .any(|step| match step {
+                        Step::Sort(m) => {
+                            m.iter().any(|m| m.expr.eq(&a))
+                                && m.iter().any(|m| m.expr.eq(&b))
+                        }
+                        Step::Group(_) => false,
+                    });
+                a.eq(&b)
+                    || together
+                    || matches!(self.normal().constants.get(&b), Some(Scope::Global(_)))
+            };
+        let mut walk = Walk::new(self);
+        let mut cut = Ordering::default();
+        let mut truncated = vec![];
+        let mut steps = ordering.iter();
+        for step in steps.by_ref() {
+            let kept = match step {
+                Step::Sort(members) => {
+                    let held: Vec<_> = members.iter().filter(|m| walk.holds(m)).collect();
+                    held.split_first().map(|(first, others)| {
+                        let mut kept = vec![(*first).clone()];
+                        for m in others {
+                            if fixes(&first.expr, &m.expr) && fixes(&m.expr, &first.expr)
+                            {
+                                kept.push((*m).clone());
+                            } else {
+                                let mut own = cut.clone();
+                                own.push(Step::Sort(vec![(*m).clone()]));
+                                truncated.push(own);
+                            }
+                        }
+                        Step::Sort(kept)
+                    })
+                }
+                Step::Group(_) => {
+                    let normal = step.try_map(|e| Some(eq.normalize(Arc::clone(e))));
+                    normal
+                        .is_some_and(|n| walk.match_step(&n))
+                        .then(|| step.clone())
+                }
+            };
+            let Some(kept) = kept else {
+                cut.push(step.clone());
+                break;
+            };
+            kept.exprs().for_each(|e| walk.pin_satisfied(Arc::clone(e)));
+            cut.push(kept);
+        }
+        steps.cloned().for_each(|s| cut.push(s));
+        (cut, truncated)
     }
 
     /// Every expression known constant: each stored constant and the other
@@ -296,6 +370,9 @@ impl EquivalenceProperties {
         use JoinType::*;
         let width = left.schema().fields.len();
         // Where a side's columns land in the output; `None` if they don't.
+        // Assumes `schema` is the join's own output layout (left columns,
+        // then right ones; one side only for Semi/Anti/Mark), before any
+        // projection the operator applies on top.
         let offset = |side| match (side, join_type) {
             (JoinSide::Left, RightSemi | RightAnti | RightMark) => None,
             (JoinSide::Right, LeftSemi | LeftAnti | LeftMark) => None,
@@ -306,8 +383,10 @@ impl EquivalenceProperties {
         let mut out = Self::new(schema);
         for (side, facts) in [(JoinSide::Left, left), (JoinSide::Right, right)] {
             let Some(offset) = offset(side) else { continue };
+            // Rows padded with NULLs break the padded side's constants.
             let padded_right =
                 side == JoinSide::Right && matches!(join_type, Left | Full);
+            // behavior kept: a padded left side keeps its constants (W3, found.md).
             out.add_shifted(facts, offset, !padded_right)?;
         }
         if *join_type == Inner {
