@@ -814,7 +814,7 @@ impl Ordering {
         self.steps.starts_with(&prefix.steps)
     }
 
-    /// The provided ordering as sort expressions (Q6, merge keys): the first
+    /// The provided ordering as sort expressions (used as merge keys): the first
     /// member of each `Sort` step, then the other members (each is fixed by
     /// the first member of its step, so it adds no order, but it names the
     /// images a reader may ask for, as the separate orderings did before),
@@ -1050,8 +1050,8 @@ impl DerefMut for OrderingRequirements {
 mod tests {
     use super::*;
 
-    /// Review S6: an empty requirement used to be accepted outside debug
-    /// builds (`debug_assert!` only), and callers `expect` a first sort.
+    /// An empty requirement must not exist: it used to be accepted outside
+    /// debug builds (`debug_assert!` only), and callers `expect` a first sort.
     #[test]
     fn test_ordering_requirements_are_never_empty() {
         assert!(OrderingRequirements::new(Ordering::default()).is_none());

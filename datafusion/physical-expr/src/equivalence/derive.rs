@@ -110,7 +110,7 @@ impl EquivalenceProperties {
     ///
     /// Orderings are projected one at a time, so an output ordered only by
     /// two orderings together is not found here; [`Self::project`] adds a
-    /// one-step ordering for such an output, but nothing longer (L5).
+    /// one-step ordering for such an output, but nothing longer.
     fn project_ordering(
         &self,
         ordering: &Ordering,
@@ -352,7 +352,7 @@ impl EquivalenceProperties {
     /// - Equalities: both sides', plus the `on` keys for an inner join.
     /// - Constants: a side's constants, except on the right side when the
     ///   join pads it with NULLs (Left, Full). The left side keeps its
-    ///   constants even when padded (behavior kept, W3 in found.md).
+    ///   constants even when padded (kept from the previous implementation).
     /// - Orderings: those of `ordered_side`, the side whose order the
     ///   operator keeps. When that side is also `probe_side` and the join is
     ///   Inner or keeps the probe side's unmatched rows, each of its
@@ -386,7 +386,8 @@ impl EquivalenceProperties {
             // Rows padded with NULLs break the padded side's constants.
             let padded_right =
                 side == JoinSide::Right && matches!(join_type, Left | Full);
-            // behavior kept: a padded left side keeps its constants (W3, found.md).
+            // Kept from the previous implementation: a padded left side
+            // keeps its constants.
             out.add_shifted(facts, offset, !padded_right)?;
         }
         if *join_type == Inner {

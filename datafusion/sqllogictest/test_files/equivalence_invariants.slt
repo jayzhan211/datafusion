@@ -91,10 +91,10 @@ physical_plan
 03)----RepartitionExec: partitioning=RoundRobinBatch(4), input_partitions=1, maintains_sort_order=true
 04)------DataSourceExec: file_groups={1 group: [[WORKSPACE_ROOT/datafusion/core/tests/data/window_2.csv]]}, projection=[a, b, c], output_orderings=[[a@0 ASC NULLS LAST, b@1 ASC NULLS LAST], [c@2 ASC NULLS LAST]], file_type=csv, has_header=true
 
-# Q3 order (GROUP BY): with orderings [a, b] and [c], GROUP BY d, c, b, a finds
-# the sorted permutation in input-index order per round. Above the
-# order-preserving repartition only its merge key [a, b, c] holds (W2), so the
-# final aggregate finds [a, b, c] there.
+# Sorted permutation of GROUP BY keys: with orderings [a, b] and [c],
+# GROUP BY d, c, b, a finds the sorted permutation in input-index order per
+# round. Above the order-preserving repartition only its merge key [a, b, c]
+# holds, so the final aggregate finds [a, b, c] there.
 query TT
 EXPLAIN SELECT d, c, b, a, count(*) FROM t GROUP BY d, c, b, a;
 ----
@@ -117,7 +117,8 @@ physical_plan
 05)--------RepartitionExec: partitioning=RoundRobinBatch(4), input_partitions=1, maintains_sort_order=true
 06)----------DataSourceExec: file_groups={1 group: [[WORKSPACE_ROOT/datafusion/core/tests/data/window_2.csv]]}, projection=[a, b, c], output_orderings=[[a@0 ASC NULLS LAST, b@1 ASC NULLS LAST], [c@2 ASC NULLS LAST]], file_type=csv, has_header=true
 
-# Q3 with a constant group key: a constant key comes back with default options.
+# Sorted permutation with a constant group key: a constant key comes back
+# with default options.
 query TT
 EXPLAIN SELECT b, a, count(*) FROM t WHERE b = 1 GROUP BY b, a;
 ----
@@ -405,8 +406,8 @@ physical_plan DataSourceExec: file_groups={1 group: [[WORKSPACE_ROOT/datafusion/
 statement ok
 set datafusion.execution.target_partitions = 4;
 
-# W1 (found.md): over more than one partition, main keeps the input's other
-# orderings after the merge.
+# A merge over more than one partition keeps only its merge key. The previous
+# implementation kept the input's other orderings after the merge.
 query TT
 EXPLAIN SELECT * FROM (SELECT a, b, c FROM t ORDER BY a, b LIMIT 10) ORDER BY c;
 ----
@@ -458,7 +459,7 @@ WITH ORDER (a) WITH ORDER (b)
 LOCATION 'test_files/scratch/equivalence_invariants/w/'
 OPTIONS ('format.has_header' 'true');
 
-# W1 (found.md): a merge on a keeps only the ordering on a, so the outer
+# A merge on a keeps only the ordering on a, so the outer
 # ORDER BY b needs its sort (main dropped it and returned b unsorted).
 query TT
 EXPLAIN SELECT * FROM (SELECT a, b FROM w ORDER BY a LIMIT 10) ORDER BY b;
@@ -476,7 +477,7 @@ SELECT * FROM (SELECT a, b FROM w ORDER BY a LIMIT 10) ORDER BY b;
 1 10
 2 20
 
-# W2 (found.md): a preserve-order repartition merges on [a, b], so only
+# A preserve-order repartition merges on [a, b], so only
 # [a, b] holds after it (main also claimed [b] and dropped the sort).
 statement ok
 set datafusion.optimizer.prefer_existing_sort = true;
@@ -553,7 +554,7 @@ DROP TABLE w;
 statement ok
 set datafusion.execution.target_partitions = 4;
 
-# W3 (found.md): RIGHT join keeps the null-extended left side's constant c.
+# A RIGHT join keeps the null-extended left side's constant c.
 # Plan only: main drops the NULLS FIRST sort on l.c (kept as on main).
 statement ok
 set datafusion.execution.target_partitions = 1;

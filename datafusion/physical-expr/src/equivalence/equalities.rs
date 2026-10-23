@@ -121,7 +121,7 @@ impl Equalities {
         self.index.get(expr).map(|i| &self.classes[*i])
     }
 
-    /// Q5: whether `a` and `b` are equal on every row.
+    /// Whether `a` and `b` are equal on every row.
     pub fn are_equal(
         &self,
         a: &Arc<dyn PhysicalExpr>,

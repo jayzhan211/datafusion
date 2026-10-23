@@ -211,7 +211,7 @@ impl EquivalenceProperties {
         &self.facts.global.keys
     }
 
-    /// Q5: the equalities.
+    /// The equalities.
     pub fn equalities(&self) -> &Equalities {
         &self.facts.eq
     }
@@ -253,9 +253,10 @@ impl EquivalenceProperties {
         if expr.is::<Literal>() {
             return;
         }
-        // behavior kept (X4): a constant that is new (in no class, not yet a
-        // constant) becomes equal to the first all-partition constant with
-        // the same value, two unknown values counting as the same.
+        // Kept from the previous implementation: a constant that is new
+        // (in no class, not yet a constant) becomes equal to the first
+        // all-partition constant with the same value, two unknown values
+        // counting as the same.
         let is_new = self.facts.eq.class_of(&expr).is_none()
             && !self.facts.global.constants.contains_key(&expr)
             && !self.facts.local.constants.contains(&expr);
@@ -360,7 +361,7 @@ impl EquivalenceProperties {
     /// `sorted_by`, or (`None`) an operator that emits rows in no particular
     /// order. Orderings are replaced; constants and equalities stay, as rows
     /// keep their values. A sort that the data already satisfies changes
-    /// nothing, so the orderings that implied it stay too (X36). Assumes
+    /// nothing, so the orderings that implied it stay too. Assumes
     /// rows stay in their partition; `SortExec` without
     /// `preserve_partitioning` calls it anyway (see `Facts::local`).
     pub fn reordered(mut self, sorted_by: Option<LexOrdering>) -> Self {
@@ -375,15 +376,15 @@ impl EquivalenceProperties {
         self
     }
 
-    /// Q4: whether `expr` has one value inside each partition.
+    /// Whether `expr` has one value inside each partition.
     pub fn is_constant(&self, expr: &Arc<dyn PhysicalExpr>) -> bool {
         self.normal()
             .is_constant(&self.facts.eq.normalize(Arc::clone(expr)))
     }
 
-    /// Q4 across partitions: `Some(value)` if `expr` has one value in all
+    /// Across partitions: `Some(value)` if `expr` has one value in all
     /// partitions, where `value` is `None` when it is unknown. An expression
-    /// of constants counts as per-partition only (X6), as before.
+    /// of constants counts as per-partition only, as before.
     pub fn global_constant(
         &self,
         expr: &Arc<dyn PhysicalExpr>,
@@ -405,14 +406,14 @@ impl EquivalenceProperties {
 
     /// A requirement in normal form: canonical members, without the steps
     /// that all-partition constants fix. This is the only place that decides
-    /// which constants a requirement may drop (V2): a per-partition constant
+    /// which constants a requirement may drop: a per-partition constant
     /// still orders rows once partitions merge, so it stays.
     pub fn normalize_requirement(
         &self,
         requirement: impl IntoIterator<Item = impl Into<Step>>,
     ) -> Ordering {
         // Not `fixed_by`: a function of all-partition constants is constant
-        // only per partition (X6), so it stays too.
+        // only per partition, so it stays too.
         let is_global = |e: &Arc<dyn PhysicalExpr>| {
             e.is::<Literal>()
                 || matches!(self.normal().constants.get(e), Some(Scope::Global(_)))
@@ -436,7 +437,7 @@ impl EquivalenceProperties {
         Ordering::new(normal)
     }
 
-    /// Q6, the ordering as one list of sort expressions (merge keys): all
+    /// The ordering as one list of sort expressions (merge keys): all
     /// stored orderings concatenated, as a requirement in normal form, cut
     /// at the first `Group` step.
     pub fn output_ordering(&self) -> Option<LexOrdering> {
@@ -547,7 +548,7 @@ impl NormalFacts {
     }
 
     /// Whether `expr` (in normal form) has one value inside each partition:
-    /// a literal, a constant, or a function of such (X6).
+    /// a literal, a constant, or a function of such.
     pub(super) fn is_constant(&self, expr: &Arc<dyn PhysicalExpr>) -> bool {
         fixed_by(expr, &|e| self.constants.contains_key(e))
     }
@@ -572,7 +573,8 @@ pub(super) fn fixed_by(
 /// member (its members are strict images of each other, so all are fixed),
 /// and a `Group` step without its fixed expressions (`None` if that is all
 /// of them). One rule for requirements (`fixed` = all-partition constants,
-/// V2), stored orderings (any constant) and walks (constants and pins).
+/// see `normalize_requirement`), stored orderings (any constant) and
+/// walks (constants and pins).
 pub(super) fn without_fixed(
     step: Step,
     fixed: impl Fn(&Arc<dyn PhysicalExpr>) -> bool,
