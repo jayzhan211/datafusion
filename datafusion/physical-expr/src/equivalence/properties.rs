@@ -417,10 +417,21 @@ impl EquivalenceProperties {
             e.is::<Literal>()
                 || matches!(self.normal().constants.get(e), Some(Scope::Global(_)))
         };
+        let normalize =
+            |e: &Arc<dyn PhysicalExpr>| self.facts.eq.normalize(Arc::clone(e));
         let steps = requirement.into_iter().map(Into::into);
         let normal = steps.filter_map(|step: Step| {
-            let step = step.try_map(|e| Some(self.facts.eq.normalize(Arc::clone(e))))?;
-            without_fixed(&step, is_global)
+            let step = match step {
+                // A group already in normal form keeps its set: rebuilding
+                // it (hashing each expression again) costs more than this.
+                Step::Group(exprs)
+                    if exprs.iter().all(|e| Arc::ptr_eq(&normalize(e), e)) =>
+                {
+                    Step::Group(exprs)
+                }
+                step => step.try_map(|e| Some(normalize(e)))?,
+            };
+            without_fixed(step, is_global)
         });
         Ordering::new(normal)
     }
@@ -524,7 +535,7 @@ impl NormalFacts {
             let steps = ordering.iter().filter_map(|s| s.try_map(|e| Some(norm(e))));
             let constant = |e: &Arc<dyn PhysicalExpr>| normal.is_constant(e);
             let steps: Vec<_> =
-                steps.filter_map(|s| without_fixed(&s, constant)).collect();
+                steps.filter_map(|s| without_fixed(s, constant)).collect();
             let ordering = Ordering::new(steps);
             if !ordering.is_empty() && !normal.orderings.contains(&ordering) {
                 normal.orderings.push(ordering);
@@ -563,17 +574,28 @@ pub(super) fn fixed_by(
 /// of them). One rule for requirements (`fixed` = all-partition constants,
 /// V2), stored orderings (any constant) and walks (constants and pins).
 pub(super) fn without_fixed(
-    step: &Step,
+    step: Step,
     fixed: impl Fn(&Arc<dyn PhysicalExpr>) -> bool,
 ) -> Option<Step> {
     match step {
-        Step::Sort(members) if members.iter().any(|m| fixed(&m.expr)) => None,
-        Step::Sort(_) => Some(step.clone()),
-        Step::Group(exprs) => {
-            let exprs: IndexSet<_> =
-                exprs.iter().filter(|e| !fixed(e)).cloned().collect();
+        Step::Sort(_) if is_fixed(&step, &fixed) => None,
+        Step::Sort(_) => Some(step),
+        Step::Group(mut exprs) => {
+            exprs.retain(|e| !fixed(e));
             (!exprs.is_empty()).then_some(Step::Group(exprs))
         }
+    }
+}
+
+/// Whether [`without_fixed`] leaves nothing of `step`, without building
+/// what it leaves.
+pub(super) fn is_fixed(
+    step: &Step,
+    fixed: impl Fn(&Arc<dyn PhysicalExpr>) -> bool,
+) -> bool {
+    match step {
+        Step::Sort(members) => members.iter().any(|m| fixed(&m.expr)),
+        Step::Group(exprs) => exprs.iter().all(fixed),
     }
 }
 
