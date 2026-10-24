@@ -30,16 +30,14 @@ use datafusion_common::config::{ConfigOptions, OptimizerOptions};
 use datafusion_common::plan_err;
 use datafusion_common::tree_node::{TreeNode, TreeNodeRecursion};
 use datafusion_physical_expr::intervals::utils::{check_support, is_datatype_supported};
-use datafusion_physical_plan::aggregates::AggregateExec;
 use datafusion_physical_plan::execution_plan::{
     Boundedness, EmissionType, InvariantLevel,
 };
 use datafusion_physical_plan::joins::SymmetricHashJoinExec;
-use datafusion_physical_plan::{
-    ChildSatisfactionOptions, ExecutionPlanProperties, get_plan_string,
-};
+use datafusion_physical_plan::{ExecutionPlanProperties, get_plan_string};
 
 use crate::PhysicalOptimizerRule;
+use crate::ensure_requirements::distribution_satisfied;
 use datafusion_physical_expr_common::sort_expr::format_physical_sort_requirement_list;
 use itertools::izip;
 
@@ -168,17 +166,7 @@ pub fn check_plan_sanity(
             }
         }
 
-        let distribution_satisfaction = input_distributions.child_satisfaction(
-            idx,
-            child.as_ref(),
-            ChildSatisfactionOptions::new().with_allow_subset(true),
-        )?;
-        let accepts_partition_local_groups = plan
-            .downcast_ref::<AggregateExec>()
-            .is_some_and(|aggregate| {
-                aggregate.input_keeps_groups_local(child.as_ref(), true)
-            });
-        if !distribution_satisfaction.is_satisfied() && !accepts_partition_local_groups {
+        if !distribution_satisfied(plan, &input_distributions, idx, child)? {
             let plan_str = get_plan_string(plan);
             return plan_err!(
                 "Plan: {:?} does not satisfy distribution requirements: {}. Child-{} output partitioning: {}",

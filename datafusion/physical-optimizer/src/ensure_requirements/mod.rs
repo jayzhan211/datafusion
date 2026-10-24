@@ -150,6 +150,10 @@
 // in `core/tests/physical_optimizer/{enforce_distribution,enforce_sorting}.rs`.
 pub mod enforce_distribution;
 pub mod enforce_sorting;
+mod satisfy;
+
+pub(crate) use satisfy::distribution_satisfied;
+pub use satisfy::satisfy_requirements;
 
 use std::sync::Arc;
 

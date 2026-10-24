@@ -26,7 +26,9 @@ use insta::assert_snapshot;
 use datafusion_common::config::ConfigOptions;
 use datafusion_common::tree_node::{TransformedResult, TreeNode, TreeNodeRecursion};
 use datafusion_physical_optimizer::PhysicalOptimizerRule;
-use datafusion_physical_optimizer::ensure_requirements::EnsureRequirements;
+use datafusion_physical_optimizer::ensure_requirements::{
+    EnsureRequirements, satisfy_requirements,
+};
 use datafusion_physical_optimizer::ensure_requirements::enforce_sorting::{
     PlanWithCorrespondingCoalescePartitions, parallelize_sorts,
 };
@@ -181,18 +183,22 @@ fn optimize_and_sanity_check(
     plan: Arc<dyn ExecutionPlan>,
 ) -> Result<Arc<dyn ExecutionPlan>> {
     let config = test_config();
+    assert_satisfy_requirements_makes_valid(Arc::clone(&plan));
     let optimized = EnsureRequirements::new().optimize(plan, &config)?;
     // SanityCheckPlan must pass
     SanityCheckPlan::new().optimize(Arc::clone(&optimized), &config)?;
+    assert_satisfy_requirements_no_op(&optimized);
     Ok(optimized)
 }
 
 /// Helper: verify idempotency — running twice produces the same plan
 fn assert_idempotent(plan: Arc<dyn ExecutionPlan>) {
     let config = test_config();
+    assert_satisfy_requirements_makes_valid(Arc::clone(&plan));
     let p1 = EnsureRequirements::new()
         .optimize(plan, &config)
         .expect("first optimize failed");
+    assert_satisfy_requirements_no_op(&p1);
     let p2 = EnsureRequirements::new()
         .optimize(Arc::clone(&p1), &config)
         .expect("second optimize failed");
@@ -240,6 +246,32 @@ fn plan_string(plan: &Arc<dyn ExecutionPlan>) -> String {
         .to_string()
 }
 
+/// `satisfy_requirements` alone turns `plan` into one that passes `SanityCheckPlan`,
+/// and running it again changes nothing.
+fn assert_satisfy_requirements_makes_valid(plan: Arc<dyn ExecutionPlan>) {
+    let config = test_config();
+    let satisfied = satisfy_requirements(plan, &config)
+        .expect("satisfy_requirements failed")
+        .data;
+    SanityCheckPlan::new()
+        .optimize(Arc::clone(&satisfied), &config)
+        .expect("SanityCheckPlan failed after satisfy_requirements");
+    assert_satisfy_requirements_no_op(&satisfied);
+}
+
+/// `satisfy_requirements` leaves a plan that already satisfies its requirements unchanged.
+fn assert_satisfy_requirements_no_op(plan: &Arc<dyn ExecutionPlan>) {
+    let config = test_config();
+    let result = satisfy_requirements(Arc::clone(plan), &config)
+        .expect("satisfy_requirements failed");
+    assert!(
+        !result.transformed,
+        "satisfy_requirements changed a valid plan\nBefore:\n{}\nAfter:\n{}",
+        plan_string(plan),
+        plan_string(&result.data)
+    );
+}
+
 /// Run `EnsureRequirements`, assert `SanityCheckPlan` passes, snapshot the
 /// resulting plan with `insta`, and verify idempotency by running the rule a
 /// second time and checking the plan is unchanged. Use this for plan-shape
@@ -248,9 +280,12 @@ fn plan_string(plan: &Arc<dyn ExecutionPlan>) -> String {
 macro_rules! assert_ensure_requirements_plan {
     ($plan:expr, @ $snapshot:literal $(,)?) => {{
         let config = test_config();
+        let input: Arc<dyn ExecutionPlan> = $plan;
+        assert_satisfy_requirements_makes_valid(Arc::clone(&input));
         let p1 = EnsureRequirements::new()
-            .optimize($plan, &config)
+            .optimize(input, &config)
             .expect("EnsureRequirements::optimize failed (pass 1)");
+        assert_satisfy_requirements_no_op(&p1);
         SanityCheckPlan::new()
             .optimize(Arc::clone(&p1), &config)
             .expect("SanityCheckPlan failed (pass 1)");
