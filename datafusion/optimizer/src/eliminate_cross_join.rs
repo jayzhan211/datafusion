@@ -101,10 +101,13 @@ impl OptimizerRule for EliminateCrossJoin {
         let parent_predicate = if let LogicalPlan::Filter(filter) = plan {
             // if input isn't a join that can potentially be rewritten
             // avoid unwrapping the input
+            // A join whose NULL keys compare equal would give that meaning to
+            // the `=` predicates it collects, so it is left as it is.
             let rewritable = matches!(
                 filter.input.as_ref(),
                 LogicalPlan::Join(Join {
                     join_type: JoinType::Inner,
+                    null_equality: NullEquality::NullEqualsNothing,
                     ..
                 })
             );
@@ -136,7 +139,8 @@ impl OptimizerRule for EliminateCrossJoin {
             match plan {
                 LogicalPlan::Join(Join {
                     join_type: JoinType::Inner,
-                    null_equality: original_null_equality,
+                    null_equality:
+                        original_null_equality @ NullEquality::NullEqualsNothing,
                     ..
                 }) => {
                     flatten_join_inputs(
@@ -265,7 +269,10 @@ fn flatten_join_inputs(
     all_filters: &mut Vec<Expr>,
 ) {
     match plan {
-        LogicalPlan::Join(join) if join.join_type == JoinType::Inner => {
+        LogicalPlan::Join(join)
+            if join.join_type == JoinType::Inner
+                && join.null_equality == NullEquality::NullEqualsNothing =>
+        {
             if let Some(filter) = join.filter {
                 all_filters.push(filter);
             }

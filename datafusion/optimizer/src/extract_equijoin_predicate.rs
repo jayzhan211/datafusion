@@ -121,6 +121,30 @@ impl OptimizerRule for ExtractEquijoinPredicate {
                     }
                 }
 
+                // The keys of a join whose NULLs compare equal (from `IS NOT
+                // DISTINCT FROM`) would treat an `=` predicate the same way,
+                // so it stays in the filter.
+                if null_equality == NullEquality::NullEqualsNull
+                    && !equijoin_predicates.is_empty()
+                {
+                    let filter = equijoin_predicates
+                        .into_iter()
+                        .map(|(l, r)| l.eq(r))
+                        .chain(non_equijoin_expr)
+                        .reduce(Expr::and);
+                    return Ok(Transformed::no(LogicalPlan::Join(Join {
+                        left,
+                        right,
+                        on,
+                        filter,
+                        join_type,
+                        join_constraint,
+                        schema,
+                        null_equality,
+                        null_aware,
+                        null_aware_value_keys,
+                    })));
+                }
                 if !equijoin_predicates.is_empty() {
                     on.extend(equijoin_predicates);
                     Ok(Transformed::yes(LogicalPlan::Join(Join {
