@@ -167,13 +167,10 @@ fn node_has_subquery_to_rewrite(node: &LogicalPlan, all_scalars: bool) -> bool {
             });
             found
         }
-        LogicalPlan::Join(join) => {
-            join.join_type == JoinType::Inner
-                && join
-                    .filter
-                    .as_ref()
-                    .is_some_and(|f| expr_has_subquery_to_rewrite(f, all_scalars))
-        }
+        LogicalPlan::Join(join) => join
+            .filter
+            .as_ref()
+            .is_some_and(|f| expr_has_subquery_to_rewrite(f, all_scalars)),
         _ => false,
     }
 }
@@ -574,8 +571,12 @@ impl Rewriter<'_> {
     }
 
     /// An inner join's condition is a filter over the join, so its subquery
-    /// conjuncts move to a filter above it.
+    /// conjuncts move to a filter above it. For another join, a subquery that
+    /// reads one side only is computed as a column of that side.
     fn rewrite_join_filter(&mut self, join: Join) -> Result<LogicalPlan> {
+        if join.join_type != JoinType::Inner {
+            return self.rewrite_outer_join_filter(join);
+        }
         let Some(filter) = join.filter else {
             return internal_err!("expected a join filter");
         };
@@ -640,6 +641,75 @@ impl Rewriter<'_> {
             }
             other => self.replace_value_subqueries(outer, other),
         }
+    }
+
+    fn rewrite_outer_join_filter(&mut self, join: Join) -> Result<LogicalPlan> {
+        let Some(filter) = join.filter.clone() else {
+            return internal_err!("expected a join filter");
+        };
+        let output: Vec<Expr> = join
+            .schema
+            .columns()
+            .into_iter()
+            .map(Expr::Column)
+            .collect();
+        let mut left = Arc::unwrap_or_clone(Arc::clone(&join.left));
+        let mut right = Arc::unwrap_or_clone(Arc::clone(&join.right));
+        let reads = |plan: &LogicalPlan, side: &LogicalPlan| {
+            let mut cols = vec![];
+            collect_outer_columns(plan, &[], &mut cols);
+            cols.iter().all(|c| side.schema().has_column(c))
+        };
+        let mut sides_ok = true;
+        filter.apply(|e| {
+            if let Expr::ScalarSubquery(sq)
+            | Expr::Exists(Exists { subquery: sq, .. })
+            | Expr::InSubquery(InSubquery { subquery: sq, .. }) = e
+            {
+                sides_ok &= reads(&sq.subquery, &left) || reads(&sq.subquery, &right);
+            }
+            Ok(TreeNodeRecursion::Continue)
+        })?;
+        if !sides_ok {
+            return unsupported(
+                "subquery in an outer join condition that reads both sides",
+            );
+        }
+        // Each subquery joins the side whose columns it reads.
+        let filter = filter
+            .transform_down(|e| match e {
+                Expr::ScalarSubquery(_) | Expr::Exists(_) | Expr::InSubquery(_) => {
+                    let sq = match &e {
+                        Expr::ScalarSubquery(sq)
+                        | Expr::Exists(Exists { subquery: sq, .. })
+                        | Expr::InSubquery(InSubquery { subquery: sq, .. }) => sq.clone(),
+                        _ => unreachable!(),
+                    };
+                    let side = if reads(&sq.subquery, &left) {
+                        &mut left
+                    } else {
+                        &mut right
+                    };
+                    let value = self.replace_value_subqueries(side, e)?;
+                    Ok(Transformed::new(value, true, TreeNodeRecursion::Jump))
+                }
+                other => Ok(Transformed::no(other)),
+            })
+            .data()?;
+        let plan = LogicalPlan::Join(
+            Join::try_new(
+                Arc::new(left),
+                Arc::new(right),
+                join.on,
+                Some(filter),
+                join.join_type,
+                join.join_constraint,
+                join.null_equality,
+                join.null_aware,
+            )?
+            .with_null_aware_value_keys(join.null_aware_value_keys),
+        );
+        LogicalPlanBuilder::from(plan).project(output)?.build()
     }
 
     /// Replaces each correlated scalar subquery and `EXISTS` in `expr` with a
@@ -1224,6 +1294,7 @@ impl Rewriter<'_> {
             outer: &outer,
             used_domain: false,
         };
+        reject_outer_only_aggregates(agg, &corr)?;
         let input = self.attach(agg.input.as_ref().clone(), &mut corr)?;
         let scope = [Arc::clone(input.plan.schema())];
         let aggr_expr = agg
@@ -1719,6 +1790,7 @@ impl Rewriter<'_> {
             .group_expr
             .iter()
             .any(|e| matches!(e, Expr::GroupingSet(_)));
+        reject_outer_only_aggregates(&agg, corr)?;
         let input = self.attach(Arc::unwrap_or_clone(Arc::clone(&agg.input)), corr)?;
         let scope = [input.plan.schema().clone()];
         let n_group = agg.group_expr.len();
@@ -1749,7 +1821,37 @@ impl Rewriter<'_> {
             }
             // The domain columns go first in every set: they are never NULL
             // there, so they add only leading zero bits to `__grouping_id`
-            // and the GROUPING() values above stay the same.
+            // and the GROUPING() values above stay the same. A domain column
+            // that is also a grouping key gets a copy, as the key is NULL in
+            // the sets without it.
+            let mut input = input;
+            let in_sets = |c: &Column| {
+                sets.iter()
+                    .any(|set| set.contains(&Expr::Column(c.clone())))
+            };
+            if input.cols.iter().any(|c| in_sets(c)) {
+                let mut exprs: Vec<Expr> = input
+                    .plan
+                    .schema()
+                    .columns()
+                    .into_iter()
+                    .map(Expr::Column)
+                    .collect();
+                let mut cols = vec![];
+                for c in &input.cols {
+                    if in_sets(c) {
+                        let name = self.fresh_name("__d");
+                        exprs.push(Expr::Column(c.clone()).alias(&name));
+                        cols.push(Column::new_unqualified(name));
+                    } else {
+                        cols.push(c.clone());
+                    }
+                }
+                input.plan = LogicalPlanBuilder::from(input.plan)
+                    .project(exprs)?
+                    .build()?;
+                input.cols = cols;
+            }
             let keys: Vec<Expr> = input.cols.iter().cloned().map(Expr::Column).collect();
             let sets = sets
                 .into_iter()
@@ -2718,6 +2820,24 @@ fn peel_to_groupless_aggregate(plan: &LogicalPlan) -> Option<Vec<&LogicalPlan>> 
             _ => return None,
         };
     }
+}
+
+/// SQL evaluates an aggregate whose arguments read outer columns only in the
+/// outer query, which DataFusion does not plan.
+fn reject_outer_only_aggregates(agg: &Aggregate, corr: &Correlation) -> Result<()> {
+    for e in &agg.aggr_expr {
+        if let Expr::AggregateFunction(f) = e.clone().unalias() {
+            let args = &f.params.args;
+            let reads_outer = args
+                .iter()
+                .any(|a| expr_refs_outer(a, &corr.outer_cols, &[], &[]));
+            let reads_inner = args.iter().any(|a| a.any_column_refs());
+            if reads_outer && !reads_inner {
+                return unsupported(format!("aggregate {e} of outer columns only"));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// The value of each aggregate expression of `agg` on an empty input.
