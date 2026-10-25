@@ -185,19 +185,16 @@ pub fn check_subquery_expr(
                         Ok(())
                     }
                 }
-                _ => {
-                    if inner_plan.max_rows().is_some_and(|max_row| max_row <= 1) {
-                        Ok(())
-                    } else {
-                        plan_err!(
-                            "Correlated scalar subquery must be aggregated to return at most one row"
-                        )
-                    }
-                }
+                // A subquery that can return more than one row fails at run
+                // time when it does.
+                _ => Ok(()),
             }?;
             match outer_plan {
                 LogicalPlan::Projection(_)
                 | LogicalPlan::Filter(_)
+                | LogicalPlan::Sort(_)
+                | LogicalPlan::Window(_)
+                | LogicalPlan::Join(_)
                 | LogicalPlan::Dml(DmlStatement {
                     op: WriteOp::MergeInto(_),
                     ..
