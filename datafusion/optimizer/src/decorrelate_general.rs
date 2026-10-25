@@ -1797,7 +1797,12 @@ impl Rewriter<'_> {
         let mut group_expr = Vec::with_capacity(n_group);
         for (i, e) in agg.group_expr.iter().enumerate() {
             let new_expr = replace_outer(e.clone(), corr, &input.cols, &scope)?;
-            group_expr.push(keep_name(new_expr, &agg.schema, i));
+            // A grouping set names its output columns itself.
+            if matches!(new_expr, Expr::GroupingSet(_)) {
+                group_expr.push(new_expr);
+            } else {
+                group_expr.push(keep_name(new_expr, &agg.schema, i));
+            }
         }
         let mut aggr_expr = Vec::with_capacity(agg.aggr_expr.len());
         for (i, e) in agg.aggr_expr.iter().enumerate() {
@@ -1819,6 +1824,7 @@ impl Rewriter<'_> {
             if sets.iter().enumerate().any(|(i, x)| sets[..i].contains(x)) {
                 return unsupported("correlated grouping sets with duplicates");
             }
+            let has_empty_set = sets.iter().any(|set| set.is_empty());
             // The domain columns go first in every set: they are never NULL
             // there, so they add only leading zero bits to `__grouping_id`
             // and the GROUPING() values above stay the same. A domain column
@@ -1868,11 +1874,14 @@ impl Rewriter<'_> {
             if id_type(&plan.schema) != id_type(&agg.schema) {
                 return unsupported("correlated grouping sets that widen __grouping_id");
             }
-            return Ok(Attached {
-                plan: LogicalPlan::Aggregate(plan),
-                cols: input.cols,
-                bound: input.bound,
-            });
+            if !has_empty_set {
+                return Ok(Attached {
+                    plan: LogicalPlan::Aggregate(plan),
+                    cols: input.cols,
+                    bound: input.bound,
+                });
+            }
+            return self.add_empty_set_rows(plan, input.cols, input.bound, &agg, corr);
         }
         if n_group > 0 {
             let (group_expr, cols) =
@@ -1955,6 +1964,99 @@ impl Rewriter<'_> {
             plan,
             cols: domain.cols,
             bound: domain.bound,
+        })
+    }
+
+    /// The empty grouping set gives one row even for an empty input, so an
+    /// outer value without input rows still gets its row: the grouping
+    /// columns NULL and the aggregates at their empty-input values.
+    /// `grouped` groups by the domain columns `cols` first in every set.
+    fn add_empty_set_rows(
+        &mut self,
+        grouped: Aggregate,
+        cols: Vec<Column>,
+        bound: Vec<bool>,
+        agg: &Aggregate,
+        corr: &mut Correlation,
+    ) -> Result<Attached> {
+        let empty_values = empty_aggregate_values(agg)?;
+        let grouped = LogicalPlan::Aggregate(grouped);
+        let schema = Arc::clone(grouped.schema());
+        // A bound domain column can hold NULLs that match nothing; the filler
+        // rows below hold domain values, which can be NULL themselves.
+        let not_null: Vec<Expr> = cols
+            .iter()
+            .zip(&bound)
+            .filter(|(_, b)| **b)
+            .map(|(c, _)| Expr::Column(c.clone()).is_not_null())
+            .collect();
+        let grouped = match conjunction(not_null) {
+            Some(predicate) => LogicalPlanBuilder::from(grouped)
+                .filter(predicate)?
+                .build()?,
+            None => grouped,
+        };
+        let domain = self.domain(corr)?;
+        let keys: Vec<Expr> = domain
+            .cols
+            .iter()
+            .zip(&cols)
+            .map(|(d, c)| key_equality(d, c, false))
+            .collect();
+        let missing = LogicalPlan::Join(Join::try_new(
+            Arc::new(domain.plan),
+            Arc::new(grouped.clone()),
+            vec![],
+            conjunction(keys),
+            JoinType::LeftAnti,
+            JoinConstraint::On,
+            NullEquality::NullEqualsNothing,
+            false,
+        )?);
+        // Output layout of a grouping-set aggregate: the grouping columns (the
+        // domain columns first), `__grouping_id`, then the aggregates.
+        let n_fields = schema.fields().len();
+        let n_aggr = empty_values.len();
+        let id_index = n_fields - n_aggr - 1;
+        let n_group = id_index;
+        let n_original = n_group - cols.len();
+        let mut exprs = vec![];
+        for (i, d) in domain.cols.iter().enumerate() {
+            let _ = i;
+            exprs.push(Expr::Column(d.clone()));
+        }
+        for i in cols.len()..n_group {
+            let (_, field) = schema.qualified_field(i);
+            exprs.push(lit(ScalarValue::try_from(field.data_type())?));
+        }
+        let (_, id_field) = schema.qualified_field(id_index);
+        // Every original grouping column is NULL in the empty set.
+        let id = (1u64 << n_original) - 1;
+        exprs.push(lit(
+            ScalarValue::UInt64(Some(id)).cast_to(id_field.data_type())?
+        ));
+        for empty in empty_values {
+            exprs.push(lit(empty));
+        }
+        let filler = LogicalPlanBuilder::from(missing).project(exprs)?.build()?;
+        let union =
+            Union::try_new_with_loose_types(vec![Arc::new(grouped), Arc::new(filler)])?;
+        // The union drops the qualifiers; restore the names of the aggregate.
+        let exprs: Vec<Expr> = (0..n_fields)
+            .map(|i| {
+                let (q, f) = schema.qualified_field(i);
+                Expr::Column(Column::from(union.schema.qualified_field(i)))
+                    .alias_qualified(q.cloned(), f.name())
+            })
+            .collect();
+        let plan = LogicalPlanBuilder::from(LogicalPlan::Union(union))
+            .project(exprs)?
+            .build()?;
+        let n = cols.len();
+        Ok(Attached {
+            plan,
+            cols,
+            bound: vec![false; n],
         })
     }
 
