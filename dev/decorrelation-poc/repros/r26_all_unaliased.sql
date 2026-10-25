@@ -1,0 +1,4 @@
+-- #26622 x > ALL in SELECT without alias
+CREATE TABLE t(x INT) AS VALUES (1), (6);
+CREATE TABLE s(y INT) AS VALUES (5);
+SELECT x > ALL (SELECT y FROM s) FROM t;

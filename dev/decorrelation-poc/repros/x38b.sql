@@ -1,0 +1,10 @@
+CREATE TABLE t1(a INT) AS VALUES (1), (2);
+CREATE TABLE t2(a INT) AS VALUES (1), (2);
+CREATE TABLE t3(a INT) AS VALUES (1);
+SELECT a FROM t1 WHERE EXISTS (SELECT 1 FROM t2 JOIN t3 ON t2.a = t3.a AND t3.a = t1.a);
+set datafusion.execution.target_partitions = 1;
+SELECT a FROM t1 WHERE EXISTS (SELECT 1 FROM t2 JOIN t3 ON t2.a = t3.a AND t3.a = t1.a);
+set datafusion.execution.target_partitions = 12;
+SELECT a FROM t1 WHERE EXISTS (SELECT 1 FROM t2 JOIN t3 ON t2.a = t3.a WHERE t3.a = t1.a);
+SELECT a FROM t1 WHERE EXISTS (SELECT 1 FROM t2 JOIN t3 ON t2.a = t3.a WHERE t2.a = t1.a);
+SELECT t1.a FROM t1 LEFT SEMI JOIN (SELECT t2.a FROM t2 LEFT SEMI JOIN t3 ON t2.a = t3.a) s ON t1.a = s.a AND t1.a = s.a;

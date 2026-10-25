@@ -1,0 +1,4 @@
+-- #26014 lossy CAST in a correlated equality below an aggregate
+CREATE TABLE o(d DATE) AS VALUES (DATE '2024-01-01'), (DATE '2024-01-02');
+CREATE TABLE e(ts TIMESTAMP, v INT) AS VALUES (TIMESTAMP '2024-01-01 10:00:00', 1), (TIMESTAMP '2024-01-01 11:00:00', 2), (TIMESTAMP '2024-01-02 09:00:00', 3);
+SELECT o.d, (SELECT count(*) FROM e WHERE CAST(e.ts AS DATE) = o.d) AS c FROM o ORDER BY o.d, c;
