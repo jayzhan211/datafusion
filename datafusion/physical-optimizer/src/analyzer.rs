@@ -19,12 +19,18 @@
 
 use std::sync::Arc;
 
+use datafusion_common::Result;
+use datafusion_common::config::ConfigOptions;
+use datafusion_physical_plan::ExecutionPlan;
+
+use crate::PhysicalOptimizerRule;
 use crate::aggregate_statistics::AggregateStatistics;
 use crate::eliminate_constant_join::EliminateConstantJoin;
 use crate::ensure_requirements::EnsureRequirements;
 use crate::filter_pushdown::FilterPushdown;
 use crate::join_selection::JoinSelection;
 use crate::limited_distinct_aggregation::LimitedDistinctAggregation;
+use crate::optimizer::PhysicalOptimizerContext;
 use crate::output_requirements::OutputRequirements;
 use crate::window_topn::WindowTopN;
 
@@ -63,28 +69,32 @@ impl PhysicalAnalyzer {
         let rules: Vec<Arc<dyn PhysicalAnalyzerRule + Send + Sync>> = vec![
             // If there is a output requirement of the query, make sure that
             // this information is not lost across different rules during optimization.
-            Arc::new(OutputRequirements::new_add_mode()),
-            Arc::new(AggregateStatistics::new()),
+            Arc::new(RunInAnalyzer::new(Arc::new(
+                OutputRequirements::new_add_mode(),
+            ))),
+            Arc::new(RunInAnalyzer::new(Arc::new(AggregateStatistics::new()))),
             // Runs after AggregateStatistics, which can fold a scalar subquery into a
             // row of literals, and before EnsureRequirements, so that the filter
             // replacing a join against such a row keeps the other input's ordering.
-            Arc::new(EliminateConstantJoin::new()),
+            Arc::new(RunInAnalyzer::new(Arc::new(EliminateConstantJoin::new()))),
             // Statistics-based join selection will change the Auto mode to a real join implementation,
             // like collect left, or hash join, or future sort merge join, which will influence the
             // EnsureRequirements rule as it decides whether to add additional repartitioning and
             // local sorting steps to meet distribution and ordering requirements. Therefore, it
             // should run before EnsureRequirements.
-            Arc::new(JoinSelection::new()),
+            Arc::new(RunInAnalyzer::new(Arc::new(JoinSelection::new()))),
             // The LimitedDistinctAggregation rule should be applied before EnsureRequirements,
             // as that rule may inject other operations in between the different AggregateExecs.
             // Applying the rule early means only directly-connected AggregateExecs must be examined.
-            Arc::new(LimitedDistinctAggregation::new()),
+            Arc::new(RunInAnalyzer::new(Arc::new(
+                LimitedDistinctAggregation::new(),
+            ))),
             // The FilterPushdown rule tries to push down filters as far as it can.
             // For example, it will push down filtering from a `FilterExec` to `DataSourceExec`.
             // Note that this does not push down dynamic filters (such as those created by a `SortExec` operator in TopK mode),
             // those are handled by the later `FilterPushdown` rule.
             // See `FilterPushdownPhase` for more details.
-            Arc::new(FilterPushdown::new()),
+            Arc::new(RunInAnalyzer::new(Arc::new(FilterPushdown::new()))),
             // WindowTopN: replaces Filter(rn<=K) → Window(ROW_NUMBER) with
             // PartitionedTopKExec(fetch=K), which emits `rn` itself; the
             // window node is kept above it only when it has other window
@@ -92,7 +102,7 @@ impl PhysicalAnalyzer {
             // Must run before EnsureRequirements (so it can rewrite against the
             // window's declared ordering without pattern-matching a SortExec)
             // and before ProjectionPushdown (which embeds projections into FilterExec).
-            Arc::new(WindowTopN::new()),
+            Arc::new(RunInAnalyzer::new(Arc::new(WindowTopN::new()))),
             // Ensures each input plan satisfies the distribution and ordering
             // requirements declared by `ExecutionPlan::required_input_distribution`
             // and `ExecutionPlan::required_input_ordering`.
@@ -111,7 +121,7 @@ impl PhysicalAnalyzer {
             // [`EnsureRequirements`](crate::ensure_requirements) for the per-phase
             // breakdown, and <https://github.com/apache/datafusion/issues/21973>
             // for the original failure mode.
-            Arc::new(EnsureRequirements::new()),
+            Arc::new(RunInAnalyzer::new(Arc::new(EnsureRequirements::new()))),
         ];
         Self::with_rules(rules)
     }
@@ -119,6 +129,48 @@ impl PhysicalAnalyzer {
     /// Create a new analyzer with the given rules
     pub fn with_rules(rules: Vec<Arc<dyn PhysicalAnalyzerRule + Send + Sync>>) -> Self {
         Self { rules }
+    }
+}
+
+/// Runs a [`PhysicalOptimizerRule`] as a [`PhysicalAnalyzerRule`].
+///
+/// The default analyzer runs its built-in rules through this adapter. Use it
+/// the same way to put a built-in rule into a custom analyzer list.
+#[derive(Debug)]
+pub struct RunInAnalyzer {
+    rule: Arc<dyn PhysicalOptimizerRule + Send + Sync>,
+}
+
+impl RunInAnalyzer {
+    /// Run `rule` in the analyzer phase.
+    pub fn new(rule: Arc<dyn PhysicalOptimizerRule + Send + Sync>) -> Self {
+        Self { rule }
+    }
+}
+
+impl PhysicalAnalyzerRule for RunInAnalyzer {
+    fn analyze(
+        &self,
+        plan: Arc<dyn ExecutionPlan>,
+        config: &ConfigOptions,
+    ) -> Result<Arc<dyn ExecutionPlan>> {
+        self.rule.optimize(plan, config)
+    }
+
+    fn analyze_with_context(
+        &self,
+        plan: Arc<dyn ExecutionPlan>,
+        context: &dyn PhysicalOptimizerContext,
+    ) -> Result<Arc<dyn ExecutionPlan>> {
+        self.rule.optimize_with_context(plan, context)
+    }
+
+    fn name(&self) -> &str {
+        self.rule.name()
+    }
+
+    fn schema_check(&self) -> bool {
+        self.rule.schema_check()
     }
 }
 

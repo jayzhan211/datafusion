@@ -3632,6 +3632,8 @@ fn tuple_err<T, R>(value: (Result<T>, Result<R>)) -> Result<(T, R)> {
 }
 
 struct OptimizationInvariantChecker<'a> {
+    /// `PhysicalAnalyzer` or `PhysicalOptimizer`, for error messages.
+    phase: &'static str,
     /// Name of the rule being checked, for error messages.
     rule_name: &'a str,
     /// Whether the rule promised to preserve the schema.
@@ -3642,6 +3644,7 @@ impl<'a> OptimizationInvariantChecker<'a> {
     /// Create an [`OptimizationInvariantChecker`] for a [`PhysicalOptimizerRule`].
     pub fn new(rule: &'a Arc<dyn PhysicalOptimizerRule + Send + Sync>) -> Self {
         Self {
+            phase: "PhysicalOptimizer",
             rule_name: rule.name(),
             schema_check: rule.schema_check(),
         }
@@ -3652,6 +3655,7 @@ impl<'a> OptimizationInvariantChecker<'a> {
         rule: &'a Arc<dyn PhysicalAnalyzerRule + Send + Sync>,
     ) -> Self {
         Self {
+            phase: "PhysicalAnalyzer",
             rule_name: rule.name(),
             schema_check: rule.schema_check(),
         }
@@ -3672,8 +3676,8 @@ impl<'a> OptimizationInvariantChecker<'a> {
             is_allowed_schema_change(previous_schema.as_ref(), plan.schema().as_ref())
                 .map_err(|e| {
                     e.context(format!(
-                        "PhysicalOptimizer rule '{}' failed. Schema mismatch.",
-                        self.rule_name,
+                        "{} rule '{}' failed. Schema mismatch.",
+                        self.phase, self.rule_name,
                     ))
                 })?
         }
@@ -3683,9 +3687,14 @@ impl<'a> OptimizationInvariantChecker<'a> {
         plan.apply(|node| {
             // Checks for the more permissive `InvariantLevel::Always`.
             // Plans are not guaranteed to be executable after each physical optimizer run.
-            node.check_invariants(InvariantLevel::Always).map_err(|e|
-                e.context(format!("Invariant for ExecutionPlan node '{}' failed for PhysicalOptimizer rule '{}'", node.name(), self.rule_name))
-            )?;
+            node.check_invariants(InvariantLevel::Always).map_err(|e| {
+                e.context(format!(
+                    "Invariant for ExecutionPlan node '{}' failed for {} rule '{}'",
+                    node.name(),
+                    self.phase,
+                    self.rule_name
+                ))
+            })?;
             Ok(TreeNodeRecursion::Continue)
         })?;
 
@@ -5208,22 +5217,7 @@ mod tests {
         .aggregate(vec![col("d1")], vec![sum(col("d2"))])?
         .build()?;
 
-        // Force the tiny input to be partitioned (a `batch_size` of 1 makes the
-        // 6-row scan exceed a batch, so it is parallelized) so this test still
-        // exercises the partitioned-aggregation path. Distribution enforcement
-        // now parallelizes purely on estimated row count, so a table smaller
-        // than one batch would otherwise run single-partition (`Final`).
-        let config = SessionConfig::new()
-            .with_target_partitions(4)
-            .with_batch_size(1);
-        let session_state = SessionStateBuilder::new()
-            .with_config(config)
-            .with_default_features()
-            .build();
-        let logical_plan = session_state.optimize(&logical_plan)?;
-        let execution_plan = DefaultPhysicalPlanner::default()
-            .create_physical_plan(&logical_plan, &session_state)
-            .await?;
+        let execution_plan = plan(&logical_plan).await?;
         let formatted = format!("{execution_plan:?}");
 
         // Make sure the plan contains a FinalPartitioned, which means it will not use the Final
