@@ -49,6 +49,7 @@ use arrow::array::{Array, ArrayRef, AsArray};
 use arrow::datatypes::{DataType, Field, FieldRef, UInt64Type};
 
 use crate::optimizer::ApplyOrder;
+use crate::simplify_expressions::ExprSimplifier;
 use crate::{OptimizerConfig, OptimizerRule};
 use datafusion_common::alias::AliasGenerator;
 use datafusion_common::tree_node::{
@@ -67,6 +68,7 @@ use datafusion_expr::logical_plan::{
     Projection, SkipType, Sort, Subquery, SubqueryAlias, Union, Window,
 };
 use datafusion_expr::registry::FunctionRegistry;
+use datafusion_expr::simplify::SimplifyContext;
 use datafusion_expr::utils::{can_hash, conjunction, split_conjunction_owned};
 use datafusion_expr::{
     Accumulator, AggregateUDF, AggregateUDFImpl, BinaryExpr, Expr, ExprFunctionExt,
@@ -127,7 +129,9 @@ fn plan_has_subquery_to_rewrite(plan: &LogicalPlan) -> bool {
     matches!(
         plan.apply_with_subqueries(|node| {
             Ok(
-                if node_has_subquery_to_rewrite(node) || lateral_subquery(node).is_some()
+                if node_has_subquery_to_rewrite(node)
+                    || lateral_subquery(node).is_some()
+                    || matches!(node, LogicalPlan::Subquery(_))
                 {
                     TreeNodeRecursion::Stop
                 } else {
@@ -176,18 +180,25 @@ fn expr_has_subquery_to_rewrite(expr: &Expr) -> bool {
 }
 
 fn is_correlated(sq: &Subquery) -> bool {
-    !sq.outer_ref_columns.is_empty() || plan_has_outer_reference(&sq.subquery)
+    plan_has_outer_reference(&sq.subquery)
 }
 
+/// Whether `plan` reads a column from outside of itself.
 fn plan_has_outer_reference(plan: &LogicalPlan) -> bool {
-    matches!(
-        plan.apply_with_subqueries(|p| Ok(if p.contains_outer_reference() {
-            TreeNodeRecursion::Stop
-        } else {
-            TreeNodeRecursion::Continue
-        })),
-        Ok(TreeNodeRecursion::Stop)
-    )
+    let mut cols = vec![];
+    collect_outer_columns(plan, &[], &mut cols);
+    !cols.is_empty()
+}
+
+/// The right side of a lateral join reads the columns of its left side.
+fn is_lateral_right(plan: &LogicalPlan) -> bool {
+    match plan {
+        LogicalPlan::Subquery(_) => true,
+        LogicalPlan::SubqueryAlias(a) => {
+            matches!(a.input.as_ref(), LogicalPlan::Subquery(_))
+        }
+        _ => false,
+    }
 }
 
 /// The subquery of a lateral join: `Join(left, Subquery)` or
@@ -259,6 +270,18 @@ impl Rewriter<'_> {
         let plan = plan
             .map_children(|c| self.rewrite_plan(c).map(Transformed::yes))?
             .data;
+        // A subquery node marks a plan that reads outer columns; once it reads
+        // none, for example after its own lateral joins are rewritten, it is a
+        // plain plan.
+        if let LogicalPlan::Subquery(sq) = &plan
+            && !plan_has_outer_reference(&sq.subquery)
+        {
+            let LogicalPlan::Subquery(sq) = plan else {
+                unreachable!()
+            };
+            self.changed = true;
+            return Ok(Arc::unwrap_or_clone(sq.subquery));
+        }
         let plan =
             if node_has_subquery_to_rewrite(&plan) || lateral_subquery(&plan).is_some() {
                 match self.rewrite_node(plan.clone()) {
@@ -356,14 +379,9 @@ impl Rewriter<'_> {
                     } else {
                         JoinType::LeftSemi
                     };
+                    let expr = self.replace_value_subqueries(&mut outer, *expr)?;
                     outer = self
-                        .predicate_join(
-                            outer,
-                            &subquery,
-                            Some(*expr),
-                            join_type,
-                            negated,
-                        )?
+                        .predicate_join(outer, &subquery, Some(expr), join_type, negated)?
                         .0;
                 }
                 other => kept.push(other),
@@ -515,10 +533,13 @@ impl Rewriter<'_> {
                 subquery,
                 negated: false,
             }) => {
+                // The value is compared, not used as a truth value, so its own
+                // subqueries need three-valued marks.
+                let expr = self.replace_value_subqueries(outer, *expr)?;
                 let (joined, mark) = self.predicate_join(
                     std::mem::take(outer),
                     &subquery,
-                    Some(*expr),
+                    Some(expr),
                     JoinType::LeftMark,
                     false,
                 )?;
@@ -562,10 +583,11 @@ impl Rewriter<'_> {
                 subquery,
                 negated,
             }) => {
+                let expr = self.replace_value_subqueries(outer, *expr)?;
                 let (joined, mark) = self.predicate_join(
                     std::mem::take(outer),
                     &subquery,
-                    Some(*expr),
+                    Some(expr),
                     JoinType::LeftMark,
                     true,
                 )?;
@@ -694,6 +716,7 @@ impl Rewriter<'_> {
                 (aliased, conjuncts)
             }
         };
+        let used_domain = corr.used_domain;
         let mut outer = outer;
         // The `IN` equalities come first: a null-aware join reads its leading
         // equalities as the values to compare and the rest as correlation keys.
@@ -735,15 +758,33 @@ impl Rewriter<'_> {
                 if !hashable {
                     return unsupported("null-aware IN on a type that is not hashable");
                 }
-                if !conjuncts.iter().all(is_column_equality) {
-                    return unsupported(
-                        "NOT IN with a correlation that is not an equality",
-                    );
+                if used_domain {
+                    return unsupported("null-aware IN over a domain");
                 }
+            }
+            // When each `IN` equality is also a correlation equality, a NULL on
+            // either side leaves the scope empty, so the answer is FALSE and
+            // never UNKNOWN.
+            let pairs: Vec<Expr> = values
+                .iter()
+                .cloned()
+                .zip(inner_cols.iter().cloned())
+                .map(|(v, c)| v.eq(c))
+                .collect();
+            if pairs
+                .iter()
+                .all(|p| conjuncts.iter().any(|c| same_equality(c, p)))
+            {
+                null_aware = false;
             }
             // A null-aware join key must read a column of its side, so a
             // constant value becomes a column of the outer plan.
             let mut values = values;
+            let alias = match &inner {
+                LogicalPlan::SubqueryAlias(a) => a.alias.to_string(),
+                _ => "__correlated_sq".to_string(),
+            };
+            let n_values = values.len();
             if null_aware && values.iter().any(|v| !v.any_column_refs()) {
                 let mut exprs: Vec<Expr> = outer
                     .schema()
@@ -751,9 +792,13 @@ impl Rewriter<'_> {
                     .into_iter()
                     .map(Expr::Column)
                     .collect();
-                for value in values.iter_mut() {
+                for (i, value) in values.iter_mut().enumerate() {
                     if !value.any_column_refs() {
-                        let name = self.fresh_name("__in_value");
+                        let name = if n_values == 1 {
+                            format!("{alias}_value")
+                        } else {
+                            format!("{alias}_value_{i}")
+                        };
                         exprs.push(value.clone().alias(&name));
                         *value = Expr::Column(Column::new_unqualified(name));
                     }
@@ -768,7 +813,7 @@ impl Rewriter<'_> {
         }
         let n_value_keys = keys.len();
         for conjunct in conjuncts {
-            if !keys.contains(&conjunct) {
+            if !keys.iter().any(|k| same_equality(k, &conjunct)) {
                 keys.push(conjunct);
             }
         }
@@ -816,6 +861,36 @@ impl Rewriter<'_> {
             outer: &outer,
             used_domain: false,
         };
+        // Below its correlated filters the subquery returns at most one row,
+        // so a left join on those filters matches at most one row.
+        if let Some((inner, conjuncts)) =
+            self.pull_up(sq.subquery.as_ref().clone(), &corr)?
+            && inner.max_rows().is_some_and(|n| n <= 1)
+        {
+            let inner = self.rewrite_plan(inner)?;
+            let inner_schema = Arc::clone(inner.schema());
+            let alias = self.alias_gen.next("__scalar_sq");
+            let aliased = alias_plan(inner, alias.as_str())?;
+            let conjuncts = conjuncts
+                .into_iter()
+                .map(|c| {
+                    requalify(c, &inner_schema, aliased.schema())
+                        .and_then(|c| strip_outer(c, &corr))
+                })
+                .collect::<Result<Vec<_>>>()?;
+            let value = Expr::Column(Column::from(aliased.schema().qualified_field(0)));
+            let join = Join::try_new(
+                Arc::new(outer),
+                Arc::new(aliased),
+                vec![],
+                conjunction(conjuncts),
+                JoinType::Left,
+                JoinConstraint::On,
+                NullEquality::NullEqualsNothing,
+                false,
+            )?;
+            return Ok((LogicalPlan::Join(join), value));
+        }
         let (mut inner, mut cols) =
             self.attach_subquery(&sq.subquery, &mut corr, "__scalar_sq", None)?;
         let mut value = Expr::Column(Column::from(inner.schema().qualified_field(0)));
@@ -961,6 +1036,20 @@ impl Rewriter<'_> {
             .any(|v| !v.is_null())
             .then(|| self.fresh_name("__matched"));
         let mut grouped = LogicalPlan::Aggregate(grouped);
+        // A filter right above the aggregate (a HAVING) that is not TRUE for
+        // the empty-input values gives an unmatched outer row the same NULL
+        // whether it runs before or after the join, so it runs before.
+        let mut above = above;
+        while let Some((LogicalPlan::Filter(f), rest)) = above.split_last()
+            && !f.predicate.contains_outer()
+            && !contains_subquery(&f.predicate)
+            && !true_on_empty_input(&f.predicate, agg, &empty_values)?
+        {
+            grouped = LogicalPlanBuilder::from(grouped)
+                .filter(f.predicate.clone())?
+                .build()?;
+            above = rest;
+        }
         if let Some(marker) = &marker {
             let mut exprs: Vec<Expr> = grouped
                 .schema()
@@ -1264,7 +1353,8 @@ impl Rewriter<'_> {
     ) -> Result<Attached> {
         let input = Arc::unwrap_or_clone(filter.input);
         if !plan_refs_outer(&input, &corr.outer_cols, &[])
-            && let Some(bound) = bind_by_equality(&filter.predicate, corr)?
+            && let Some(bound) =
+                bind_by_equality(&filter.predicate, corr, input.schema())?
         {
             return self.attach_bound_filter(input, bound);
         }
@@ -1801,31 +1891,41 @@ fn collect_outer_columns(
     scopes: &[DFSchemaRef],
     cols: &mut Vec<Column>,
 ) {
-    let _ = plan.apply(|node| {
-        let _ = node.apply_expressions(|e| {
-            let _ = e.apply(|e| {
-                match e {
-                    Expr::OuterReferenceColumn(_, c) => {
-                        if !scopes.iter().any(|s| s.has_column(c)) && !cols.contains(c) {
-                            cols.push(c.clone());
-                        }
+    let inputs = input_schemas(plan);
+    let _ = plan.apply_expressions(|e| {
+        let _ = e.apply(|e| {
+            match e {
+                Expr::OuterReferenceColumn(_, c) => {
+                    if !scopes.iter().any(|s| s.has_column(c)) && !cols.contains(c) {
+                        cols.push(c.clone());
                     }
-                    Expr::ScalarSubquery(sq)
-                    | Expr::Exists(Exists { subquery: sq, .. })
-                    | Expr::InSubquery(InSubquery { subquery: sq, .. }) => {
-                        let mut inner = scopes.to_vec();
-                        inner
-                            .extend(node.inputs().iter().map(|i| Arc::clone(i.schema())));
-                        collect_outer_columns(&sq.subquery, &inner, cols);
-                    }
-                    _ => {}
                 }
-                Ok(TreeNodeRecursion::Continue)
-            });
+                Expr::ScalarSubquery(sq)
+                | Expr::Exists(Exists { subquery: sq, .. })
+                | Expr::InSubquery(InSubquery { subquery: sq, .. }) => {
+                    let mut inner = scopes.to_vec();
+                    inner.extend(inputs.iter().cloned());
+                    collect_outer_columns(&sq.subquery, &inner, cols);
+                }
+                _ => {}
+            }
             Ok(TreeNodeRecursion::Continue)
         });
         Ok(TreeNodeRecursion::Continue)
     });
+    match plan {
+        LogicalPlan::Join(join) if is_lateral_right(&join.right) => {
+            collect_outer_columns(&join.left, scopes, cols);
+            let mut inner = scopes.to_vec();
+            inner.push(Arc::clone(join.left.schema()));
+            collect_outer_columns(&join.right, &inner, cols);
+        }
+        _ => {
+            for input in plan.inputs() {
+                collect_outer_columns(input, scopes, cols);
+            }
+        }
+    }
 }
 
 /// Whether `outer_col` is one of `outer_cols`, and not a column of a nearer scope.
@@ -1840,20 +1940,31 @@ fn plan_refs_outer(
     outer_cols: &[Column],
     scopes: &[DFSchemaRef],
 ) -> bool {
-    plan.exists(|node| {
-        let mut found = false;
-        let inputs = input_schemas(node);
-        node.apply_expressions(|e| {
-            found |= expr_refs_outer(e, outer_cols, scopes, &inputs);
-            Ok(if found {
-                TreeNodeRecursion::Stop
-            } else {
-                TreeNodeRecursion::Continue
-            })
-        })?;
-        Ok(found)
-    })
-    .expect("infallible")
+    let inputs = input_schemas(plan);
+    let mut found = false;
+    let _ = plan.apply_expressions(|e| {
+        found |= expr_refs_outer(e, outer_cols, scopes, &inputs);
+        Ok(if found {
+            TreeNodeRecursion::Stop
+        } else {
+            TreeNodeRecursion::Continue
+        })
+    });
+    if found {
+        return true;
+    }
+    match plan {
+        LogicalPlan::Join(join) if is_lateral_right(&join.right) => {
+            let mut inner = scopes.to_vec();
+            inner.push(Arc::clone(join.left.schema()));
+            plan_refs_outer(&join.left, outer_cols, scopes)
+                || plan_refs_outer(&join.right, outer_cols, &inner)
+        }
+        _ => plan
+            .inputs()
+            .iter()
+            .any(|input| plan_refs_outer(input, outer_cols, scopes)),
+    }
 }
 
 /// Whether `expr`, an expression of `node`, reads one of `outer_cols`.
@@ -2062,13 +2173,20 @@ fn strip_outer(expr: Expr, corr: &Correlation) -> Result<Expr> {
     .data()
 }
 
-/// `a = b` between two plain columns.
-fn is_column_equality(e: &Expr) -> bool {
-    matches!(
-        e,
-        Expr::BinaryExpr(BinaryExpr { left, op: Operator::Eq, right })
-            if matches!(left.as_ref(), Expr::Column(_)) && matches!(right.as_ref(), Expr::Column(_))
-    )
+/// Whether `a` and `b` are the same comparison, maybe with swapped operands.
+fn same_equality(a: &Expr, b: &Expr) -> bool {
+    if a == b {
+        return true;
+    }
+    match (a, b) {
+        (Expr::BinaryExpr(x), Expr::BinaryExpr(y)) => {
+            x.op == Operator::Eq
+                && y.op == Operator::Eq
+                && x.left == y.right
+                && x.right == y.left
+        }
+        _ => false,
+    }
 }
 
 /// `outer_col = domain_col` for each domain column: `IS NOT DISTINCT FROM` if
@@ -2103,10 +2221,11 @@ struct Bound {
 /// If every outer column is bound by a conjunct `inner_expr = outer_col` of
 /// `predicate`, returns the bindings. The inner expressions must not read
 /// outer columns or contain subqueries.
-fn bind_by_equality(predicate: &Expr, corr: &Correlation) -> Result<Option<Bound>> {
-    if contains_subquery(predicate) {
-        return Ok(None);
-    }
+fn bind_by_equality(
+    predicate: &Expr,
+    corr: &Correlation,
+    input_schema: &DFSchemaRef,
+) -> Result<Option<Bound>> {
     let conjuncts = split_conjunction_owned(predicate.clone());
     let mut values: Vec<Option<Expr>> = vec![None; corr.outer_cols.len()];
     let mut used = vec![false; conjuncts.len()];
@@ -2124,7 +2243,11 @@ fn bind_by_equality(predicate: &Expr, corr: &Correlation) -> Result<Option<Bound
             (inner, Expr::OuterReferenceColumn(_, c)) => (c, inner),
             _ => continue,
         };
-        if inner.contains_outer() || inner.is_volatile() || !inner.any_column_refs() {
+        if inner.contains_outer()
+            || inner.is_volatile()
+            || !inner.any_column_refs()
+            || contains_subquery(inner)
+        {
             continue;
         }
         let Some(i) = corr.outer_cols.iter().position(|o| o == outer) else {
@@ -2142,22 +2265,40 @@ fn bind_by_equality(predicate: &Expr, corr: &Correlation) -> Result<Option<Bound
     for (o, v) in corr.outer_cols.iter().zip(&values) {
         map.insert(o.clone(), v.clone());
     }
-    let rest = conjuncts
-        .into_iter()
-        .zip(used)
-        .filter(|(_, used)| !used)
-        .map(|(c, _)| {
+    // A nested subquery can read a bound outer column too: it then reads the
+    // inner column instead, which needs the inner value to be a column.
+    let bound_cols: Option<Vec<Column>> = values
+        .iter()
+        .map(|v| match v {
+            Expr::Column(c) => Some(c.clone()),
+            _ => None,
+        })
+        .collect();
+    let mut rest = vec![];
+    for (c, used) in conjuncts.into_iter().zip(used) {
+        if used {
+            continue;
+        }
+        let nested_refs = contains_subquery(&c)
+            && expr_refs_outer(&c, &corr.outer_cols, &[], &[Arc::clone(input_schema)]);
+        let c = if nested_refs {
+            let Some(cols) = &bound_cols else {
+                return Ok(None);
+            };
+            replace_outer(c, corr, cols, &[Arc::clone(input_schema)])?
+        } else {
             c.transform_down(|e| match e {
                 Expr::OuterReferenceColumn(_, c) if map.contains_key(&c) => {
                     Ok(Transformed::yes(map[&c].clone()))
                 }
                 other => Ok(Transformed::no(other)),
             })
-            .data()
-        })
-        .collect::<Result<Vec<_>>>()?;
-    if rest.iter().any(|e| e.contains_outer()) {
-        return Ok(None);
+            .data()?
+        };
+        if c.contains_outer() {
+            return Ok(None);
+        }
+        rest.push(c);
     }
     Ok(Some(Bound { values, rest }))
 }
@@ -2201,6 +2342,35 @@ fn empty_aggregate_values(agg: &Aggregate) -> Result<Vec<ScalarValue>> {
             func.func.default_value(field.data_type())
         })
         .collect()
+}
+
+/// Whether `predicate`, over the output of `agg`, is TRUE when every
+/// aggregate has its value on an empty input. Unknown counts as TRUE.
+fn true_on_empty_input(
+    predicate: &Expr,
+    agg: &Aggregate,
+    empty_values: &[ScalarValue],
+) -> Result<bool> {
+    let n_group = agg.group_expr.len();
+    let mut values = HashMap::new();
+    for (i, empty) in empty_values.iter().enumerate() {
+        values.insert(
+            Column::from(agg.schema.qualified_field(n_group + i)),
+            lit(empty.clone()),
+        );
+    }
+    let Ok(expr) = substitute(predicate.clone(), &values) else {
+        return Ok(true);
+    };
+    let info = SimplifyContext::builder()
+        .with_schema(Arc::clone(&agg.schema))
+        .build();
+    match ExprSimplifier::new(info).simplify(expr)? {
+        Expr::Literal(ScalarValue::Boolean(Some(false)), _)
+        | Expr::Literal(ScalarValue::Boolean(None), _)
+        | Expr::Literal(ScalarValue::Null, _) => Ok(false),
+        _ => Ok(true),
+    }
 }
 
 /// Whether `plan` returns at most one row per value of the domain columns
