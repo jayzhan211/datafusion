@@ -1835,7 +1835,8 @@ impl Rewriter<'_> {
                 sets.iter()
                     .any(|set| set.contains(&Expr::Column(c.clone())))
             };
-            if input.cols.iter().any(|c| in_sets(c)) {
+            let repeated = dedup_columns(&input.cols).0.len() < input.cols.len();
+            if repeated || input.cols.iter().any(|c| in_sets(c)) {
                 let mut exprs: Vec<Expr> = input
                     .plan
                     .schema()
@@ -1845,7 +1846,7 @@ impl Rewriter<'_> {
                     .collect();
                 let mut cols = vec![];
                 for c in &input.cols {
-                    if in_sets(c) {
+                    if repeated || in_sets(c) {
                         let name = self.fresh_name("__d");
                         exprs.push(Expr::Column(c.clone()).alias(&name));
                         cols.push(Column::new_unqualified(name));
@@ -3023,6 +3024,8 @@ fn one_row_per_domain(plan: &LogicalPlan, cols: &[Column]) -> bool {
         LogicalPlan::Filter(f) => one_row_per_domain(&f.input, cols),
         LogicalPlan::Sort(s) => one_row_per_domain(&s.input, cols),
         LogicalPlan::Aggregate(a) => a.group_expr.iter().all(|g| match g {
+            // One row per grouping set.
+            Expr::GroupingSet(_) => false,
             Expr::Column(c) => cols.contains(c),
             Expr::Literal(..) => true,
             _ => false,
@@ -3044,10 +3047,14 @@ fn strip_for_exists(plan: LogicalPlan) -> LogicalPlan {
         LogicalPlan::Sort(Sort {
             input, fetch: None, ..
         }) => strip_for_exists(Arc::unwrap_or_clone(input)),
+        // A grouping set can return a row for an empty input, so only
+        // plain grouping keys qualify.
         LogicalPlan::Aggregate(a)
             if !a.group_expr.is_empty()
                 && a.aggr_expr.is_empty()
-                && !a.group_expr.iter().any(contains_subquery) =>
+                && !a.group_expr.iter().any(|e| {
+                    contains_subquery(e) || matches!(e, Expr::GroupingSet(_))
+                }) =>
         {
             strip_for_exists(Arc::unwrap_or_clone(a.input))
         }
