@@ -67,11 +67,11 @@ use datafusion_expr::logical_plan::{
     Projection, SkipType, Sort, Subquery, SubqueryAlias, Union, Window,
 };
 use datafusion_expr::registry::FunctionRegistry;
-use datafusion_expr::utils::{conjunction, split_conjunction_owned};
+use datafusion_expr::utils::{can_hash, conjunction, split_conjunction_owned};
 use datafusion_expr::{
     Accumulator, AggregateUDF, AggregateUDFImpl, BinaryExpr, Expr, ExprFunctionExt,
-    LogicalPlan, LogicalPlanBuilder, Operator, Signature, SortExpr, Volatility,
-    WindowFunctionDefinition, lit, when,
+    ExprSchemable, LogicalPlan, LogicalPlanBuilder, Operator, Signature, SortExpr,
+    Volatility, WindowFunctionDefinition, lit, when,
 };
 
 /// Turns correlated subqueries into joins. See the [module docs](self).
@@ -98,6 +98,7 @@ impl OptimizerRule for DecorrelateGeneral {
             alias_gen: Arc::clone(config.alias_generator()),
             registry: config.function_registry(),
             changed: false,
+            names: 0,
         };
         let plan = rewriter.rewrite_plan(plan)?;
         Ok(Transformed::new_transformed(plan, rewriter.changed))
@@ -243,9 +244,16 @@ struct Rewriter<'a> {
     alias_gen: Arc<AliasGenerator>,
     registry: Option<&'a dyn FunctionRegistry>,
     changed: bool,
+    /// Counter for the names of the columns the rule adds.
+    names: usize,
 }
 
 impl Rewriter<'_> {
+    fn fresh_name(&mut self, prefix: &str) -> String {
+        self.names += 1;
+        format!("{prefix}_{}", self.names)
+    }
+
     /// Rewrites the subqueries of every node, inputs first.
     fn rewrite_plan(&mut self, plan: LogicalPlan) -> Result<LogicalPlan> {
         let plan = plan
@@ -363,7 +371,8 @@ impl Rewriter<'_> {
         }
         let mut builder = match conjunction(kept) {
             Some(predicate) => {
-                let predicate = self.replace_value_subqueries(&mut outer, predicate)?;
+                let predicate =
+                    self.replace_predicate_subqueries(&mut outer, predicate)?;
                 LogicalPlanBuilder::from(outer).filter(predicate)?
             }
             None => LogicalPlanBuilder::from(outer),
@@ -479,6 +488,47 @@ impl Rewriter<'_> {
         self.rewrite_filter(filter)
     }
 
+    /// Like [`Self::replace_value_subqueries`] for a filter predicate. Below
+    /// only `AND` and `OR` a NULL drops the row like FALSE does, so an `IN`
+    /// there needs no three-valued mark.
+    fn replace_predicate_subqueries(
+        &mut self,
+        outer: &mut LogicalPlan,
+        expr: Expr,
+    ) -> Result<Expr> {
+        match expr {
+            Expr::BinaryExpr(BinaryExpr {
+                left,
+                op: op @ (Operator::And | Operator::Or),
+                right,
+            }) => {
+                let left = self.replace_predicate_subqueries(outer, *left)?;
+                let right = self.replace_predicate_subqueries(outer, *right)?;
+                Ok(Expr::BinaryExpr(BinaryExpr::new(
+                    Box::new(left),
+                    op,
+                    Box::new(right),
+                )))
+            }
+            Expr::InSubquery(InSubquery {
+                expr,
+                subquery,
+                negated: false,
+            }) => {
+                let (joined, mark) = self.predicate_join(
+                    std::mem::take(outer),
+                    &subquery,
+                    Some(*expr),
+                    JoinType::LeftMark,
+                    false,
+                )?;
+                *outer = joined;
+                Ok(mark.expect("a mark join returns its mark"))
+            }
+            other => self.replace_value_subqueries(outer, other),
+        }
+    }
+
     /// Replaces each correlated scalar subquery and `EXISTS` in `expr` with a
     /// column of a join added to `outer`.
     fn replace_value_subqueries(
@@ -549,7 +599,12 @@ impl Rewriter<'_> {
             return unsupported("LEFT lateral join with an ON condition");
         }
         let outer = Arc::unwrap_or_clone(Arc::clone(&join.left));
-        let (joined, values, condition) = self.lateral_join(outer, &sq, join_type)?;
+        let alias = match join.right.as_ref() {
+            LogicalPlan::SubqueryAlias(a) => Some(a.alias.clone()),
+            _ => None,
+        };
+        let (joined, values, condition) =
+            self.lateral_join(outer, &sq, join_type, alias)?;
 
         let mut builder = LogicalPlanBuilder::from(joined);
         if join_type == JoinType::Inner
@@ -575,7 +630,12 @@ impl Rewriter<'_> {
                 }
                 _ => value,
             };
-            exprs.push(value.alias_qualified(qualifier.cloned(), field.name()));
+            let same = Expr::Column(Column::new(qualifier.cloned(), field.name()));
+            exprs.push(if value == same {
+                value
+            } else {
+                value.alias_qualified(qualifier.cloned(), field.name())
+            });
         }
         builder = builder.project(exprs)?;
         if let Some(filter) = join.filter {
@@ -596,8 +656,12 @@ impl Rewriter<'_> {
         null_aware: bool,
     ) -> Result<(LogicalPlan, Option<Expr>)> {
         let outer_cols = free_outer_columns(&sq.subquery, &outer)?;
-        let alias = self.alias_gen.next("__correlated_sq");
-        let subquery_plan = sq.subquery.as_ref().clone();
+        // Whether any row exists does not depend on the subquery's output.
+        let subquery_plan = if in_expr.is_none() {
+            strip_for_exists(sq.subquery.as_ref().clone())
+        } else {
+            strip_for_in(sq.subquery.as_ref().clone())
+        };
         let mut corr = Correlation {
             outer_cols,
             outer: &outer,
@@ -608,7 +672,8 @@ impl Rewriter<'_> {
             Some((inner, conjuncts)) => {
                 let inner = self.rewrite_plan(inner)?;
                 let inner_schema = Arc::clone(inner.schema());
-                let aliased = alias_plan(inner, &alias)?;
+                let alias = self.alias_gen.next("__correlated_sq");
+                let aliased = alias_plan(inner, alias.as_str())?;
                 let conjuncts = conjuncts
                     .into_iter()
                     .map(|c| {
@@ -619,61 +684,99 @@ impl Rewriter<'_> {
                 (aliased, conjuncts)
             }
             None => {
-                let (aliased, cols) =
-                    self.attach_subquery(&subquery_plan, &mut corr, &alias)?;
+                let (aliased, cols) = self.attach_subquery(
+                    &subquery_plan,
+                    &mut corr,
+                    "__correlated_sq",
+                    None,
+                )?;
                 let conjuncts = domain_join_keys(&corr, &cols);
                 (aliased, conjuncts)
             }
         };
+        let mut outer = outer;
         // The `IN` equalities come first: a null-aware join reads its leading
         // equalities as the values to compare and the rest as correlation keys.
-        let mut value_keys = vec![];
-        let mut outer = outer;
+        let mut keys = vec![];
+        let mut null_aware = null_aware;
         if let Some(in_expr) = in_expr {
             let values: Vec<Expr> =
                 match in_subquery_tuple_values(&in_expr, &sq.subquery)? {
                     Some(values) => values.into_owned(),
                     None => vec![in_expr],
                 };
-            // A join key must read a column of its side, so compute each value
-            // that is not a column as a column of the outer plan.
-            let mut exprs: Vec<Expr> = outer
-                .schema()
-                .columns()
-                .into_iter()
-                .map(Expr::Column)
+            let inner_cols: Vec<Expr> = (0..values.len())
+                .map(|i| Expr::Column(Column::from(inner.schema().qualified_field(i))))
                 .collect();
-            let n_outer = exprs.len();
-            let mut value_cols = vec![];
-            for value in values {
-                match value {
-                    Expr::Column(c) => value_cols.push(Expr::Column(c)),
-                    value => {
-                        let name = self.alias_gen.next("__in_value");
-                        exprs.push(value.alias(&name));
-                        value_cols.push(Expr::Column(Column::new_unqualified(name)));
-                    }
+            // Three-valued logic only matters when a NULL can occur.
+            null_aware &= values
+                .iter()
+                .map(|v| v.nullable(outer.schema().as_ref()))
+                .chain(
+                    inner_cols
+                        .iter()
+                        .map(|c| c.nullable(inner.schema().as_ref())),
+                )
+                .collect::<Result<Vec<_>>>()?
+                .into_iter()
+                .any(|n| n);
+            if null_aware {
+                let hashable = values
+                    .iter()
+                    .map(|v| v.get_type(outer.schema().as_ref()))
+                    .chain(
+                        inner_cols
+                            .iter()
+                            .map(|c| c.get_type(inner.schema().as_ref())),
+                    )
+                    .collect::<Result<Vec<_>>>()?
+                    .iter()
+                    .all(can_hash);
+                if !hashable {
+                    return unsupported("null-aware IN on a type that is not hashable");
+                }
+                if !conjuncts.iter().all(is_column_equality) {
+                    return unsupported(
+                        "NOT IN with a correlation that is not an equality",
+                    );
                 }
             }
-            if exprs.len() > n_outer {
+            // A null-aware join key must read a column of its side, so a
+            // constant value becomes a column of the outer plan.
+            let mut values = values;
+            if null_aware && values.iter().any(|v| !v.any_column_refs()) {
+                let mut exprs: Vec<Expr> = outer
+                    .schema()
+                    .columns()
+                    .into_iter()
+                    .map(Expr::Column)
+                    .collect();
+                for value in values.iter_mut() {
+                    if !value.any_column_refs() {
+                        let name = self.fresh_name("__in_value");
+                        exprs.push(value.clone().alias(&name));
+                        *value = Expr::Column(Column::new_unqualified(name));
+                    }
+                }
                 outer = LogicalPlanBuilder::from(outer).project(exprs)?.build()?;
             }
-            for (i, value) in value_cols.into_iter().enumerate() {
-                let col = Expr::Column(Column::from(inner.schema().qualified_field(i)));
-                value_keys.push(value.eq(col));
+            for (value, col) in values.into_iter().zip(inner_cols) {
+                keys.push(value.eq(col));
+            }
+        } else {
+            null_aware = false;
+        }
+        let n_value_keys = keys.len();
+        for conjunct in conjuncts {
+            if !keys.contains(&conjunct) {
+                keys.push(conjunct);
             }
         }
-        let null_aware = null_aware && !value_keys.is_empty();
-        if null_aware && !conjuncts.iter().all(is_column_equality) {
-            return unsupported("NOT IN with a correlation that is not an equality");
-        }
-        let n_value_keys = value_keys.len();
-        value_keys.extend(conjuncts);
         let join = Join::try_new(
             Arc::new(outer),
             Arc::new(inner),
             vec![],
-            conjunction(value_keys),
+            conjunction(keys),
             join_type,
             JoinConstraint::On,
             NullEquality::NullEqualsNothing,
@@ -684,21 +787,10 @@ impl Rewriter<'_> {
         if join_type != JoinType::LeftMark {
             return Ok((plan, None));
         }
-        // Qualify the mark with the subquery alias, as one plan can hold several.
-        let schema = Arc::clone(plan.schema());
-        let n = schema.fields().len();
-        let mut exprs: Vec<Expr> = (0..n - 1)
-            .map(|i| Expr::Column(Column::from(schema.qualified_field(i))))
-            .collect();
-        exprs.push(
-            Expr::Column(Column::from(schema.qualified_field(n - 1)))
-                .alias_qualified(Some(alias.as_str()), "mark"),
-        );
-        let plan = LogicalPlanBuilder::from(plan).project(exprs)?.build()?;
-        Ok((
-            plan,
-            Some(Expr::Column(Column::new(Some(alias.as_str()), "mark"))),
-        ))
+        // The mark column is qualified with the subquery alias.
+        let n = plan.schema().fields().len();
+        let mark = Expr::Column(Column::from(plan.schema().qualified_field(n - 1)));
+        Ok((plan, Some(mark)))
     }
 
     /// Joins `outer` with a correlated scalar subquery; returns the expression
@@ -711,7 +803,7 @@ impl Rewriter<'_> {
         let outer_cols = free_outer_columns(&sq.subquery, &outer)?;
         if let Some(chain) = peel_to_groupless_aggregate(&sq.subquery) {
             let (joined, mut values, condition) =
-                self.aggregate_join(outer, outer_cols, chain)?;
+                self.aggregate_join(outer, outer_cols, chain, None)?;
             let value = values.swap_remove(0);
             let value = match condition {
                 Some(condition) => when(condition, value).end()?,
@@ -719,19 +811,20 @@ impl Rewriter<'_> {
             };
             return Ok((joined, value));
         }
-        let alias = self.alias_gen.next("__scalar_sq");
         let mut corr = Correlation {
             outer_cols,
             outer: &outer,
             used_domain: false,
         };
         let (mut inner, mut cols) =
-            self.attach_subquery(&sq.subquery, &mut corr, &alias)?;
+            self.attach_subquery(&sq.subquery, &mut corr, "__scalar_sq", None)?;
         let mut value = Expr::Column(Column::from(inner.schema().qualified_field(0)));
         // A scalar subquery that can return several rows for one outer value
         // must fail if it does: aggregate its value per outer value with an
         // aggregate that fails on a second row.
-        if !sq.subquery.max_rows().is_some_and(|n| n <= 1) {
+        if !sq.subquery.max_rows().is_some_and(|n| n <= 1)
+            && !one_row_per_domain(&inner, &cols)
+        {
             let (_, field) = inner.schema().qualified_field(0);
             let name = field.name().clone();
             let single = AggregateUDF::from(SingleValue::new())
@@ -742,7 +835,7 @@ impl Rewriter<'_> {
                 .aggregate(keys, vec![single])?
                 .build()?;
             let alias = self.alias_gen.next("__scalar_sq");
-            inner = alias_plan(grouped, &alias)?;
+            inner = alias_plan(grouped, alias.as_str())?;
             cols = (0..cols.len())
                 .map(|i| Column::from(inner.schema().qualified_field(i)))
                 .collect();
@@ -770,12 +863,12 @@ impl Rewriter<'_> {
         outer: LogicalPlan,
         sq: &Subquery,
         join_type: JoinType,
+        alias: Option<TableReference>,
     ) -> Result<(LogicalPlan, Vec<Expr>, Option<Expr>)> {
         let outer_cols = free_outer_columns(&sq.subquery, &outer)?;
         if let Some(chain) = peel_to_groupless_aggregate(&sq.subquery) {
-            return self.aggregate_join(outer, outer_cols, chain);
+            return self.aggregate_join(outer, outer_cols, chain, alias);
         }
-        let alias = self.alias_gen.next("__lateral_sq");
         let subquery_plan = sq.subquery.as_ref().clone();
         let mut corr = Correlation {
             outer_cols,
@@ -786,7 +879,9 @@ impl Rewriter<'_> {
             Some((inner, conjuncts)) => {
                 let inner = self.rewrite_plan(inner)?;
                 let inner_schema = Arc::clone(inner.schema());
-                let aliased = alias_plan(inner, &alias)?;
+                let alias =
+                    alias.unwrap_or_else(|| self.alias_gen.next("__lateral_sq").into());
+                let aliased = alias_plan(inner, alias)?;
                 let conjuncts = conjuncts
                     .into_iter()
                     .map(|c| {
@@ -797,8 +892,12 @@ impl Rewriter<'_> {
                 (aliased, conjuncts)
             }
             None => {
-                let (aliased, cols) =
-                    self.attach_subquery(&subquery_plan, &mut corr, &alias)?;
+                let (aliased, cols) = self.attach_subquery(
+                    &subquery_plan,
+                    &mut corr,
+                    "__lateral_sq",
+                    alias,
+                )?;
                 let keys = domain_join_keys(&corr, &cols);
                 (aliased, keys)
             }
@@ -831,6 +930,7 @@ impl Rewriter<'_> {
         outer: LogicalPlan,
         outer_cols: Vec<Column>,
         chain: Vec<&LogicalPlan>,
+        alias: Option<TableReference>,
     ) -> Result<(LogicalPlan, Vec<Expr>, Option<Expr>)> {
         let Some((LogicalPlan::Aggregate(agg), above)) = chain.split_last() else {
             return internal_err!("expected an aggregate at the end of the chain");
@@ -853,38 +953,46 @@ impl Rewriter<'_> {
             .collect::<Result<Vec<_>>>()?;
         let group_expr = input.cols.iter().cloned().map(Expr::Column).collect();
         let grouped = Aggregate::try_new(Arc::new(input.plan), group_expr, aggr_expr)?;
-        let marker = self.alias_gen.next("__matched");
-        let grouped = LogicalPlanBuilder::from(LogicalPlan::Aggregate(grouped));
-        let mut exprs: Vec<Expr> = grouped
-            .schema()
-            .columns()
-            .into_iter()
-            .map(Expr::Column)
-            .collect();
-        exprs.push(lit(true).alias(&marker));
-        let grouped = grouped.project(exprs)?.build()?;
+        let empty_values = empty_aggregate_values(agg)?;
+        // A marker column tells the outer rows without a match apart, if an
+        // aggregate's value on an empty input is not NULL (`count`).
+        let marker = empty_values
+            .iter()
+            .any(|v| !v.is_null())
+            .then(|| self.fresh_name("__matched"));
+        let mut grouped = LogicalPlan::Aggregate(grouped);
+        if let Some(marker) = &marker {
+            let mut exprs: Vec<Expr> = grouped
+                .schema()
+                .columns()
+                .into_iter()
+                .map(Expr::Column)
+                .collect();
+            exprs.push(lit(true).alias(marker));
+            grouped = LogicalPlanBuilder::from(grouped).project(exprs)?.build()?;
+        }
         let grouped = self.rewrite_plan(grouped)?;
-        let alias = self.alias_gen.next("__scalar_sq");
-        let grouped = alias_plan(grouped, &alias)?;
+        let alias = alias.unwrap_or_else(|| self.alias_gen.next("__scalar_sq").into());
+        let grouped = alias_plan(grouped, alias.clone())?;
         let n_keys = corr.outer_cols.len();
         let cols: Vec<Column> = (0..n_keys)
             .map(|i| Column::from(grouped.schema().qualified_field(i)))
             .collect();
         let keys = domain_join_keys(&corr, &cols);
-        let marker = Column::new(Some(alias.as_str()), &marker);
 
         // The value of each aggregate: its value on an empty input when no
         // inner row matched the outer row.
         let mut values: HashMap<Column, Expr> = HashMap::new();
-        for (i, e) in agg.aggr_expr.iter().enumerate() {
-            let (_, field) = agg.schema.qualified_field(i);
-            let Expr::AggregateFunction(func) = e.clone().unalias() else {
-                return unsupported(format!("aggregate expression {e}"));
+        for (i, empty) in empty_values.into_iter().enumerate() {
+            let col =
+                Expr::Column(Column::from(grouped.schema().qualified_field(n_keys + i)));
+            let value = match &marker {
+                Some(marker) if !empty.is_null() => {
+                    let marker = Expr::Column(Column::new(Some(alias.clone()), marker));
+                    when(marker.is_null(), lit(empty)).otherwise(col)?
+                }
+                _ => col,
             };
-            let empty = func.func.default_value(field.data_type())?;
-            let col = Column::from(grouped.schema().qualified_field(n_keys + i));
-            let value = when(Expr::Column(marker.clone()).is_null(), lit(empty))
-                .otherwise(Expr::Column(col))?;
             values.insert(Column::from(agg.schema.qualified_field(i)), value);
         }
 
@@ -953,7 +1061,8 @@ impl Rewriter<'_> {
         &mut self,
         plan: &LogicalPlan,
         corr: &mut Correlation,
-        alias: &str,
+        alias_prefix: &str,
+        alias: Option<TableReference>,
     ) -> Result<(LogicalPlan, Vec<Column>)> {
         let own_cols = plan.schema().columns();
         let attached = self.attach(plan.clone(), corr)?;
@@ -972,6 +1081,7 @@ impl Rewriter<'_> {
             .project(exprs)?
             .build()?;
         let projected = self.rewrite_plan(projected)?;
+        let alias = alias.unwrap_or_else(|| self.alias_gen.next(alias_prefix).into());
         let aliased = alias_plan(projected, alias)?;
         let cols = positions
             .into_iter()
@@ -989,7 +1099,7 @@ impl Rewriter<'_> {
         let names: Vec<String> = corr
             .outer_cols
             .iter()
-            .map(|_| self.alias_gen.next("__d"))
+            .map(|_| self.fresh_name("__d"))
             .collect();
         let exprs: Vec<Expr> = corr
             .outer_cols
@@ -1125,6 +1235,10 @@ impl Rewriter<'_> {
                 }
             },
             LogicalPlan::Limit(limit) => self.attach_limit(limit, corr),
+            // A subquery node only marks a plan that reads outer columns.
+            LogicalPlan::Subquery(sq) => {
+                self.attach(Arc::unwrap_or_clone(sq.subquery), corr)
+            }
             LogicalPlan::Unnest(unnest) => {
                 // Unnest repeats the columns it does not unnest, so the domain
                 // columns pass through.
@@ -1207,7 +1321,7 @@ impl Rewriter<'_> {
             match e {
                 Expr::Column(c) => cols.push(c),
                 e => {
-                    let name = self.alias_gen.next("__d");
+                    let name = self.fresh_name("__d");
                     exprs.push(e.alias(&name));
                     cols.push(Column::new_unqualified(name));
                 }
@@ -1258,16 +1372,22 @@ impl Rewriter<'_> {
         // values on an empty input.
         let key_exprs = input.cols.iter().cloned().map(Expr::Column).collect();
         let grouped = Aggregate::try_new(Arc::new(input.plan), key_exprs, aggr_expr)?;
-        let marker = self.alias_gen.next("__matched");
-        let grouped = LogicalPlan::Aggregate(grouped);
-        let mut exprs: Vec<Expr> = grouped
-            .schema()
-            .columns()
-            .into_iter()
-            .map(Expr::Column)
-            .collect();
-        exprs.push(lit(true).alias(&marker));
-        let grouped = LogicalPlanBuilder::from(grouped).project(exprs)?.build()?;
+        let empty_values = empty_aggregate_values(&agg)?;
+        let marker = empty_values
+            .iter()
+            .any(|v| !v.is_null())
+            .then(|| self.fresh_name("__matched"));
+        let mut grouped = LogicalPlan::Aggregate(grouped);
+        if let Some(marker) = &marker {
+            let mut exprs: Vec<Expr> = grouped
+                .schema()
+                .columns()
+                .into_iter()
+                .map(Expr::Column)
+                .collect();
+            exprs.push(lit(true).alias(marker));
+            grouped = LogicalPlanBuilder::from(grouped).project(exprs)?.build()?;
+        }
         let grouped_keys: Vec<Column> = (0..input.cols.len())
             .map(|i| Column::from(grouped.schema().qualified_field(i)))
             .collect();
@@ -1298,21 +1418,19 @@ impl Rewriter<'_> {
         let join = LogicalPlan::Join(join);
         let mut exprs: Vec<Expr> =
             domain.cols.iter().cloned().map(Expr::Column).collect();
-        for (i, e) in agg.aggr_expr.iter().enumerate() {
+        for (i, empty) in empty_values.into_iter().enumerate() {
             let (qualifier, field) = agg.schema.qualified_field(i);
-            let Expr::AggregateFunction(func) = e.clone().unalias() else {
-                return unsupported(format!("aggregate expression {e}"));
-            };
-            let empty = func.func.default_value(field.data_type())?;
-            let col = Column::from(
+            let col = Expr::Column(Column::from(
                 join.schema()
                     .qualified_field(domain.cols.len() + grouped_keys.len() + i),
-            );
-            let value = when(
-                Expr::Column(Column::new_unqualified(&marker)).is_null(),
-                lit(empty),
-            )
-            .otherwise(Expr::Column(col))?;
+            ));
+            let value = match &marker {
+                Some(marker) if !empty.is_null() => {
+                    let marker = Expr::Column(Column::new_unqualified(marker));
+                    when(marker.is_null(), lit(empty)).otherwise(col)?
+                }
+                _ => col,
+            };
             exprs.push(value.alias_qualified(qualifier.cloned(), field.name()));
         }
         let plan = LogicalPlanBuilder::from(join).project(exprs)?.build()?;
@@ -1387,7 +1505,7 @@ impl Rewriter<'_> {
             .into_iter()
             .map(Expr::Column)
             .collect();
-        let rn_name = self.alias_gen.next("__rn");
+        let rn_name = self.fresh_name("__rn");
         let rn = Expr::from(WindowFunction::new(
             WindowFunctionDefinition::WindowUDF(row_number),
             vec![],
@@ -1497,7 +1615,7 @@ impl Rewriter<'_> {
                     .collect();
                 let mut cols = vec![];
                 for (l, r) in l.into_iter().zip(r) {
-                    let name = self.alias_gen.next("__d");
+                    let name = self.fresh_name("__d");
                     let value =
                         when(Expr::Column(l.clone()).is_not_null(), Expr::Column(l))
                             .otherwise(Expr::Column(r))?;
@@ -1524,7 +1642,7 @@ impl Rewriter<'_> {
         let names: Vec<String> = corr
             .outer_cols
             .iter()
-            .map(|_| self.alias_gen.next("__d"))
+            .map(|_| self.fresh_name("__d"))
             .collect();
         let mut inputs = Vec::with_capacity(union.inputs.len());
         for input in union.inputs {
@@ -2069,6 +2187,110 @@ fn peel_to_groupless_aggregate(plan: &LogicalPlan) -> Option<Vec<&LogicalPlan>> 
     }
 }
 
+/// The value of each aggregate expression of `agg` on an empty input.
+fn empty_aggregate_values(agg: &Aggregate) -> Result<Vec<ScalarValue>> {
+    let n_group = agg.group_expr.len();
+    agg.aggr_expr
+        .iter()
+        .enumerate()
+        .map(|(i, e)| {
+            let (_, field) = agg.schema.qualified_field(n_group + i);
+            let Expr::AggregateFunction(func) = e.clone().unalias() else {
+                return unsupported(format!("aggregate expression {e}"));
+            };
+            func.func.default_value(field.data_type())
+        })
+        .collect()
+}
+
+/// Whether `plan` returns at most one row per value of the domain columns
+/// `cols`: it groups by them (and constants) only.
+fn one_row_per_domain(plan: &LogicalPlan, cols: &[Column]) -> bool {
+    match plan {
+        LogicalPlan::SubqueryAlias(a) => {
+            let Some(inner) = cols
+                .iter()
+                .map(|c| {
+                    let i = a.schema.index_of_column(c).ok()?;
+                    Some(Column::from(a.input.schema().qualified_field(i)))
+                })
+                .collect::<Option<Vec<_>>>()
+            else {
+                return false;
+            };
+            one_row_per_domain(&a.input, &inner)
+        }
+        LogicalPlan::Projection(p) => {
+            let Some(inner) = cols
+                .iter()
+                .map(|c| {
+                    let i = p.schema.index_of_column(c).ok()?;
+                    match p.expr[i].clone().unalias() {
+                        Expr::Column(c) => Some(c),
+                        _ => None,
+                    }
+                })
+                .collect::<Option<Vec<_>>>()
+            else {
+                return false;
+            };
+            one_row_per_domain(&p.input, &inner)
+        }
+        LogicalPlan::Filter(f) => one_row_per_domain(&f.input, cols),
+        LogicalPlan::Sort(s) => one_row_per_domain(&s.input, cols),
+        LogicalPlan::Aggregate(a) => a.group_expr.iter().all(|g| match g {
+            Expr::Column(c) => cols.contains(c),
+            Expr::Literal(..) => true,
+            _ => false,
+        }),
+        _ => false,
+    }
+}
+
+/// `EXISTS` only asks whether a row exists, which the nodes stripped here do
+/// not change.
+fn strip_for_exists(plan: LogicalPlan) -> LogicalPlan {
+    match plan {
+        LogicalPlan::Projection(p) if !p.expr.iter().any(contains_subquery) => {
+            strip_for_exists(Arc::unwrap_or_clone(p.input))
+        }
+        LogicalPlan::Distinct(Distinct::All(input)) => {
+            strip_for_exists(Arc::unwrap_or_clone(input))
+        }
+        LogicalPlan::Sort(Sort {
+            input, fetch: None, ..
+        }) => strip_for_exists(Arc::unwrap_or_clone(input)),
+        LogicalPlan::Aggregate(a)
+            if !a.group_expr.is_empty()
+                && a.aggr_expr.is_empty()
+                && !a.group_expr.iter().any(contains_subquery) =>
+        {
+            strip_for_exists(Arc::unwrap_or_clone(a.input))
+        }
+        LogicalPlan::Limit(limit)
+            if matches!(limit.get_skip_type(), Ok(SkipType::Literal(0)))
+                && matches!(limit.get_fetch_type(), Ok(FetchType::Literal(None)))
+                    | matches!(limit.get_fetch_type(), Ok(FetchType::Literal(Some(n))) if n > 0) =>
+        {
+            strip_for_exists(Arc::unwrap_or_clone(limit.input))
+        }
+        other => other,
+    }
+}
+
+/// `x IN (q)` does not depend on duplicates or order of `q`.
+fn strip_for_in(plan: LogicalPlan) -> LogicalPlan {
+    match plan {
+        LogicalPlan::Distinct(Distinct::All(input)) => {
+            strip_for_in(Arc::unwrap_or_clone(input))
+        }
+        LogicalPlan::Sort(Sort {
+            input, fetch: None, ..
+        }) => strip_for_in(Arc::unwrap_or_clone(input)),
+        other => other,
+    }
+}
+
 /// Replaces column references with their values in `values`, and outer
 /// references with the outer columns.
 fn substitute(expr: Expr, values: &HashMap<Column, Expr>) -> Result<Expr> {
@@ -2112,7 +2334,11 @@ fn add_columns(mut exprs: Vec<Expr>, cols: &[Column]) -> (Vec<Expr>, Vec<Column>
 fn add_partition_by(expr: Expr, partition: &[Expr]) -> Result<Expr> {
     expr.transform_down(|e| match e {
         Expr::WindowFunction(mut wf) => {
-            wf.params.partition_by.extend(partition.iter().cloned());
+            for e in partition {
+                if !wf.params.partition_by.contains(e) {
+                    wf.params.partition_by.push(e.clone());
+                }
+            }
             Ok(Transformed::new(
                 Expr::WindowFunction(wf),
                 true,
@@ -2124,7 +2350,10 @@ fn add_partition_by(expr: Expr, partition: &[Expr]) -> Result<Expr> {
     .data()
 }
 
-fn alias_plan(plan: LogicalPlan, alias: &str) -> Result<LogicalPlan> {
+fn alias_plan(
+    plan: LogicalPlan,
+    alias: impl Into<TableReference>,
+) -> Result<LogicalPlan> {
     SubqueryAlias::try_new(Arc::new(plan), alias).map(LogicalPlan::SubqueryAlias)
 }
 
