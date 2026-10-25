@@ -43,8 +43,6 @@ use datafusion_expr::{
 
 use crate::common_subexpr_eliminate::CommonSubexprEliminate;
 use crate::decorrelate_general::DecorrelateGeneral;
-use crate::decorrelate_lateral_join::DecorrelateLateralJoin;
-use crate::decorrelate_predicate_subquery::DecorrelatePredicateSubquery;
 use crate::eliminate_aggregate_distinct::EliminateAggregateDistinct;
 use crate::eliminate_cross_join::EliminateCrossJoin;
 use crate::eliminate_duplicated_expr::EliminateDuplicatedExpr;
@@ -64,7 +62,6 @@ use crate::push_down_filter::PushDownFilter;
 use crate::push_down_limit::PushDownLimit;
 use crate::replace_distinct_aggregate::ReplaceDistinctWithAggregate;
 use crate::rewrite_set_comparison::RewriteSetComparison;
-use crate::scalar_subquery_to_join::ScalarSubqueryToJoin;
 use crate::simplify_expressions::SimplifyExpressions;
 use crate::single_distinct_to_groupby::SingleDistinctToGroupBy;
 use crate::unions_to_filter::UnionsToFilter;
@@ -294,9 +291,6 @@ impl Optimizer {
             Arc::new(ReplaceDistinctWithAggregate::new()),
             Arc::new(EliminateJoin::new()),
             Arc::new(DecorrelateGeneral::new()),
-            Arc::new(DecorrelatePredicateSubquery::new()),
-            Arc::new(ScalarSubqueryToJoin::new()),
-            Arc::new(DecorrelateLateralJoin::new()),
             Arc::new(ExtractEquijoinPredicate::new()),
             Arc::new(EliminateDuplicatedExpr::new()),
             Arc::new(EliminateFilter::new()),

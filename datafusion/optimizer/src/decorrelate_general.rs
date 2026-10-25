@@ -93,11 +93,20 @@ impl OptimizerRule for DecorrelateGeneral {
         plan: LogicalPlan,
         config: &dyn OptimizerConfig,
     ) -> Result<Transformed<LogicalPlan>> {
-        if !plan_has_subquery_to_rewrite(&plan) {
+        let all_scalars = !config
+            .options()
+            .optimizer
+            .enable_physical_uncorrelated_scalar_subquery;
+        if !plan_has_subquery_to_rewrite(&plan, all_scalars) {
             return Ok(Transformed::no(plan));
         }
+        let all_scalars = !config
+            .options()
+            .optimizer
+            .enable_physical_uncorrelated_scalar_subquery;
         let mut rewriter = Rewriter {
             alias_gen: Arc::clone(config.alias_generator()),
+            all_scalars,
             registry: config.function_registry(),
             changed: false,
             names: 0,
@@ -125,11 +134,11 @@ fn is_unsupported(e: &DataFusionError) -> bool {
     matches!(e.find_root(), DataFusionError::NotImplemented(msg) if msg.starts_with("decorrelate_general"))
 }
 
-fn plan_has_subquery_to_rewrite(plan: &LogicalPlan) -> bool {
+fn plan_has_subquery_to_rewrite(plan: &LogicalPlan, all_scalars: bool) -> bool {
     matches!(
         plan.apply_with_subqueries(|node| {
             Ok(
-                if node_has_subquery_to_rewrite(node)
+                if node_has_subquery_to_rewrite(node, all_scalars)
                     || lateral_subquery(node).is_some()
                     || matches!(node, LogicalPlan::Subquery(_))
                 {
@@ -143,7 +152,7 @@ fn plan_has_subquery_to_rewrite(plan: &LogicalPlan) -> bool {
     )
 }
 
-fn node_has_subquery_to_rewrite(node: &LogicalPlan) -> bool {
+fn node_has_subquery_to_rewrite(node: &LogicalPlan, all_scalars: bool) -> bool {
     match node {
         LogicalPlan::Filter(_)
         | LogicalPlan::Projection(_)
@@ -152,7 +161,7 @@ fn node_has_subquery_to_rewrite(node: &LogicalPlan) -> bool {
         | LogicalPlan::Window(_) => {
             let mut found = false;
             let _ = node.apply_expressions(|e| {
-                found |= expr_has_subquery_to_rewrite(e);
+                found |= expr_has_subquery_to_rewrite(e, all_scalars);
                 Ok(TreeNodeRecursion::Continue)
             });
             found
@@ -162,16 +171,16 @@ fn node_has_subquery_to_rewrite(node: &LogicalPlan) -> bool {
                 && join
                     .filter
                     .as_ref()
-                    .is_some_and(expr_has_subquery_to_rewrite)
+                    .is_some_and(|f| expr_has_subquery_to_rewrite(f, all_scalars))
         }
         _ => false,
     }
 }
 
-fn expr_has_subquery_to_rewrite(expr: &Expr) -> bool {
+fn expr_has_subquery_to_rewrite(expr: &Expr, all_scalars: bool) -> bool {
     expr.exists(|e| {
         Ok(match e {
-            Expr::ScalarSubquery(sq) => is_correlated(sq),
+            Expr::ScalarSubquery(sq) => all_scalars || is_correlated(sq),
             Expr::Exists(_) | Expr::InSubquery(_) => true,
             _ => false,
         })
@@ -257,6 +266,9 @@ struct Attached {
 
 struct Rewriter<'a> {
     alias_gen: Arc<AliasGenerator>,
+    /// Whether uncorrelated scalar subqueries are rewritten too, rather than
+    /// run by the physical plan.
+    all_scalars: bool,
     registry: Option<&'a dyn FunctionRegistry>,
     changed: bool,
     /// Counter for the names of the columns the rule adds.
@@ -286,22 +298,23 @@ impl Rewriter<'_> {
             self.changed = true;
             return Ok(Arc::unwrap_or_clone(sq.subquery));
         }
-        let plan =
-            if node_has_subquery_to_rewrite(&plan) || lateral_subquery(&plan).is_some() {
-                match self.rewrite_node(plan.clone()) {
-                    Ok(new_plan) => {
-                        self.changed = true;
-                        new_plan
-                    }
-                    Err(e) if is_unsupported(&e) => {
-                        log::debug!("{e}");
-                        plan
-                    }
-                    Err(e) => return Err(e),
+        let plan = if node_has_subquery_to_rewrite(&plan, self.all_scalars)
+            || lateral_subquery(&plan).is_some()
+        {
+            match self.rewrite_node(plan.clone()) {
+                Ok(new_plan) => {
+                    self.changed = true;
+                    new_plan
                 }
-            } else {
-                plan
-            };
+                Err(e) if is_unsupported(&e) => {
+                    log::debug!("{e}");
+                    plan
+                }
+                Err(e) => return Err(e),
+            }
+        } else {
+            plan
+        };
         // The subqueries that are left (for example uncorrelated scalar
         // subqueries) can have correlated subqueries of their own.
         plan.map_subqueries(|sq| {
@@ -562,7 +575,7 @@ impl Rewriter<'_> {
         expr: Expr,
     ) -> Result<Expr> {
         expr.transform_down(|e| match e {
-            Expr::ScalarSubquery(sq) if is_correlated(&sq) => {
+            Expr::ScalarSubquery(sq) if self.all_scalars || is_correlated(&sq) => {
                 let (joined, value) = self.scalar_join(std::mem::take(outer), &sq)?;
                 *outer = joined;
                 Ok(Transformed::new(value, true, TreeNodeRecursion::Jump))
@@ -758,14 +771,27 @@ impl Rewriter<'_> {
                     .collect::<Result<Vec<_>>>()?
                     .iter()
                     .all(can_hash);
-                if !hashable {
-                    return unsupported("null-aware IN on a type that is not hashable");
-                }
+                // A null-aware hash join compares hashable values, and its
+                // correlation keys use `=`. Otherwise compute the UNKNOWN
+                // case with more joins.
                 let null_safe_key = conjuncts.iter().any(|c| {
                     matches!(c, Expr::BinaryExpr(b) if b.op == Operator::IsNotDistinctFrom)
                 });
-                if null_safe_key {
-                    return unsupported("null-aware IN over domain values");
+                if !hashable || null_safe_key {
+                    let [value] = values.as_slice() else {
+                        return unsupported("three-valued multi-column IN");
+                    };
+                    let [col] = inner_cols.as_slice() else {
+                        return internal_err!("one value, one column");
+                    };
+                    return self.three_valued_in(
+                        outer,
+                        inner,
+                        value.clone(),
+                        col.clone(),
+                        conjuncts,
+                        join_type,
+                    );
                 }
             }
             // When each `IN` equality is also a correlation equality, a NULL on
@@ -845,6 +871,84 @@ impl Rewriter<'_> {
         let n = plan.schema().fields().len();
         let mark = Expr::Column(Column::from(plan.schema().qualified_field(n - 1)));
         Ok((plan, Some(mark)))
+    }
+
+    /// `value IN (inner)` under three-valued logic with plain mark joins: one
+    /// for a match, one for a NULL in the scope of the outer row, and one for
+    /// any row in that scope. `keys` select the scope. For `LeftAnti` (a
+    /// `NOT IN` filter) returns the filtered plan, for `LeftMark` the value.
+    fn three_valued_in(
+        &mut self,
+        outer: LogicalPlan,
+        inner: LogicalPlan,
+        value: Expr,
+        col: Expr,
+        keys: Vec<Expr>,
+        join_type: JoinType,
+    ) -> Result<(LogicalPlan, Option<Expr>)> {
+        let output: Vec<Expr> = outer
+            .schema()
+            .columns()
+            .into_iter()
+            .map(Expr::Column)
+            .collect();
+        let inner_schema = Arc::clone(inner.schema());
+        let mark_join = |left: LogicalPlan, right: LogicalPlan, on: Vec<Expr>| {
+            let join = Join::try_new(
+                Arc::new(left),
+                Arc::new(right),
+                vec![],
+                conjunction(on),
+                JoinType::LeftMark,
+                JoinConstraint::On,
+                NullEquality::NullEqualsNothing,
+                false,
+            )?;
+            let plan = LogicalPlan::Join(join);
+            let n = plan.schema().fields().len();
+            let mark = Expr::Column(Column::from(plan.schema().qualified_field(n - 1)));
+            Ok::<_, DataFusionError>((plan, mark))
+        };
+        let mut matched_on = keys.clone();
+        matched_on.push(value.clone().eq(col.clone()));
+        let (plan, matched) = mark_join(outer, inner.clone(), matched_on)?;
+
+        let null_alias = self.alias_gen.next("__correlated_sq");
+        let nulls = alias_plan(
+            LogicalPlanBuilder::from(inner.clone())
+                .filter(col.is_null())?
+                .build()?,
+            null_alias.as_str(),
+        )?;
+        let null_keys = keys
+            .iter()
+            .map(|k| requalify(k.clone(), &inner_schema, nulls.schema()))
+            .collect::<Result<Vec<_>>>()?;
+        let (plan, has_null) = mark_join(plan, nulls, null_keys)?;
+
+        let any_alias = self.alias_gen.next("__correlated_sq");
+        let any = alias_plan(inner, any_alias.as_str())?;
+        let any_keys = keys
+            .iter()
+            .map(|k| requalify(k.clone(), &inner_schema, any.schema()))
+            .collect::<Result<Vec<_>>>()?;
+        let (plan, non_empty) = mark_join(plan, any, any_keys)?;
+
+        let unknown = has_null.or(value.is_null().and(non_empty));
+        let result = when(matched, lit(true))
+            .when(unknown, lit(ScalarValue::Boolean(None)))
+            .otherwise(lit(false))?;
+        match join_type {
+            JoinType::LeftMark => Ok((plan, Some(result))),
+            JoinType::LeftAnti => {
+                let plan = LogicalPlanBuilder::from(plan)
+                    .filter(Expr::Not(Box::new(result)))?
+                    .project(output)?
+                    .build()?;
+                Ok((plan, None))
+            }
+            other => internal_err!("three-valued IN for a {other} join"),
+        }
     }
 
     /// Joins `outer` with a correlated scalar subquery; returns the expression
@@ -1236,6 +1340,13 @@ impl Rewriter<'_> {
     /// The result may also hold rows for outer values that do not occur; the
     /// join on the domain columns drops them.
     fn attach(&mut self, plan: LogicalPlan, corr: &mut Correlation) -> Result<Attached> {
+        if corr.outer_cols.is_empty() {
+            return Ok(Attached {
+                plan,
+                cols: vec![],
+                bound: vec![],
+            });
+        }
         if !plan_refs_outer(&plan, &corr.outer_cols, &[]) {
             let domain = self.domain(corr)?;
             let plan = LogicalPlanBuilder::from(plan)
