@@ -60,12 +60,13 @@ use datafusion_common::{
     TableReference, exec_err, internal_err, not_impl_err,
 };
 use datafusion_expr::expr::{
-    Exists, InSubquery, WindowFunction, in_subquery_tuple_values,
+    Exists, GroupingSet, InSubquery, WindowFunction, in_subquery_tuple_values,
 };
 use datafusion_expr::function::{AccumulatorArgs, StateFieldsArgs};
 use datafusion_expr::logical_plan::{
-    Aggregate, Distinct, FetchType, Filter, Join, JoinConstraint, JoinType, Limit,
-    Projection, SkipType, Sort, Subquery, SubqueryAlias, Union, Window,
+    Aggregate, AsOfJoin, Distinct, FetchType, Filter, Join, JoinConstraint, JoinType,
+    Limit, MaterializedCte, MaterializedCtePlan, Projection, SkipType, Sort, Subquery,
+    SubqueryAlias, Union, Window,
 };
 use datafusion_expr::registry::FunctionRegistry;
 use datafusion_expr::simplify::SimplifyContext;
@@ -189,7 +190,7 @@ fn expr_has_subquery_to_rewrite(expr: &Expr, all_scalars: bool) -> bool {
 }
 
 fn is_correlated(sq: &Subquery) -> bool {
-    plan_has_outer_reference(&sq.subquery)
+    !sq.outer_ref_columns.is_empty() || plan_has_outer_reference(&sq.subquery)
 }
 
 /// Whether `plan` reads a column from outside of itself.
@@ -227,6 +228,44 @@ fn lateral_subquery(node: &LogicalPlan) -> Option<(&Subquery, Option<&TableRefer
         _ => return None,
     };
     plan_has_outer_reference(&sq.subquery).then_some((sq, alias))
+}
+
+/// `subquery` filtered by the ON condition of its LEFT lateral `join`: the
+/// columns of the left side become outer references, those of the right side
+/// the subquery's own columns.
+fn filter_lateral_subquery(
+    subquery: Subquery,
+    filter: Expr,
+    join: &Join,
+) -> Result<Subquery> {
+    let left = join.left.schema();
+    let left_len = left.fields().len();
+    let inner_schema = Arc::clone(subquery.subquery.schema());
+    let mut outer_refs = subquery.outer_ref_columns.clone();
+    let filter = filter
+        .transform(|e| match e {
+            Expr::Column(c) => {
+                if let Ok((_, field)) = left.qualified_field_from_column(&c) {
+                    let e = Expr::OuterReferenceColumn(Arc::clone(field), c);
+                    if !outer_refs.contains(&e) {
+                        outer_refs.push(e.clone());
+                    }
+                    return Ok(Transformed::yes(e));
+                }
+                let i = join.schema.index_of_column(&c)?;
+                Ok(Transformed::yes(Expr::Column(Column::from(
+                    inner_schema.qualified_field(i - left_len),
+                ))))
+            }
+            other => Ok(Transformed::no(other)),
+        })
+        .data()?;
+    let plan = Filter::try_new(filter, subquery.subquery)?;
+    Ok(Subquery {
+        subquery: Arc::new(LogicalPlan::Filter(plan)),
+        outer_ref_columns: outer_refs,
+        spans: subquery.spans,
+    })
 }
 
 fn lateral_subquery_of(join: &Join) -> Option<&Subquery> {
@@ -279,6 +318,42 @@ impl Rewriter<'_> {
     fn fresh_name(&mut self, prefix: &str) -> String {
         self.names += 1;
         format!("{prefix}_{}", self.names)
+    }
+
+    /// Renames the columns of `plan` that would be ambiguous next to an
+    /// unqualified field of the same name in `outer` once `plan` is aliased.
+    /// Keeps the column order.
+    fn disambiguate(
+        &mut self,
+        plan: LogicalPlan,
+        outer: &DFSchemaRef,
+    ) -> Result<LogicalPlan> {
+        let unqualified: HashSet<&String> = outer
+            .iter()
+            .filter(|(q, _)| q.is_none())
+            .map(|(_, f)| f.name())
+            .collect();
+        if !plan
+            .schema()
+            .fields()
+            .iter()
+            .any(|f| unqualified.contains(f.name()))
+        {
+            return Ok(plan);
+        }
+        let exprs: Vec<Expr> = plan
+            .schema()
+            .iter()
+            .map(|(q, f)| {
+                let e = Expr::Column(Column::new(q.cloned(), f.name()));
+                if unqualified.contains(f.name()) {
+                    e.alias(self.fresh_name("__sq_col"))
+                } else {
+                    e
+                }
+            })
+            .collect();
+        LogicalPlanBuilder::from(plan).project(exprs)?.build()
     }
 
     /// Rewrites the subqueries of every node, inputs first.
@@ -634,8 +709,15 @@ impl Rewriter<'_> {
         if !matches!(join_type, JoinType::Inner | JoinType::Left) {
             return unsupported(format!("{join_type} lateral join"));
         }
-        if join_type == JoinType::Left && join.filter.is_some() {
-            return unsupported("LEFT lateral join with an ON condition");
+        // A LEFT lateral join keeps the subquery rows that meet its ON
+        // condition, which is a correlated filter on top of the subquery.
+        let mut sq = sq;
+        let mut join_filter = join.filter.clone();
+        if join_type == JoinType::Left
+            && let Some(filter) = join_filter.take()
+            && !matches!(filter, Expr::Literal(ScalarValue::Boolean(Some(true)), _))
+        {
+            sq = filter_lateral_subquery(sq, filter, &join)?;
         }
         let outer = Arc::unwrap_or_clone(Arc::clone(&join.left));
         let alias = match join.right.as_ref() {
@@ -677,7 +759,9 @@ impl Rewriter<'_> {
             });
         }
         builder = builder.project(exprs)?;
-        if let Some(filter) = join.filter {
+        if let Some(filter) = join_filter
+            && join_type == JoinType::Inner
+        {
             builder = builder.filter(filter)?;
         }
         builder.build()
@@ -712,6 +796,7 @@ impl Rewriter<'_> {
                 let inner = self.rewrite_plan(inner)?;
                 let inner_schema = Arc::clone(inner.schema());
                 let alias = self.alias_gen.next("__correlated_sq");
+                let inner = self.disambiguate(inner, outer.schema())?;
                 let aliased = alias_plan(inner, alias.as_str())?;
                 let conjuncts = conjuncts
                     .into_iter()
@@ -983,6 +1068,7 @@ impl Rewriter<'_> {
             let inner = self.rewrite_plan(inner)?;
             let inner_schema = Arc::clone(inner.schema());
             let alias = self.alias_gen.next("__scalar_sq");
+            let inner = self.disambiguate(inner, outer.schema())?;
             let aliased = alias_plan(inner, alias.as_str())?;
             let conjuncts = conjuncts
                 .into_iter()
@@ -1013,8 +1099,7 @@ impl Rewriter<'_> {
         if !sq.subquery.max_rows().is_some_and(|n| n <= 1)
             && !one_row_per_domain(&inner, &cols)
         {
-            let (_, field) = inner.schema().qualified_field(0);
-            let name = field.name().clone();
+            let name = self.fresh_name("__value");
             let single = AggregateUDF::from(SingleValue::new())
                 .call(vec![value])
                 .alias(&name);
@@ -1024,6 +1109,7 @@ impl Rewriter<'_> {
                 .aggregate(keys, vec![single])?
                 .build()?;
             let alias = self.alias_gen.next("__scalar_sq");
+            let grouped = self.disambiguate(grouped, outer.schema())?;
             inner = alias_plan(grouped, alias.as_str())?;
             cols = positions
                 .into_iter()
@@ -1077,6 +1163,7 @@ impl Rewriter<'_> {
                 let inner_schema = Arc::clone(inner.schema());
                 let alias =
                     alias.unwrap_or_else(|| self.alias_gen.next("__lateral_sq").into());
+                let inner = self.disambiguate(inner, outer.schema())?;
                 let aliased = alias_plan(inner, alias)?;
                 let conjuncts = conjuncts
                     .into_iter()
@@ -1189,6 +1276,7 @@ impl Rewriter<'_> {
         }
         let grouped = self.rewrite_plan(grouped)?;
         let alias = alias.unwrap_or_else(|| self.alias_gen.next("__scalar_sq").into());
+        let grouped = self.disambiguate(grouped, outer.schema())?;
         let grouped = alias_plan(grouped, alias.clone())?;
         let cols: Vec<Column> = key_positions
             .into_iter()
@@ -1299,6 +1387,7 @@ impl Rewriter<'_> {
             .build()?;
         let projected = self.rewrite_plan(projected)?;
         let alias = alias.unwrap_or_else(|| self.alias_gen.next(alias_prefix).into());
+        let projected = self.disambiguate(projected, corr.outer.schema())?;
         let aliased = alias_plan(projected, alias)?;
         let bound = attached.bound;
         let cols = positions
@@ -1325,9 +1414,13 @@ impl Rewriter<'_> {
             .zip(&names)
             .map(|(c, name)| Expr::Column(c.clone()).alias(name))
             .collect();
+        let keys: Vec<Expr> = names
+            .iter()
+            .map(|n| Expr::Column(Column::new_unqualified(n)))
+            .collect();
         let plan = LogicalPlanBuilder::from(corr.outer.clone())
             .project(exprs)?
-            .distinct()?
+            .aggregate(keys, Vec::<Expr>::new())?
             .build()?;
         let cols: Vec<Column> = names.into_iter().map(Column::new_unqualified).collect();
         let bound = vec![false; cols.len()];
@@ -1372,7 +1465,8 @@ impl Rewriter<'_> {
                     )?;
                     exprs.push(keep_name(new_expr, &projection.schema, i));
                 }
-                let (exprs, cols) = add_columns(exprs, &input.cols);
+                let (exprs, cols) =
+                    add_columns(exprs, &input.cols, &mut || self.fresh_name("__d"));
                 let plan = Projection::try_new(exprs, Arc::new(input.plan))?;
                 Ok(Attached {
                     plan: LogicalPlan::Projection(plan),
@@ -1486,6 +1580,51 @@ impl Rewriter<'_> {
             }
             LogicalPlan::Join(join) => self.attach_join(join, corr),
             LogicalPlan::Union(union) => self.attach_union(union, corr),
+            // An ASOF join keeps each left row with its best right match, so
+            // domain columns of the left side pass through.
+            LogicalPlan::AsOfJoin(asof)
+                if !plan_refs_outer(&asof.right, &corr.outer_cols, &[])
+                    && !asof
+                        .on
+                        .iter()
+                        .any(|(l, r)| l.contains_outer() || r.contains_outer()) =>
+            {
+                let left =
+                    self.attach(Arc::unwrap_or_clone(Arc::clone(&asof.left)), corr)?;
+                let plan = LogicalPlan::AsOfJoin(AsOfJoin::try_new(
+                    Arc::new(left.plan),
+                    Arc::clone(&asof.right),
+                    asof.on.clone(),
+                    asof.match_condition.as_ref().clone(),
+                    asof.join_constraint,
+                )?);
+                Ok(Attached {
+                    plan,
+                    cols: left.cols,
+                    bound: left.bound,
+                })
+            }
+            // A CTE whose body reads no outer column is computed once; only
+            // the query that reads it gets the domain.
+            LogicalPlan::MaterializedCte(MaterializedCtePlan::Cte(cte))
+                if !plan_refs_outer(&cte.cte, &corr.outer_cols, &[]) =>
+            {
+                let continuation = self
+                    .attach(Arc::unwrap_or_clone(Arc::clone(&cte.continuation)), corr)?;
+                let plan = LogicalPlan::MaterializedCte(MaterializedCtePlan::Cte(
+                    MaterializedCte::try_new(
+                        cte.id(),
+                        cte.name.clone(),
+                        Arc::clone(&cte.cte),
+                        Arc::new(continuation.plan),
+                    )?,
+                ));
+                Ok(Attached {
+                    plan,
+                    cols: continuation.cols,
+                    bound: continuation.bound,
+                })
+            }
             other => unsupported(format!("correlated {} in a subquery", other.display())),
         }
     }
@@ -1576,13 +1715,10 @@ impl Rewriter<'_> {
         agg: Aggregate,
         corr: &mut Correlation,
     ) -> Result<Attached> {
-        if agg
+        let grouping_sets = agg
             .group_expr
             .iter()
-            .any(|e| matches!(e, Expr::GroupingSet(_)))
-        {
-            return unsupported("correlated aggregate with grouping sets");
-        }
+            .any(|e| matches!(e, Expr::GroupingSet(_)));
         let input = self.attach(Arc::unwrap_or_clone(Arc::clone(&agg.input)), corr)?;
         let scope = [input.plan.schema().clone()];
         let n_group = agg.group_expr.len();
@@ -1597,8 +1733,48 @@ impl Rewriter<'_> {
             aggr_expr.push(keep_name(new_expr, &agg.schema, n_group + i));
         }
 
+        if grouping_sets {
+            let [Expr::GroupingSet(set)] = group_expr.as_slice() else {
+                return unsupported("grouping sets mixed with grouping keys");
+            };
+            let sets: Vec<Vec<Expr>> = match set {
+                GroupingSet::GroupingSets(sets) => sets.clone(),
+                GroupingSet::Rollup(exprs) => {
+                    (0..=exprs.len()).map(|i| exprs[..i].to_vec()).collect()
+                }
+                GroupingSet::Cube(_) => return unsupported("correlated CUBE"),
+            };
+            if sets.iter().enumerate().any(|(i, x)| sets[..i].contains(x)) {
+                return unsupported("correlated grouping sets with duplicates");
+            }
+            // The domain columns go first in every set: they are never NULL
+            // there, so they add only leading zero bits to `__grouping_id`
+            // and the GROUPING() values above stay the same.
+            let keys: Vec<Expr> = input.cols.iter().cloned().map(Expr::Column).collect();
+            let sets = sets
+                .into_iter()
+                .map(|set| keys.iter().cloned().chain(set).collect())
+                .collect();
+            let group_expr = vec![Expr::GroupingSet(GroupingSet::GroupingSets(sets))];
+            let plan = Aggregate::try_new(Arc::new(input.plan), group_expr, aggr_expr)?;
+            let id_type = |schema: &DFSchemaRef| {
+                schema
+                    .field_with_unqualified_name(Aggregate::INTERNAL_GROUPING_ID)
+                    .map(|f| f.data_type().clone())
+                    .ok()
+            };
+            if id_type(&plan.schema) != id_type(&agg.schema) {
+                return unsupported("correlated grouping sets that widen __grouping_id");
+            }
+            return Ok(Attached {
+                plan: LogicalPlan::Aggregate(plan),
+                cols: input.cols,
+                bound: input.bound,
+            });
+        }
         if n_group > 0 {
-            let (group_expr, cols) = add_columns(group_expr, &input.cols);
+            let (group_expr, cols) =
+                add_columns(group_expr, &input.cols, &mut || self.fresh_name("__d"));
             let plan = Aggregate::try_new(Arc::new(input.plan), group_expr, aggr_expr)?;
             return Ok(Attached {
                 plan: LogicalPlan::Aggregate(plan),
@@ -2704,15 +2880,33 @@ fn keep_name(expr: Expr, schema: &DFSchemaRef, i: usize) -> Expr {
 }
 
 /// Adds `cols` to the output expressions `exprs`, unless they are output
-/// already. Returns the expressions and the output columns for `cols`.
-fn add_columns(mut exprs: Vec<Expr>, cols: &[Column]) -> (Vec<Expr>, Vec<Column>) {
+/// already. Returns the expressions and the output columns for `cols`. A
+/// column whose name would be ambiguous next to an output of `exprs` (a
+/// qualified and an unqualified field of the same name) gets a fresh name.
+fn add_columns(
+    mut exprs: Vec<Expr>,
+    cols: &[Column],
+    fresh: &mut dyn FnMut() -> String,
+) -> (Vec<Expr>, Vec<Column>) {
     let mut out = Vec::with_capacity(cols.len());
     for col in cols {
         let e = Expr::Column(col.clone());
-        if !exprs.contains(&e) {
-            exprs.push(e);
+        if exprs.contains(&e) {
+            out.push(col.clone());
+            continue;
         }
-        out.push(col.clone());
+        let clash = exprs.iter().any(|x| {
+            let (q, name) = x.qualified_name();
+            name == col.name && (q.is_none() || col.relation.is_none())
+        });
+        if clash {
+            let name = fresh();
+            exprs.push(e.alias(&name));
+            out.push(Column::new_unqualified(name));
+        } else {
+            exprs.push(e);
+            out.push(col.clone());
+        }
     }
     (exprs, out)
 }
