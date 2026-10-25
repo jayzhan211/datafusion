@@ -249,6 +249,10 @@ struct Attached {
     plan: LogicalPlan,
     /// `cols[i]` holds the value of `Correlation::outer_cols[i]` for each row.
     cols: Vec<Column>,
+    /// `bound[i]` if `cols[i]` holds the inner value of an `inner = outer`
+    /// conjunct rather than a domain value: a NULL there matches no outer
+    /// value, so `cols[i]` is compared with `=`, not `IS NOT DISTINCT FROM`.
+    bound: Vec<bool>,
 }
 
 struct Rewriter<'a> {
@@ -706,17 +710,16 @@ impl Rewriter<'_> {
                 (aliased, conjuncts)
             }
             None => {
-                let (aliased, cols) = self.attach_subquery(
+                let (aliased, cols, bound) = self.attach_subquery(
                     &subquery_plan,
                     &mut corr,
                     "__correlated_sq",
                     None,
                 )?;
-                let conjuncts = domain_join_keys(&corr, &cols);
+                let conjuncts = domain_join_keys(&corr, &cols, &bound);
                 (aliased, conjuncts)
             }
         };
-        let used_domain = corr.used_domain;
         let mut outer = outer;
         // The `IN` equalities come first: a null-aware join reads its leading
         // equalities as the values to compare and the rest as correlation keys.
@@ -758,8 +761,11 @@ impl Rewriter<'_> {
                 if !hashable {
                     return unsupported("null-aware IN on a type that is not hashable");
                 }
-                if used_domain {
-                    return unsupported("null-aware IN over a domain");
+                let null_safe_key = conjuncts.iter().any(|c| {
+                    matches!(c, Expr::BinaryExpr(b) if b.op == Operator::IsNotDistinctFrom)
+                });
+                if null_safe_key {
+                    return unsupported("null-aware IN over domain values");
                 }
             }
             // When each `IN` equality is also a correlation equality, a NULL on
@@ -794,11 +800,14 @@ impl Rewriter<'_> {
                     .collect();
                 for (i, value) in values.iter_mut().enumerate() {
                     if !value.any_column_refs() {
-                        let name = if n_values == 1 {
+                        let mut name = if n_values == 1 {
                             format!("{alias}_value")
                         } else {
                             format!("{alias}_value_{i}")
                         };
+                        while outer.schema().has_column_with_unqualified_name(&name) {
+                            name = self.fresh_name(&name);
+                        }
                         exprs.push(value.clone().alias(&name));
                         *value = Expr::Column(Column::new_unqualified(name));
                     }
@@ -891,7 +900,7 @@ impl Rewriter<'_> {
             )?;
             return Ok((LogicalPlan::Join(join), value));
         }
-        let (mut inner, mut cols) =
+        let (mut inner, mut cols, bound) =
             self.attach_subquery(&sq.subquery, &mut corr, "__scalar_sq", None)?;
         let mut value = Expr::Column(Column::from(inner.schema().qualified_field(0)));
         // A scalar subquery that can return several rows for one outer value
@@ -905,18 +914,20 @@ impl Rewriter<'_> {
             let single = AggregateUDF::from(SingleValue::new())
                 .call(vec![value])
                 .alias(&name);
-            let keys: Vec<Expr> = cols.iter().cloned().map(Expr::Column).collect();
+            let (unique, positions) = dedup_columns(&cols);
+            let keys: Vec<Expr> = unique.into_iter().map(Expr::Column).collect();
             let grouped = LogicalPlanBuilder::from(inner)
                 .aggregate(keys, vec![single])?
                 .build()?;
             let alias = self.alias_gen.next("__scalar_sq");
             inner = alias_plan(grouped, alias.as_str())?;
-            cols = (0..cols.len())
+            cols = positions
+                .into_iter()
                 .map(|i| Column::from(inner.schema().qualified_field(i)))
                 .collect();
             value = Expr::Column(Column::new(Some(alias.as_str()), &name));
         }
-        let keys = domain_join_keys(&corr, &cols);
+        let keys = domain_join_keys(&corr, &cols, &bound);
         let join = Join::try_new(
             Arc::new(outer),
             Arc::new(inner),
@@ -973,13 +984,13 @@ impl Rewriter<'_> {
                 (aliased, conjuncts)
             }
             None => {
-                let (aliased, cols) = self.attach_subquery(
+                let (aliased, cols, bound) = self.attach_subquery(
                     &subquery_plan,
                     &mut corr,
                     "__lateral_sq",
                     alias,
                 )?;
-                let keys = domain_join_keys(&corr, &cols);
+                let keys = domain_join_keys(&corr, &cols, &bound);
                 (aliased, keys)
             }
         };
@@ -1033,7 +1044,9 @@ impl Rewriter<'_> {
                 Ok(keep_name(new_expr, &agg.schema, i))
             })
             .collect::<Result<Vec<_>>>()?;
-        let group_expr = input.cols.iter().cloned().map(Expr::Column).collect();
+        let (unique_keys, key_positions) = dedup_columns(&input.cols);
+        let n_keys = unique_keys.len();
+        let group_expr = unique_keys.into_iter().map(Expr::Column).collect();
         let grouped = Aggregate::try_new(Arc::new(input.plan), group_expr, aggr_expr)?;
         let empty_values = empty_aggregate_values(agg)?;
         // A marker column tells the outer rows without a match apart, if an
@@ -1073,11 +1086,11 @@ impl Rewriter<'_> {
         let grouped = self.rewrite_plan(grouped)?;
         let alias = alias.unwrap_or_else(|| self.alias_gen.next("__scalar_sq").into());
         let grouped = alias_plan(grouped, alias.clone())?;
-        let n_keys = corr.outer_cols.len();
-        let cols: Vec<Column> = (0..n_keys)
+        let cols: Vec<Column> = key_positions
+            .into_iter()
             .map(|i| Column::from(grouped.schema().qualified_field(i)))
             .collect();
-        let keys = domain_join_keys(&corr, &cols);
+        let keys = domain_join_keys(&corr, &cols, &input.bound);
 
         // The value of each aggregate: its value on an empty input when no
         // inner row matched the outer row.
@@ -1162,17 +1175,18 @@ impl Rewriter<'_> {
         corr: &mut Correlation,
         alias_prefix: &str,
         alias: Option<TableReference>,
-    ) -> Result<(LogicalPlan, Vec<Column>)> {
+    ) -> Result<(LogicalPlan, Vec<Column>, Vec<bool>)> {
         let own_cols = plan.schema().columns();
         let attached = self.attach(plan.clone(), corr)?;
         let mut exprs: Vec<Expr> = own_cols.iter().cloned().map(Expr::Column).collect();
         let mut positions = Vec::with_capacity(attached.cols.len());
         for col in &attached.cols {
-            match own_cols.iter().position(|c| c == col) {
+            let e = Expr::Column(col.clone());
+            match exprs.iter().position(|x| x == &e) {
                 Some(i) => positions.push(i),
                 None => {
                     positions.push(exprs.len());
-                    exprs.push(Expr::Column(col.clone()));
+                    exprs.push(e);
                 }
             }
         }
@@ -1182,11 +1196,12 @@ impl Rewriter<'_> {
         let projected = self.rewrite_plan(projected)?;
         let alias = alias.unwrap_or_else(|| self.alias_gen.next(alias_prefix).into());
         let aliased = alias_plan(projected, alias)?;
+        let bound = attached.bound;
         let cols = positions
             .into_iter()
             .map(|i| Column::from(aliased.schema().qualified_field(i)))
             .collect();
-        Ok((aliased, cols))
+        Ok((aliased, cols, bound))
     }
 
     /// The domain: the distinct outer values, under fresh column names.
@@ -1210,8 +1225,9 @@ impl Rewriter<'_> {
             .project(exprs)?
             .distinct()?
             .build()?;
-        let cols = names.into_iter().map(Column::new_unqualified).collect();
-        Ok(Attached { plan, cols })
+        let cols: Vec<Column> = names.into_iter().map(Column::new_unqualified).collect();
+        let bound = vec![false; cols.len()];
+        Ok(Attached { plan, cols, bound })
     }
 
     /// Rewrites `plan` so that it returns, for every outer value at once, the
@@ -1228,6 +1244,7 @@ impl Rewriter<'_> {
             return Ok(Attached {
                 plan,
                 cols: domain.cols,
+                bound: domain.bound,
             });
         }
         match plan {
@@ -1249,6 +1266,7 @@ impl Rewriter<'_> {
                 Ok(Attached {
                     plan: LogicalPlan::Projection(plan),
                     cols,
+                    bound: input.bound,
                 })
             }
             LogicalPlan::SubqueryAlias(a) => {
@@ -1266,6 +1284,7 @@ impl Rewriter<'_> {
                 Ok(Attached {
                     plan: LogicalPlan::SubqueryAlias(plan),
                     cols,
+                    bound: input.bound,
                 })
             }
             LogicalPlan::Aggregate(agg) => self.attach_aggregate(agg, corr),
@@ -1274,6 +1293,7 @@ impl Rewriter<'_> {
                 Ok(Attached {
                     plan: LogicalPlan::Distinct(Distinct::All(Arc::new(input.plan))),
                     cols: input.cols,
+                    bound: input.bound,
                 })
             }
             LogicalPlan::Window(window) => {
@@ -1296,6 +1316,7 @@ impl Rewriter<'_> {
                 Ok(Attached {
                     plan: LogicalPlan::Window(plan),
                     cols: input.cols,
+                    bound: input.bound,
                 })
             }
             LogicalPlan::Sort(sort) => match sort.fetch {
@@ -1330,6 +1351,7 @@ impl Rewriter<'_> {
                             fetch: None,
                         }),
                         cols: input.cols,
+                        bound: input.bound,
                     })
                 }
             },
@@ -1348,6 +1370,7 @@ impl Rewriter<'_> {
                 Ok(Attached {
                     plan,
                     cols: input.cols,
+                    bound: input.bound,
                 })
             }
             LogicalPlan::Join(join) => self.attach_join(join, corr),
@@ -1379,6 +1402,7 @@ impl Rewriter<'_> {
         Ok(Attached {
             plan: LogicalPlan::Filter(plan),
             cols: input.cols,
+            bound: input.bound,
         })
     }
 
@@ -1389,13 +1413,13 @@ impl Rewriter<'_> {
         input: LogicalPlan,
         bound: Bound,
     ) -> Result<Attached> {
-        let mut conjuncts = bound.rest;
-        for e in &bound.values {
-            conjuncts.push(e.clone().is_not_null());
-        }
-        let filtered = LogicalPlanBuilder::from(input)
-            .filter(conjunction(conjuncts).expect("at least one conjunct"))?
-            .build()?;
+        let n = bound.values.len();
+        let filtered = match conjunction(bound.rest) {
+            Some(predicate) => {
+                LogicalPlanBuilder::from(input).filter(predicate)?.build()?
+            }
+            None => input,
+        };
         if bound.values.iter().all(|e| matches!(e, Expr::Column(_))) {
             let cols = bound
                 .values
@@ -1408,6 +1432,7 @@ impl Rewriter<'_> {
             return Ok(Attached {
                 plan: filtered,
                 cols,
+                bound: vec![true; n],
             });
         }
         let mut exprs: Vec<Expr> = filtered
@@ -1428,7 +1453,11 @@ impl Rewriter<'_> {
             }
         }
         let plan = LogicalPlanBuilder::from(filtered).project(exprs)?.build()?;
-        Ok(Attached { plan, cols })
+        Ok(Attached {
+            plan,
+            cols,
+            bound: vec![true; n],
+        })
     }
 
     fn attach_aggregate(
@@ -1463,6 +1492,7 @@ impl Rewriter<'_> {
             return Ok(Attached {
                 plan: LogicalPlan::Aggregate(plan),
                 cols,
+                bound: input.bound,
             });
         }
 
@@ -1470,7 +1500,9 @@ impl Rewriter<'_> {
         // value with no input rows. Group by the domain columns, and left join
         // the domain to it to bring those values back with the aggregates'
         // values on an empty input.
-        let key_exprs = input.cols.iter().cloned().map(Expr::Column).collect();
+        let (unique_keys, key_positions) = dedup_columns(&input.cols);
+        let n_keys = unique_keys.len();
+        let key_exprs = unique_keys.into_iter().map(Expr::Column).collect();
         let grouped = Aggregate::try_new(Arc::new(input.plan), key_exprs, aggr_expr)?;
         let empty_values = empty_aggregate_values(&agg)?;
         let marker = empty_values
@@ -1488,8 +1520,9 @@ impl Rewriter<'_> {
             exprs.push(lit(true).alias(marker));
             grouped = LogicalPlanBuilder::from(grouped).project(exprs)?.build()?;
         }
-        let grouped_keys: Vec<Column> = (0..input.cols.len())
-            .map(|i| Column::from(grouped.schema().qualified_field(i)))
+        let grouped_keys: Vec<Column> = key_positions
+            .iter()
+            .map(|&i| Column::from(grouped.schema().qualified_field(i)))
             .collect();
 
         let domain = self.domain(corr)?;
@@ -1497,13 +1530,8 @@ impl Rewriter<'_> {
             .cols
             .iter()
             .zip(&grouped_keys)
-            .map(|(d, g)| {
-                Expr::BinaryExpr(BinaryExpr::new(
-                    Box::new(Expr::Column(d.clone())),
-                    Operator::IsNotDistinctFrom,
-                    Box::new(Expr::Column(g.clone())),
-                ))
-            })
+            .zip(&input.bound)
+            .map(|((d, g), &bound)| key_equality(d, g, bound))
             .collect();
         let join = Join::try_new(
             Arc::new(domain.plan),
@@ -1522,7 +1550,7 @@ impl Rewriter<'_> {
             let (qualifier, field) = agg.schema.qualified_field(i);
             let col = Expr::Column(Column::from(
                 join.schema()
-                    .qualified_field(domain.cols.len() + grouped_keys.len() + i),
+                    .qualified_field(domain.cols.len() + n_keys + i),
             ));
             let value = match &marker {
                 Some(marker) if !empty.is_null() => {
@@ -1537,6 +1565,7 @@ impl Rewriter<'_> {
         Ok(Attached {
             plan,
             cols: domain.cols,
+            bound: domain.bound,
         })
     }
 
@@ -1627,6 +1656,7 @@ impl Rewriter<'_> {
         Ok(Attached {
             plan,
             cols: input.cols,
+            bound: input.bound,
         })
     }
 
@@ -1662,17 +1692,17 @@ impl Rewriter<'_> {
         };
         let left = Arc::unwrap_or_clone(join.left);
         let right = Arc::unwrap_or_clone(join.right);
-        let (left, left_cols) = if attach_left {
+        let (left, left_cols, left_bound) = if attach_left {
             let a = self.attach(left, corr)?;
-            (a.plan, Some(a.cols))
+            (a.plan, Some(a.cols), a.bound)
         } else {
-            (left, None)
+            (left, None, vec![])
         };
-        let (right, right_cols) = if attach_right {
+        let (right, right_cols, right_bound) = if attach_right {
             let a = self.attach(right, corr)?;
-            (a.plan, Some(a.cols))
+            (a.plan, Some(a.cols), a.bound)
         } else {
-            (right, None)
+            (right, None, vec![])
         };
         let cond_cols = left_cols
             .as_ref()
@@ -1684,13 +1714,17 @@ impl Rewriter<'_> {
         if let Some(filter) = join.filter {
             conjuncts.push(replace_outer(filter, corr, &cond_cols, &scope)?);
         }
+        // The output's domain column, and whether it is bound, per join type.
+        let both = left_cols.is_some() && right_cols.is_some();
+        let either_bound: Vec<bool> = (0..corr.outer_cols.len())
+            .map(|i| {
+                left_bound.get(i).copied().unwrap_or(false)
+                    || right_bound.get(i).copied().unwrap_or(false)
+            })
+            .collect();
         if let (Some(l), Some(r)) = (&left_cols, &right_cols) {
-            for (l, r) in l.iter().zip(r) {
-                conjuncts.push(Expr::BinaryExpr(BinaryExpr::new(
-                    Box::new(Expr::Column(l.clone())),
-                    Operator::IsNotDistinctFrom,
-                    Box::new(Expr::Column(r.clone())),
-                )));
+            for ((l, r), &bound) in l.iter().zip(r).zip(&either_bound) {
+                conjuncts.push(key_equality(l, r, bound));
             }
         }
         let plan = LogicalPlan::Join(Join::try_new(
@@ -1723,18 +1757,39 @@ impl Rewriter<'_> {
                     cols.push(Column::new_unqualified(name));
                 }
                 let plan = LogicalPlanBuilder::from(plan).project(exprs)?.build()?;
-                Ok(Attached { plan, cols })
+                let bound = left_bound
+                    .iter()
+                    .zip(&right_bound)
+                    .map(|(l, r)| *l && *r)
+                    .collect();
+                Ok(Attached { plan, cols, bound })
             }
             JoinType::RightSemi | JoinType::RightAnti | JoinType::RightMark => {
                 Ok(Attached {
                     plan,
                     cols: right_cols.expect("attached"),
+                    bound: right_bound,
                 })
             }
-            _ => Ok(Attached {
+            // An inner join with a bound side drops the rows whose value is
+            // NULL, so its output is bound too.
+            JoinType::Inner if both => Ok(Attached {
                 plan,
-                cols: left_cols.or(right_cols).expect("one side is attached"),
+                cols: left_cols.expect("attached"),
+                bound: either_bound,
             }),
+            _ => match left_cols {
+                Some(cols) => Ok(Attached {
+                    plan,
+                    cols,
+                    bound: left_bound,
+                }),
+                None => Ok(Attached {
+                    plan,
+                    cols: right_cols.expect("one side is attached"),
+                    bound: right_bound,
+                }),
+            },
         }
     }
 
@@ -1744,18 +1799,35 @@ impl Rewriter<'_> {
             .iter()
             .map(|_| self.fresh_name("__d"))
             .collect();
-        let mut inputs = Vec::with_capacity(union.inputs.len());
+        let mut branches = Vec::with_capacity(union.inputs.len());
         for input in union.inputs {
             let own_cols = input.schema().columns();
-            let attached = self.attach(Arc::unwrap_or_clone(input), corr)?;
+            branches.push((own_cols, self.attach(Arc::unwrap_or_clone(input), corr)?));
+        }
+        // A column is bound in the union only if it is bound in every branch.
+        // Elsewhere a bound branch drops its NULLs, as they match nothing.
+        let bound: Vec<bool> = (0..names.len())
+            .map(|i| branches.iter().all(|(_, a)| a.bound[i]))
+            .collect();
+        let mut inputs = Vec::with_capacity(branches.len());
+        for (own_cols, attached) in branches {
+            let mut plan = LogicalPlanBuilder::from(attached.plan);
+            let not_null: Vec<Expr> = attached
+                .cols
+                .iter()
+                .zip(&attached.bound)
+                .zip(&bound)
+                .filter(|((_, b), out)| **b && !**out)
+                .map(|((c, _), _)| Expr::Column(c.clone()).is_not_null())
+                .collect();
+            if let Some(predicate) = conjunction(not_null) {
+                plan = plan.filter(predicate)?;
+            }
             let mut exprs: Vec<Expr> = own_cols.into_iter().map(Expr::Column).collect();
             for (col, name) in attached.cols.iter().zip(&names) {
                 exprs.push(Expr::Column(col.clone()).alias(name));
             }
-            let plan = LogicalPlanBuilder::from(attached.plan)
-                .project(exprs)?
-                .build()?;
-            inputs.push(Arc::new(plan));
+            inputs.push(Arc::new(plan.project(exprs)?.build()?));
         }
         let plan = Union::try_new_with_loose_types(inputs)?;
         let n = plan.schema.fields().len();
@@ -1766,6 +1838,7 @@ impl Rewriter<'_> {
         Ok(Attached {
             plan: LogicalPlan::Union(plan),
             cols,
+            bound,
         })
     }
 
@@ -2199,25 +2272,47 @@ fn same_equality(a: &Expr, b: &Expr) -> bool {
     }
 }
 
-/// `outer_col = domain_col` for each domain column: `IS NOT DISTINCT FROM` if
-/// the domain itself was used, as its values can be NULL.
-fn domain_join_keys(corr: &Correlation, cols: &[Column]) -> Vec<Expr> {
-    let op = if corr.used_domain {
-        Operator::IsNotDistinctFrom
-    } else {
-        Operator::Eq
-    };
+/// The distinct columns of `cols`, and the position of each column of `cols`
+/// among them.
+fn dedup_columns(cols: &[Column]) -> (Vec<Column>, Vec<usize>) {
+    let mut unique: Vec<Column> = vec![];
+    let mut positions = Vec::with_capacity(cols.len());
+    for c in cols {
+        match unique.iter().position(|u| u == c) {
+            Some(i) => positions.push(i),
+            None => {
+                positions.push(unique.len());
+                unique.push(c.clone());
+            }
+        }
+    }
+    (unique, positions)
+}
+
+/// `outer_col = domain_col` for each domain column, `IS NOT DISTINCT FROM`
+/// for a column that holds domain values, which can be NULL.
+fn domain_join_keys(corr: &Correlation, cols: &[Column], bound: &[bool]) -> Vec<Expr> {
     corr.outer_cols
         .iter()
         .zip(cols)
-        .map(|(o, d)| {
-            Expr::BinaryExpr(BinaryExpr::new(
-                Box::new(Expr::Column(o.clone())),
-                op,
-                Box::new(Expr::Column(d.clone())),
-            ))
-        })
+        .zip(bound)
+        .map(|((o, d), &bound)| key_equality(o, d, bound))
         .collect()
+}
+
+/// `a = b` if one side is bound (its NULL matches nothing), otherwise
+/// `a IS NOT DISTINCT FROM b`.
+fn key_equality(a: &Column, b: &Column, bound: bool) -> Expr {
+    let op = if bound {
+        Operator::Eq
+    } else {
+        Operator::IsNotDistinctFrom
+    };
+    Expr::BinaryExpr(BinaryExpr::new(
+        Box::new(Expr::Column(a.clone())),
+        op,
+        Box::new(Expr::Column(b.clone())),
+    ))
 }
 
 /// The correlated conjuncts that bind each outer column to an inner value.
