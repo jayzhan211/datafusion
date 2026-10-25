@@ -508,17 +508,22 @@ impl Rewriter<'_> {
         {
             return unsupported("subquery in a grouping set");
         }
+        let first_aggr = first_aggr_field(&agg);
         let mut outer = Arc::unwrap_or_clone(agg.input);
         let n_group = agg.group_expr.len();
         let mut group_expr = Vec::with_capacity(n_group);
         for (i, e) in agg.group_expr.into_iter().enumerate() {
             let new_expr = self.replace_value_subqueries(&mut outer, e)?;
-            group_expr.push(keep_name(new_expr, &agg.schema, i));
+            if matches!(new_expr, Expr::GroupingSet(_)) {
+                group_expr.push(new_expr);
+            } else {
+                group_expr.push(keep_name(new_expr, &agg.schema, i));
+            }
         }
         let mut aggr_expr = Vec::with_capacity(agg.aggr_expr.len());
         for (i, e) in agg.aggr_expr.into_iter().enumerate() {
             let new_expr = self.replace_value_subqueries(&mut outer, e)?;
-            aggr_expr.push(keep_name(new_expr, &agg.schema, n_group + i));
+            aggr_expr.push(keep_name(new_expr, &agg.schema, first_aggr + i));
         }
         Aggregate::try_new(Arc::new(outer), group_expr, aggr_expr)
             .map(LogicalPlan::Aggregate)
@@ -1807,7 +1812,7 @@ impl Rewriter<'_> {
         let mut aggr_expr = Vec::with_capacity(agg.aggr_expr.len());
         for (i, e) in agg.aggr_expr.iter().enumerate() {
             let new_expr = replace_outer(e.clone(), corr, &input.cols, &scope)?;
-            aggr_expr.push(keep_name(new_expr, &agg.schema, n_group + i));
+            aggr_expr.push(keep_name(new_expr, &agg.schema, first_aggr_field(&agg) + i));
         }
 
         if grouping_sets {
@@ -1819,7 +1824,20 @@ impl Rewriter<'_> {
                 GroupingSet::Rollup(exprs) => {
                     (0..=exprs.len()).map(|i| exprs[..i].to_vec()).collect()
                 }
-                GroupingSet::Cube(_) => return unsupported("correlated CUBE"),
+                GroupingSet::Cube(exprs) if exprs.len() <= 12 => (0..1usize
+                    << exprs.len())
+                    .map(|mask| {
+                        exprs
+                            .iter()
+                            .enumerate()
+                            .filter(|(i, _)| mask & (1 << i) != 0)
+                            .map(|(_, e)| e.clone())
+                            .collect()
+                    })
+                    .collect(),
+                GroupingSet::Cube(_) => {
+                    return unsupported("correlated CUBE of many columns");
+                }
             };
             if sets.iter().enumerate().any(|(i, x)| sets[..i].contains(x)) {
                 return unsupported("correlated grouping sets with duplicates");
@@ -2943,14 +2961,19 @@ fn reject_outer_only_aggregates(agg: &Aggregate, corr: &Correlation) -> Result<(
     Ok(())
 }
 
+/// The output field of the first aggregate expression of `agg`: after the
+/// grouping columns, and `__grouping_id` for grouping sets.
+fn first_aggr_field(agg: &Aggregate) -> usize {
+    agg.schema.fields().len() - agg.aggr_expr.len()
+}
+
 /// The value of each aggregate expression of `agg` on an empty input.
 fn empty_aggregate_values(agg: &Aggregate) -> Result<Vec<ScalarValue>> {
-    let n_group = agg.group_expr.len();
     agg.aggr_expr
         .iter()
         .enumerate()
         .map(|(i, e)| {
-            let (_, field) = agg.schema.qualified_field(n_group + i);
+            let (_, field) = agg.schema.qualified_field(first_aggr_field(agg) + i);
             let Expr::AggregateFunction(func) = e.clone().unalias() else {
                 return unsupported(format!("aggregate expression {e}"));
             };
@@ -2966,11 +2989,10 @@ fn true_on_empty_input(
     agg: &Aggregate,
     empty_values: &[ScalarValue],
 ) -> Result<bool> {
-    let n_group = agg.group_expr.len();
     let mut values = HashMap::new();
     for (i, empty) in empty_values.iter().enumerate() {
         values.insert(
-            Column::from(agg.schema.qualified_field(n_group + i)),
+            Column::from(agg.schema.qualified_field(first_aggr_field(agg) + i)),
             lit(empty.clone()),
         );
     }
