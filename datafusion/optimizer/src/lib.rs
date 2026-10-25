@@ -40,10 +40,7 @@
 //! [`TypeCoercion`]: analyzer::type_coercion::TypeCoercion
 pub mod analyzer;
 pub mod common_subexpr_eliminate;
-pub mod decorrelate;
 pub mod decorrelate_general;
-pub mod decorrelate_lateral_join;
-pub mod decorrelate_predicate_subquery;
 pub mod eliminate_aggregate_distinct;
 pub mod eliminate_cross_join;
 pub mod eliminate_duplicated_expr;
@@ -69,7 +66,6 @@ pub mod push_down_filter;
 pub mod push_down_limit;
 pub mod replace_distinct_aggregate;
 pub mod rewrite_set_comparison;
-pub mod scalar_subquery_to_join;
 pub mod simplify_expressions;
 pub mod single_distinct_to_groupby;
 pub mod unions_to_filter;
