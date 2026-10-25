@@ -848,7 +848,7 @@ impl Rewriter<'_> {
         let outer_cols = free_outer_columns(&sq.subquery, &outer)?;
         if let Some(chain) = peel_to_groupless_aggregate(&sq.subquery) {
             let (joined, mut values, condition) =
-                self.aggregate_join(outer, outer_cols, chain, None)?;
+                self.aggregate_join(outer, outer_cols, chain, None, true)?;
             let value = values.swap_remove(0);
             let value = match condition {
                 Some(condition) => when(condition, value).end()?,
@@ -942,7 +942,13 @@ impl Rewriter<'_> {
     ) -> Result<(LogicalPlan, Vec<Expr>, Option<Expr>)> {
         let outer_cols = free_outer_columns(&sq.subquery, &outer)?;
         if let Some(chain) = peel_to_groupless_aggregate(&sq.subquery) {
-            return self.aggregate_join(outer, outer_cols, chain, alias);
+            return self.aggregate_join(
+                outer,
+                outer_cols,
+                chain,
+                alias,
+                join_type == JoinType::Left,
+            );
         }
         let subquery_plan = sq.subquery.as_ref().clone();
         let mut corr = Correlation {
@@ -1006,6 +1012,7 @@ impl Rewriter<'_> {
         outer_cols: Vec<Column>,
         chain: Vec<&LogicalPlan>,
         alias: Option<TableReference>,
+        no_row_is_null: bool,
     ) -> Result<(LogicalPlan, Vec<Expr>, Option<Expr>)> {
         let Some((LogicalPlan::Aggregate(agg), above)) = chain.split_last() else {
             return internal_err!("expected an aggregate at the end of the chain");
@@ -1036,11 +1043,14 @@ impl Rewriter<'_> {
             .any(|v| !v.is_null())
             .then(|| self.fresh_name("__matched"));
         let mut grouped = LogicalPlan::Aggregate(grouped);
-        // A filter right above the aggregate (a HAVING) that is not TRUE for
-        // the empty-input values gives an unmatched outer row the same NULL
-        // whether it runs before or after the join, so it runs before.
+        // A filter right above the aggregate (a HAVING) can run before the
+        // join when a dropped row means NULL anyway (`no_row_is_null`), no
+        // aggregate needs its empty-input value, and the filter is not TRUE
+        // for those values.
         let mut above = above;
-        while let Some((LogicalPlan::Filter(f), rest)) = above.split_last()
+        while no_row_is_null
+            && marker.is_none()
+            && let Some((LogicalPlan::Filter(f), rest)) = above.split_last()
             && !f.predicate.contains_outer()
             && !contains_subquery(&f.predicate)
             && !true_on_empty_input(&f.predicate, agg, &empty_values)?
