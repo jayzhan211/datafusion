@@ -105,6 +105,9 @@ use datafusion_physical_expr::expressions::Literal;
 use datafusion_physical_expr::{
     LexOrdering, PhysicalSortExpr, create_physical_sort_exprs,
 };
+use datafusion_physical_optimizer::output_requirements::{
+    OutputRequirementExec, OutputRequirements,
+};
 use datafusion_physical_plan::empty::EmptyExec;
 use datafusion_physical_plan::execution_plan::InvariantLevel;
 use datafusion_physical_plan::joins::PiecewiseMergeJoinExec;
@@ -3386,6 +3389,14 @@ impl DefaultPhysicalPlanner {
             observer(new_plan.as_ref(), optimizer.as_ref());
         }
 
+        // The default analyzer adds `OutputRequirementExec` markers and the
+        // default optimizer removes them. Remove any that a custom optimizer
+        // list left in place, so they never reach execution.
+        if new_plan.exists(|plan| Ok(plan.is::<OutputRequirementExec>()))? {
+            new_plan = OutputRequirements::new_remove_mode()
+                .optimize(new_plan, session_state.config_options())?;
+        }
+
         // This runs once after all optimizer runs are complete,
         // to verify that the plan is executable.
         InvariantChecker(InvariantLevel::Executable).check(&new_plan)?;
@@ -3855,7 +3866,6 @@ mod tests {
     use datafusion_functions_aggregate::count::{count_all, count_udaf};
     use datafusion_functions_aggregate::expr_fn::sum;
     use datafusion_physical_expr::EquivalenceProperties;
-    use datafusion_physical_optimizer::output_requirements::OutputRequirementExec;
     use datafusion_physical_plan::execution_plan::{Boundedness, EmissionType};
     use datafusion_physical_plan::operator_statistics::StatisticsRegistry;
     use datafusion_physical_plan::statistics::StatisticsArgs;
@@ -4249,16 +4259,7 @@ mod tests {
 
         let logical_plan = LogicalPlanBuilder::empty(false).build()?;
         let physical_plan = session.create_physical_plan(&logical_plan).await?;
-        // The default physical analyzer wraps the root in an
-        // `OutputRequirementExec` (add phase). This custom session replaces the
-        // optimizer rules, so the matching remove phase never runs and the
-        // marker survives; descend through it to reach the planned leaf.
-        let leaf = if physical_plan.is::<OutputRequirementExec>() {
-            Arc::clone(physical_plan.children()[0])
-        } else {
-            Arc::clone(&physical_plan)
-        };
-        assert!(leaf.is::<EmptyExec>());
+        assert!(physical_plan.is::<EmptyExec>());
         assert!(query_planner_invoked.load(AtomicOrdering::Relaxed));
         assert_eq!(recorded.lock().len(), 1);
         Ok(())
