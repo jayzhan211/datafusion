@@ -75,6 +75,7 @@ use crate::joins::PartitionMode;
 use crate::joins::sort_merge_join::{SortMergeJoinInputs, sort_merge_join_stream};
 use crate::joins::utils::{
     BuildProbeJoinMetrics, ColumnIndex, JoinFilter, OnceFut, build_join_schema,
+    need_produce_result_in_final,
 };
 use crate::metrics::ExecutionPlanMetricsSet;
 use crate::sorts::sort::ExternalSorter;
@@ -689,8 +690,16 @@ fn join_pair(
                     if build.rows > 0
                         && level < MAX_LEVEL
                         && is_resources_exhausted(&e) => {}
-                // Splitting cannot shrink this pair any further
+                // Splitting cannot shrink this pair any further: hash its
+                // probe rows instead if they fit, else sort-merge it
                 Err(e) if is_resources_exhausted(&e) => {
+                    if join_bytes(probe.rows, probe.bytes) <= kept.capacity() {
+                        match join_reversed(&ctx, &kept, &build, &probe).await {
+                            Ok(stream) => return Ok(stream),
+                            Err(e) if is_resources_exhausted(&e) => {}
+                            Err(e) => return Err(e),
+                        }
+                    }
                     return join_sort_merge(&ctx, &kept, &build, &probe)
                         .await
                         .map_err(|e| {
@@ -758,12 +767,67 @@ async fn join_in_memory(
     build: &SpilledSide,
     probe: &SpilledSide,
 ) -> Result<SendableRecordBatchStream> {
+    let left_data = hash_side(&ctx.build_spill, build, &ctx.build, kept).await?;
+    let probe_rows = read_side(&ctx.probe_spill, probe)?;
+    Ok(Box::pin(
+        ctx.stream.stream(left_data, probe_rows, None, false, None),
+    ))
+}
+
+/// Joins a pair whose build side cannot shrink but whose probe side fits, with
+/// the roles swapped: the probe rows are hashed and the build rows stream
+/// through them under the mirrored join type. Every join type has a mirror, and
+/// the output columns are the same ones read from the other side.
+async fn join_reversed(
+    ctx: &SpillContext,
+    kept: &KeptMemory,
+    build: &SpilledSide,
+    probe: &SpilledSide,
+) -> Result<SendableRecordBatchStream> {
+    let join_type = ctx.stream.join_type.swap();
+    let params = BuildParams {
+        random_state: ctx.build.random_state.clone(),
+        schema: Arc::clone(ctx.probe_spill.schema()),
+        on_left: ctx.stream.on_right.clone(),
+        metrics: ctx.build.metrics.clone(),
+        with_visited_indices_bitmap: need_produce_result_in_final(join_type),
+        config: Arc::clone(&ctx.build.config),
+        null_equality: ctx.build.null_equality,
+        array_map_created_count: ctx.build.array_map_created_count.clone(),
+    };
+    let stream = StreamParams {
+        on_right: ctx.build.on_left.clone(),
+        filter: ctx.stream.filter.as_ref().map(JoinFilter::swap),
+        join_type,
+        column_indices: ctx
+            .stream
+            .column_indices
+            .iter()
+            .map(|column| ColumnIndex {
+                index: column.index,
+                side: column.side.negate(),
+            })
+            .collect(),
+        ..ctx.stream.clone()
+    };
+    let left_data = hash_side(&ctx.probe_spill, probe, &params, kept).await?;
+    let build_rows = read_side(&ctx.build_spill, build)?;
+    Ok(Box::pin(
+        stream.stream(left_data, build_rows, None, false, None),
+    ))
+}
+
+/// Reads one spilled side into memory and hashes it
+async fn hash_side(
+    spill: &SpillManager,
+    side: &SpilledSide,
+    params: &BuildParams,
+    kept: &KeptMemory,
+) -> Result<JoinLeftData> {
     let mut reservation = kept.buffers.new_empty();
     let mut batches = vec![];
-    if let Some(file) = &build.file {
-        let mut rows = ctx
-            .build_spill
-            .read_spill_as_stream(Arc::clone(file), None)?;
+    if let Some(file) = &side.file {
+        let mut rows = spill.read_spill_as_stream(Arc::clone(file), None)?;
         while let Some(batch) = rows.try_next().await? {
             // Within the kept memory unless the pair cannot be split further,
             // which then needs the pool to grant the rest
@@ -771,18 +835,20 @@ async fn join_in_memory(
             batches.push(batch);
         }
     }
-    let left_data = ctx.build.build(&mut batches, &mut reservation)?;
-    let probe_rows = match &probe.file {
-        Some(file) => ctx
-            .probe_spill
-            .read_spill_as_stream(Arc::clone(file), None)?,
-        None => Box::pin(EmptyRecordBatchStream::new(Arc::clone(
-            ctx.probe_spill.schema(),
-        ))),
-    };
-    Ok(Box::pin(
-        ctx.stream.stream(left_data, probe_rows, None, false, None),
-    ))
+    params.build(&mut batches, &mut reservation)
+}
+
+/// The rows of one spilled side
+fn read_side(
+    spill: &SpillManager,
+    side: &SpilledSide,
+) -> Result<SendableRecordBatchStream> {
+    match &side.file {
+        Some(file) => spill.read_spill_as_stream(Arc::clone(file), None),
+        None => Ok(Box::pin(EmptyRecordBatchStream::new(Arc::clone(
+            spill.schema(),
+        )))),
+    }
 }
 
 /// Joins a pair that splitting cannot shrink (one hot key, or the depth cap)
