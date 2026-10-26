@@ -1063,7 +1063,7 @@ impl HashJoinExec {
         // Follow-up work: enable dynamic filtering for preserve_file_partitioned scans (issue #20195).
         // https://github.com/apache/datafusion/issues/20195
         if config.optimizer.preserve_file_partitions > 0
-            && self.mode == PartitionMode::Partitioned
+            && self.execution_mode() == PartitionMode::Partitioned
             && matches!(
                 (
                     self.left.output_partitioning(),
@@ -1075,7 +1075,7 @@ impl HashJoinExec {
             return false;
         }
 
-        if self.mode == PartitionMode::Partitioned
+        if self.execution_mode() == PartitionMode::Partitioned
             && !self.has_partitioned_dynamic_filter_routing()
         {
             return false;
@@ -1142,6 +1142,15 @@ impl HashJoinExec {
     /// The partitioning mode of this hash join
     pub fn partition_mode(&self) -> &PartitionMode {
         &self.mode
+    }
+
+    /// The mode this join executes in. `Auto` executes as `Partitioned`; a
+    /// rule such as `JoinSelection` may still switch it to `CollectLeft`.
+    fn execution_mode(&self) -> PartitionMode {
+        match self.mode {
+            PartitionMode::Auto => PartitionMode::Partitioned,
+            mode => mode,
+        }
     }
 
     /// Get null_equality
@@ -1275,10 +1284,7 @@ impl HashJoinExec {
             PartitionMode::CollectLeft => {
                 asymmetric_join_output_partitioning(left, right, &join_type)?
             }
-            PartitionMode::Auto => Partitioning::UnknownPartitioning(
-                right.output_partitioning().partition_count(),
-            ),
-            PartitionMode::Partitioned => {
+            PartitionMode::Partitioned | PartitionMode::Auto => {
                 symmetric_join_output_partitioning(left, right, &join_type)?
             }
         };
@@ -1527,8 +1533,8 @@ impl ExecutionPlan for HashJoinExec {
     }
 
     fn input_distribution_requirements(&self) -> InputDistributionRequirements {
-        match self.mode {
-            PartitionMode::Partitioned => {
+        match self.execution_mode() {
+            PartitionMode::Partitioned | PartitionMode::Auto => {
                 let (left_expr, right_expr) = self
                     .on
                     .iter()
@@ -1541,10 +1547,6 @@ impl ExecutionPlan for HashJoinExec {
             }
             PartitionMode::CollectLeft => InputDistributionRequirements::new(vec![
                 Distribution::SinglePartition,
-                Distribution::UnspecifiedDistribution,
-            ]),
-            PartitionMode::Auto => InputDistributionRequirements::new(vec![
-                Distribution::UnspecifiedDistribution,
                 Distribution::UnspecifiedDistribution,
             ]),
         }
@@ -1654,7 +1656,7 @@ impl ExecutionPlan for HashJoinExec {
         let right_partitions = self.right.output_partitioning().partition_count();
 
         assert_or_internal_err!(
-            self.mode != PartitionMode::Partitioned
+            self.execution_mode() != PartitionMode::Partitioned
                 || left_partitions == right_partitions,
             "Invalid HashJoinExec, partition count mismatch {left_partitions}!={right_partitions},\
              consider using RepartitionExec"
@@ -1692,7 +1694,7 @@ impl ExecutionPlan for HashJoinExec {
                         .collect::<Vec<_>>();
                     Some(Arc::clone(df.build_accumulator.get_or_init(|| {
                         Arc::new(SharedBuildAccumulator::new_from_partition_mode(
-                            self.mode,
+                            self.execution_mode(),
                             self.left.as_ref(),
                             self.right.as_ref(),
                             filter,
@@ -1707,7 +1709,7 @@ impl ExecutionPlan for HashJoinExec {
             .flatten()
             .flatten();
 
-        let left_fut = match (&self.prepared_build, self.mode) {
+        let left_fut = match (&self.prepared_build, self.execution_mode()) {
             (Some(prepared), _) => {
                 // Public join fields can change after builder validation.
                 prepared.validate(self)?;
@@ -1761,10 +1763,7 @@ impl ExecutionPlan for HashJoinExec {
                 ))
             }
             (None, PartitionMode::Auto) => {
-                return plan_err!(
-                    "Invalid HashJoinExec, unsupported PartitionMode {:?} in execute()",
-                    PartitionMode::Auto
-                );
+                unreachable!("execution_mode() never returns PartitionMode::Auto")
             }
         };
 
@@ -1806,7 +1805,7 @@ impl ExecutionPlan for HashJoinExec {
             vec![],
             self.right.output_ordering().is_some(),
             build_accumulator,
-            self.mode,
+            self.execution_mode(),
             self.fetch,
         )))
     }
@@ -1816,7 +1815,7 @@ impl ExecutionPlan for HashJoinExec {
     }
 
     fn child_stats_requests(&self, partition: Option<usize>) -> Vec<ChildStats> {
-        match (partition, self.mode) {
+        match (partition, self.execution_mode()) {
             // Left side is broadcast, so it always needs overall stats
             // Right side is partitioned, so it needs per-partition stats
             (Some(_), PartitionMode::CollectLeft) => {
