@@ -59,7 +59,7 @@ use parking_lot::Mutex;
 
 use super::exec::{
     BuildOutcome, BuildOverflow, BuildParams, JoinLeftData, SpillTrigger,
-    build_table_bytes,
+    build_table_bytes, is_resources_exhausted,
 };
 use super::shared_bounds::SharedBuildAccumulator;
 use super::stream::{
@@ -564,7 +564,15 @@ fn join_pair(
     async move {
         let fits = join_bytes(build.rows, build.bytes) <= kept.capacity();
         if build.rows == 0 || fits || level >= MAX_LEVEL {
-            return join_in_memory(&ctx, &kept, build, probe).await;
+            match join_in_memory(&ctx, &kept, &build, &probe).await {
+                Ok(stream) => return Ok(stream),
+                // The estimate fell short: split further rather than fail
+                Err(e)
+                    if build.rows > 0
+                        && level < MAX_LEVEL
+                        && is_resources_exhausted(&e) => {}
+                Err(e) => return Err(e),
+            }
         }
 
         let level = level + 1;
@@ -593,13 +601,15 @@ fn join_pair(
 async fn join_in_memory(
     ctx: &SpillContext,
     kept: &KeptMemory,
-    build: SpilledSide,
-    probe: SpilledSide,
+    build: &SpilledSide,
+    probe: &SpilledSide,
 ) -> Result<SendableRecordBatchStream> {
     let mut reservation = kept.buffers.new_empty();
     let mut batches = vec![];
-    if let Some(file) = build.file {
-        let mut rows = ctx.build_spill.read_spill_as_stream(file, None)?;
+    if let Some(file) = &build.file {
+        let mut rows = ctx
+            .build_spill
+            .read_spill_as_stream(Arc::clone(file), None)?;
         while let Some(batch) = rows.try_next().await? {
             // Within the kept memory unless the pair cannot be split further,
             // which then needs the pool to grant the rest
@@ -608,8 +618,8 @@ async fn join_in_memory(
         }
     }
     let left_data = ctx.build.build(&mut batches, &mut reservation)?;
-    let probe_rows = match probe.file {
-        Some(file) => ctx.probe_spill.read_spill_as_stream(file, None)?,
+    let probe_rows = match &probe.file {
+        Some(file) => ctx.probe_spill.read_spill_as_stream(Arc::clone(file), None)?,
         None => Box::pin(EmptyRecordBatchStream::new(Arc::clone(
             ctx.probe_spill.schema(),
         ))),
