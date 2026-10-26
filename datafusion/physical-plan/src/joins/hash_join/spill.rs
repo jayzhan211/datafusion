@@ -48,9 +48,11 @@ use arrow::compute::{
 use arrow::datatypes::SchemaRef;
 use datafusion_common::hash_utils::{RandomState, create_hashes};
 use datafusion_common::utils::memory::get_record_batch_memory_size;
-use datafusion_common::{JoinType, NullEquality, Result, internal_datafusion_err};
+use datafusion_common::{
+    JoinType, NullEquality, Result, internal_datafusion_err, resources_err,
+};
 use datafusion_execution::memory_pool::{
-    MemoryConsumer, MemoryPool, MemoryReservation, MergeMemoryPool,
+    MemoryConsumer, MemoryLimit, MemoryPool, MemoryReservation, MergeMemoryPool,
 };
 use datafusion_execution::runtime_env::RuntimeEnvBuilder;
 use datafusion_execution::{SpillFile, TaskContext};
@@ -793,40 +795,40 @@ async fn join_sort_merge(
     build: &SpilledSide,
     probe: &SpilledSide,
 ) -> Result<SendableRecordBatchStream> {
-    let task = &ctx.context;
-    let runtime = RuntimeEnvBuilder::from_runtime_env(&task.runtime_env())
-        .with_memory_pool(Arc::clone(&kept.pool) as Arc<dyn MemoryPool>)
-        .build_arc()?;
-    let context = Arc::new(TaskContext::new(
-        task.task_id(),
-        task.session_id(),
-        task.session_config().clone(),
-        task.scalar_functions().clone(),
-        task.higher_order_functions().clone(),
-        task.aggregate_functions().clone(),
-        task.window_functions().clone(),
-        runtime,
-    ));
+    // The rung's own budget, split so the sorts spill early and leave the
+    // sort-merge join room for what it holds in memory regardless (the join
+    // keys of a buffered key group, a batch read back from its spill)
+    let budget = kept.capacity().max(RUNG_MIN_BYTES);
+    let kept_pool = Arc::clone(&kept.pool) as Arc<dyn MemoryPool>;
+    let capped = |cap| -> Result<Arc<TaskContext>> {
+        rung_context(
+            &ctx.context,
+            Arc::new(CappedPool::new(Arc::clone(&kept_pool), cap)),
+        )
+    };
     let partition = ctx.stream.partition;
     let sort_options = vec![SortOptions::default(); ctx.build.on_left.len()];
     let left = sort_side(
-        &context,
+        &capped(budget / 4)?,
         partition,
         &ctx.build_spill,
         build,
         &ctx.build.on_left,
         &sort_options,
+        budget / 4,
     )
     .await?;
     let right = sort_side(
-        &context,
+        &capped(budget / 4)?,
         partition,
         &ctx.probe_spill,
         probe,
         &ctx.stream.on_right,
         &sort_options,
+        budget / 4,
     )
     .await?;
+    let context = capped(budget / 2)?;
     let (join_schema, columns) = build_join_schema(
         ctx.build_spill.schema(),
         ctx.probe_spill.schema(),
@@ -882,6 +884,92 @@ async fn join_sort_merge(
     )))
 }
 
+/// Least memory the sort-merge rung asks for, even if less is kept
+const RUNG_MIN_BYTES: usize = 8 * 1024 * 1024;
+
+/// A task context like `task` whose memory pool is `pool`
+fn rung_context(
+    task: &TaskContext,
+    pool: Arc<dyn MemoryPool>,
+) -> Result<Arc<TaskContext>> {
+    let runtime = RuntimeEnvBuilder::from_runtime_env(&task.runtime_env())
+        .with_memory_pool(pool)
+        .build_arc()?;
+    Ok(Arc::new(TaskContext::new(
+        task.task_id(),
+        task.session_id(),
+        task.session_config().clone(),
+        task.scalar_functions().clone(),
+        task.higher_order_functions().clone(),
+        task.aggregate_functions().clone(),
+        task.window_functions().clone(),
+        runtime,
+    )))
+}
+
+/// A child of the kept memory that refuses growth past `cap`, so a sort in
+/// the sort-merge rung spills within its share instead of taking all the pool
+/// has. Infallible growth (the sort-merge join's) is counted but not refused.
+#[derive(Debug)]
+struct CappedPool {
+    inner: Arc<dyn MemoryPool>,
+    cap: usize,
+    used: AtomicUsize,
+}
+
+impl CappedPool {
+    fn new(inner: Arc<dyn MemoryPool>, cap: usize) -> Self {
+        Self {
+            inner,
+            cap,
+            used: AtomicUsize::new(0),
+        }
+    }
+}
+
+impl std::fmt::Display for CappedPool {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "CappedPool({})", self.cap)
+    }
+}
+
+impl MemoryPool for CappedPool {
+    fn name(&self) -> &str {
+        "CappedPool"
+    }
+
+    fn grow(&self, reservation: &MemoryReservation, additional: usize) {
+        self.used.fetch_add(additional, Ordering::Relaxed);
+        self.inner.grow(reservation, additional);
+    }
+
+    fn shrink(&self, reservation: &MemoryReservation, shrink: usize) {
+        self.used.fetch_sub(shrink, Ordering::Relaxed);
+        self.inner.shrink(reservation, shrink);
+    }
+
+    fn try_grow(&self, reservation: &MemoryReservation, additional: usize) -> Result<()> {
+        let used = self.used.load(Ordering::Relaxed);
+        if used + additional > self.cap {
+            return resources_err!(
+                "sort-merge rung budget of {} bytes: {used} used, {additional} more requested",
+                self.cap
+            );
+        }
+        self.inner.try_grow(reservation, additional)?;
+        self.used.fetch_add(additional, Ordering::Relaxed);
+        Ok(())
+    }
+
+    fn reserved(&self) -> usize {
+        self.used.load(Ordering::Relaxed)
+    }
+
+    fn memory_limit(&self) -> MemoryLimit {
+        MemoryLimit::Finite(self.cap)
+    }
+}
+
 /// One spilled side, sorted on the join keys by an external sort
 async fn sort_side(
     context: &Arc<TaskContext>,
@@ -890,6 +978,7 @@ async fn sort_side(
     side: &SpilledSide,
     on: &[PhysicalExprRef],
     options: &[SortOptions],
+    budget: usize,
 ) -> Result<SendableRecordBatchStream> {
     let schema = Arc::clone(spill.schema());
     let Some(file) = &side.file else {
@@ -908,8 +997,9 @@ async fn sort_side(
         Arc::clone(&schema),
         ordering,
         config.batch_size(),
-        execution.sort_spill_reservation_bytes,
-        execution.sort_in_place_threshold_bytes,
+        // The merge reserve and in-place sort must fit the budget
+        execution.sort_spill_reservation_bytes.min(budget / 4),
+        execution.sort_in_place_threshold_bytes.min(budget / 4),
         config.spill_compression(),
         &ExecutionPlanMetricsSet::new(),
         context.runtime_env(),
