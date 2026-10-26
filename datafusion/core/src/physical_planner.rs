@@ -3345,6 +3345,12 @@ impl DefaultPhysicalPlanner {
         let mut new_plan = Arc::clone(&plan);
         let optimizer_context = SessionOptimizerContext::new(session_state);
 
+        // The planner records the query's output requirement (its ORDER BY and
+        // single output partition) as a marker above the operator that
+        // establishes it, so enforcement keeps it.
+        new_plan = OutputRequirements::new_add_mode()
+            .optimize(new_plan, session_state.config_options())?;
+
         // First the analyzer rules, which end with requirement enforcement,
         // then the optimizer rules on the resulting valid plan.
         for analyzer in analyzers {

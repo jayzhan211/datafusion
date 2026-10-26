@@ -31,7 +31,6 @@ use crate::filter_pushdown::FilterPushdown;
 use crate::join_selection::JoinSelection;
 use crate::limited_distinct_aggregation::LimitedDistinctAggregation;
 use crate::optimizer::PhysicalOptimizerContext;
-use crate::output_requirements::OutputRequirements;
 use crate::window_topn::WindowTopN;
 
 // Re-export from this module for convenience.
@@ -75,11 +74,6 @@ impl PhysicalAnalyzer {
         // `PhysicalAnalyzerRule`. `RunInAnalyzer` then wraps only performance
         // rules that must run before enforcement.
         let rules: Vec<Arc<dyn PhysicalAnalyzerRule + Send + Sync>> = vec![
-            // If there is a output requirement of the query, make sure that
-            // this information is not lost across different rules during optimization.
-            Arc::new(RunInAnalyzer::new(Arc::new(
-                OutputRequirements::new_add_mode(),
-            ))),
             Arc::new(RunInAnalyzer::new(Arc::new(AggregateStatistics::new()))),
             // Runs after AggregateStatistics, which can fold a scalar subquery into a
             // row of literals, and before EnsureRequirements, so that the filter
