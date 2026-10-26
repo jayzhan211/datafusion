@@ -110,6 +110,7 @@ use datafusion_physical_optimizer::ensure_requirements::satisfy_requirements;
 use datafusion_physical_optimizer::output_requirements::{
     OutputRequirementExec, OutputRequirements,
 };
+use datafusion_physical_optimizer::sanity_checker::SanityCheckPlan;
 use datafusion_physical_plan::empty::EmptyExec;
 use datafusion_physical_plan::execution_plan::InvariantLevel;
 use datafusion_physical_plan::joins::PiecewiseMergeJoinExec;
@@ -3403,6 +3404,19 @@ impl DefaultPhysicalPlanner {
                 displayable(new_plan.as_ref()).indent(false)
             );
             observer(new_plan.as_ref(), optimizer.as_ref());
+        }
+
+        // The final check, which used to be the last optimizer rule
+        // (`SanityCheckPlan`): every operator's distribution and ordering
+        // requirements are met, and no pipeline-breaking operator reads an
+        // infinite input. A session with no analyzer rules has opted out of
+        // enforcement and is not checked.
+        if !analyzers.is_empty() {
+            SanityCheckPlan::new()
+                .optimize(Arc::clone(&new_plan), session_state.config_options())
+                .map_err(|e| {
+                    DataFusionError::Context("SanityCheckPlan".to_string(), Box::new(e))
+                })?;
         }
 
         // The default analyzer adds `OutputRequirementExec` markers and the

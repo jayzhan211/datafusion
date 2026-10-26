@@ -27,7 +27,6 @@ use crate::filter_pushdown::DynamicFilterPushdown;
 use crate::limit_pushdown::LimitPushdown;
 use crate::output_requirements::OutputRequirements;
 use crate::projection_pushdown::ProjectionPushdown;
-use crate::sanity_checker::SanityCheckPlan;
 use crate::topk_aggregation::TopKAggregation;
 use crate::topk_repartition::TopKRepartition;
 use crate::update_aggr_exprs::OptimizeAggregateOrder;
@@ -246,15 +245,6 @@ impl PhysicalOptimizer {
             // Therefore, it should be run at the end of the optimization process since any changes to the plan may break the dynamic filter's references.
             // See `FilterPushdownPhase` for more details.
             Arc::new(DynamicFilterPushdown::new()),
-            // The SanityCheckPlan rule checks whether the order and
-            // distribution requirements of each node in the plan
-            // is satisfied. It will also reject non-runnable query
-            // plans that use pipeline-breaking operators on infinite
-            // input(s). The rule generates a diagnostic error
-            // message for invalid plans. It makes no changes to the
-            // given query plan; i.e. it only acts as a final
-            // gatekeeping rule.
-            Arc::new(SanityCheckPlan::new()),
         ];
 
         Self::with_rules(rules)
