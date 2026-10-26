@@ -205,9 +205,43 @@ async fn spill_join(
     }
     drop(rest);
 
-    let (mut resident, spilled) = build.finish(&ctx, &kept).await?;
+    let (mut resident, mut spilled) = build.finish(&ctx, &kept).await?;
     let mut reservation = kept.buffers.split(kept.buffers.size());
-    let left_data = ctx.build.build(&mut resident, &mut reservation)?;
+    let left_data = match ctx.build.build(&mut resident, &mut reservation) {
+        Ok(left_data) => left_data,
+        // The table took more than estimated and the pool had no more: the
+        // build side can still spill, so spill the kept buckets too
+        Err(e) if is_resources_exhausted(&e) => {
+            reservation.free();
+            let mut files: Vec<Option<BucketFile>> = (0..BUCKETS).map(|_| None).collect();
+            let mut sides: Vec<SpilledSide> =
+                (0..BUCKETS).map(|_| SpilledSide::default()).collect();
+            for batch in std::mem::take(&mut resident) {
+                for (bucket, part) in split(&batch, &ctx.build.on_left, 0)? {
+                    let file = match &mut files[bucket] {
+                        Some(file) => file,
+                        slot => slot.insert(BucketFile::try_new(
+                            &ctx.build_spill,
+                            ctx.stream.batch_size,
+                            "HashJoin build bucket",
+                            kept.buffers.new_empty(),
+                        )?),
+                    };
+                    file.append(&part)?;
+                    sides[bucket].rows += part.num_rows();
+                    sides[bucket].bytes += get_record_batch_memory_size(&part);
+                }
+            }
+            for (bucket, (file, mut side)) in files.into_iter().zip(sides).enumerate() {
+                if let Some(file) = file {
+                    side.file = file.finish()?;
+                    spilled.push((bucket, side));
+                }
+            }
+            ctx.build.build(&mut vec![], &mut kept.buffers.new_empty())?
+        }
+        Err(e) => return Err(e),
+    };
     // Joining a spilled pair needs at most what its largest bucket takes:
     // keep that, and let the rest go back to the pool once the kept buckets
     // are joined, so operators that start later are not starved.
