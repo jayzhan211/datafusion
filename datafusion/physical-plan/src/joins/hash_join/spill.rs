@@ -694,12 +694,14 @@ fn join_pair(
                 // probe rows instead if they fit, else sort-merge it
                 Err(e) if is_resources_exhausted(&e) => {
                     if join_bytes(probe.rows, probe.bytes) <= kept.capacity() {
+                        rung_log("reversed", level, &build, &probe);
                         match join_reversed(&ctx, &kept, &build, &probe).await {
                             Ok(stream) => return Ok(stream),
                             Err(e) if is_resources_exhausted(&e) => {}
                             Err(e) => return Err(e),
                         }
                     }
+                    rung_log("sort-merge", level, &build, &probe);
                     return join_sort_merge(&ctx, &kept, &build, &probe)
                         .await
                         .map_err(|e| {
@@ -831,7 +833,11 @@ async fn hash_side(
         while let Some(batch) = rows.try_next().await? {
             // Within the kept memory unless the pair cannot be split further,
             // which then needs the pool to grant the rest
-            reservation.try_grow(get_record_batch_memory_size(&batch))?;
+            let size = get_record_batch_memory_size(&batch);
+            if kept.trigger.refuses(reservation.size(), size) {
+                return resources_err!("PoC: test knob refused reloading a spilled side");
+            }
+            reservation.try_grow(size)?;
             batches.push(batch);
         }
     }
@@ -948,6 +954,16 @@ async fn join_sort_merge(
             )?)
         }),
     )))
+}
+
+/// PoC: DF_HJ_RUNG_LOG=1 prints which rung joins an unsplittable pair
+fn rung_log(rung: &str, level: usize, build: &SpilledSide, probe: &SpilledSide) {
+    if std::env::var_os("DF_HJ_RUNG_LOG").is_some() {
+        eprintln!(
+            "HJ_RUNG {rung} level={level} build_rows={} probe_rows={}",
+            build.rows, probe.rows
+        );
+    }
 }
 
 /// Least memory the sort-merge rung asks for, even if less is kept
