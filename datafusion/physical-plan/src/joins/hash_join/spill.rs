@@ -37,6 +37,7 @@
 //! more at a point where it could no longer react by spilling.
 
 use std::pin::Pin;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
@@ -207,6 +208,15 @@ async fn spill_join(
     let (mut resident, spilled) = build.finish(&ctx, &kept).await?;
     let mut reservation = kept.buffers.split(kept.buffers.size());
     let left_data = ctx.build.build(&mut resident, &mut reservation)?;
+    // Joining a spilled pair needs at most what its largest bucket takes:
+    // keep that, and let the rest go back to the pool once the kept buckets
+    // are joined, so operators that start later are not starved.
+    let largest = spilled
+        .iter()
+        .map(|(_, side)| join_bytes(side.rows, side.bytes))
+        .max()
+        .unwrap_or(0);
+    kept.keep_for_spilled_pairs(largest);
 
     let mut spilled_buckets = [false; BUCKETS];
     for (bucket, _) in &spilled {
@@ -300,6 +310,8 @@ struct KeptMemory {
     /// The bucket buffers while collecting the build side
     buffers: MemoryReservation,
     trigger: SpillTrigger,
+    /// What joining one spilled pair may use, set once the build side is split
+    for_spilled_pairs: AtomicUsize,
 }
 
 impl KeptMemory {
@@ -314,20 +326,21 @@ impl KeptMemory {
             .register(&(Arc::clone(&pool) as Arc<dyn MemoryPool>));
         let bytes = held.size();
         drop(held);
-        // Another consumer may take the bytes just released; they are ours anyway
-        if buffers.try_grow(bytes).is_err() {
-            buffers.grow(bytes);
-        }
+        // Another consumer may take the bytes just released first; the rows are
+        // then re-accounted as they are copied into buckets
+        let _ = buffers.try_grow(bytes);
         pool.retain(pool.reserved());
         Self {
             pool,
             buffers,
             trigger: ctx.trigger,
+            for_spilled_pairs: AtomicUsize::new(0),
         }
     }
 
-    /// Grows `reservation`, a child of the kept pool, unless the execution pool
-    /// or the test knob refuses. What it gets is kept until the partition ends.
+    /// Grows `reservation`, a child of the kept pool, while the build side is
+    /// split, unless the execution pool or the test knob refuses. What it gets
+    /// is kept until the spilled pairs are joined.
     fn try_grow(&self, reservation: &MemoryReservation, bytes: usize) -> bool {
         if self.trigger.refuses(reservation.size(), bytes) {
             return false;
@@ -339,9 +352,18 @@ impl KeptMemory {
         granted
     }
 
+    /// Keeps at most `bytes` once the memory in use is released
+    fn keep_for_spilled_pairs(&self, bytes: usize) {
+        let bytes = bytes.min(self.pool.reserved());
+        self.pool.retain(bytes);
+        self.for_spilled_pairs.store(bytes, Ordering::Relaxed);
+    }
+
     /// What joining one spilled pair may use without asking the execution pool
     fn capacity(&self) -> usize {
-        self.trigger.cap.unwrap_or_else(|| self.pool.reserved())
+        self.trigger
+            .cap
+            .unwrap_or_else(|| self.for_spilled_pairs.load(Ordering::Relaxed))
     }
 }
 
@@ -579,11 +601,9 @@ async fn join_in_memory(
     if let Some(file) = build.file {
         let mut rows = ctx.build_spill.read_spill_as_stream(file, None)?;
         while let Some(batch) = rows.try_next().await? {
-            let bytes = get_record_batch_memory_size(&batch);
-            // Only a pair that cannot be split goes beyond the kept memory
-            if !kept.try_grow(&reservation, bytes) {
-                reservation.grow(bytes);
-            }
+            // Within the kept memory unless the pair cannot be split further,
+            // which then needs the pool to grant the rest
+            reservation.try_grow(get_record_batch_memory_size(&batch))?;
             batches.push(batch);
         }
     }
