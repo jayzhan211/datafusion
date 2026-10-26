@@ -2915,7 +2915,7 @@ fn lr_is_preserved(join_type: JoinType) -> (bool, bool) {
 /// The bounds are used for dynamic filter pushdown optimization, where filters
 /// based on the actual data ranges can be pushed down to the probe side to
 /// eliminate unnecessary data early.
-pub(super) struct CollectLeftAccumulator {
+struct CollectLeftAccumulator {
     /// The physical expression to evaluate for each batch
     expr: Arc<dyn PhysicalExpr>,
     /// Accumulator for tracking the minimum value across all batches
@@ -2933,10 +2933,7 @@ impl CollectLeftAccumulator {
     ///
     /// # Returns
     /// A new `CollectLeftAccumulator` instance configured for the expression's data type
-    pub(super) fn try_new(
-        expr: Arc<dyn PhysicalExpr>,
-        schema: &SchemaRef,
-    ) -> Result<Self> {
+    fn try_new(expr: Arc<dyn PhysicalExpr>, schema: &SchemaRef) -> Result<Self> {
         /// Recursively unwraps dictionary types to get the underlying value type.
         fn dictionary_value_type(data_type: &DataType) -> DataType {
             match data_type {
@@ -2968,7 +2965,7 @@ impl CollectLeftAccumulator {
     ///
     /// # Returns
     /// Ok(()) if the update succeeds, or an error if expression evaluation fails
-    pub(super) fn update_batch(&mut self, batch: &RecordBatch) -> Result<()> {
+    fn update_batch(&mut self, batch: &RecordBatch) -> Result<()> {
         let array = self.expr.evaluate(batch)?.into_array(batch.num_rows())?;
         self.min.update_batch(std::slice::from_ref(&array))?;
         self.max.update_batch(std::slice::from_ref(&array))?;
@@ -2981,7 +2978,7 @@ impl CollectLeftAccumulator {
     ///
     /// # Returns
     /// The `ColumnBounds` containing the minimum and maximum values observed
-    pub(super) fn evaluate(mut self) -> Result<ColumnBounds> {
+    fn evaluate(mut self) -> Result<ColumnBounds> {
         Ok(ColumnBounds::new(
             self.min.evaluate()?,
             self.max.evaluate()?,

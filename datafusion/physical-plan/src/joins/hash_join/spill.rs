@@ -62,12 +62,10 @@ use futures::{FutureExt, Stream, StreamExt, TryStreamExt, ready, stream};
 use parking_lot::Mutex;
 
 use super::exec::{
-    BuildOutcome, BuildOverflow, BuildParams, CollectLeftAccumulator, JoinLeftData,
-    SpillTrigger, build_table_bytes, is_resources_exhausted,
+    BuildOutcome, BuildOverflow, BuildParams, JoinLeftData, SpillTrigger,
+    build_table_bytes, is_resources_exhausted,
 };
-use super::shared_bounds::{
-    PartitionBounds, PartitionBuildData, PushdownStrategy, SharedBuildAccumulator,
-};
+use super::shared_bounds::SharedBuildAccumulator;
 use super::stream::{
     BuildSide, BuildSideInitialState, HashJoinStream, HashJoinStreamState,
 };
@@ -173,8 +171,13 @@ pub(super) fn spillable_stream(
                 ctx.fetch,
             )),
             BuildOutcome::Overflow(overflow) => {
+                // The kept buckets cannot answer for the spilled ones: let every
+                // probe row of this partition through.
+                if let Some(accumulator) = &accumulator {
+                    accumulator.report_canceled_partition(ctx.stream.partition);
+                }
                 let fetch = ctx.fetch;
-                limit(spill_join(ctx, overflow, right, accumulator).await?, fetch)
+                limit(spill_join(ctx, overflow, right).await?, fetch)
             }
         };
         Ok::<_, datafusion_common::DataFusionError>(stream)
@@ -188,7 +191,6 @@ async fn spill_join(
     ctx: Arc<SpillContext>,
     overflow: BuildOverflow,
     right: SendableRecordBatchStream,
-    accumulator: Option<Arc<SharedBuildAccumulator>>,
 ) -> Result<SendableRecordBatchStream> {
     let BuildOverflow {
         batches,
@@ -196,19 +198,12 @@ async fn spill_join(
         reservation,
     } = overflow;
     let kept = Arc::new(KeptMemory::take_over(&ctx, reservation));
-    let mut bounds = accumulator
-        .is_some()
-        .then(|| BuildBounds::try_new(&ctx))
-        .transpose()?;
 
     // The collected batches are covered by the reservation taken over: release
     // each one's share once its rows are copied into the buckets.
     let mut build = BucketedBuild::new(0);
     let mut collected = kept.buffers.size();
     for batch in batches {
-        if let Some(bounds) = &mut bounds {
-            bounds.update(&batch)?;
-        }
         build.push(&ctx, &kept, &batch).await?;
         let released = get_record_batch_memory_size(&batch).min(collected);
         kept.buffers.shrink(released);
@@ -216,19 +211,9 @@ async fn spill_join(
     }
     kept.buffers.shrink(collected);
     while let Some(batch) = rest.try_next().await? {
-        if let Some(bounds) = &mut bounds {
-            bounds.update(&batch)?;
-        }
         build.push(&ctx, &kept, &batch).await?;
     }
     drop(rest);
-    // No table can answer for the spilled buckets, but the key bounds of
-    // every build row are exact: push those down
-    if let (Some(accumulator), Some(bounds)) = (accumulator, bounds) {
-        accumulator
-            .report_build_data(bounds.finish(ctx.stream.partition)?)
-            .await?;
-    }
 
     let (mut resident, mut spilled) = build.finish(&ctx, &kept).await?;
     let mut reservation = kept.buffers.split(kept.buffers.size());
@@ -361,58 +346,6 @@ impl Stream for SharedRouter {
 impl RecordBatchStream for SharedRouter {
     fn schema(&self) -> SchemaRef {
         self.0.lock().input.schema()
-    }
-}
-
-/// Key bounds and NULL presence of a spilled partition's build rows, for the
-/// dynamic filter
-struct BuildBounds {
-    on: Vec<PhysicalExprRef>,
-    accumulators: Vec<CollectLeftAccumulator>,
-    keys_have_null: bool,
-}
-
-impl BuildBounds {
-    fn try_new(ctx: &SpillContext) -> Result<Self> {
-        let on = ctx.build.on_left.clone();
-        let accumulators = on
-            .iter()
-            .map(|expr| {
-                CollectLeftAccumulator::try_new(Arc::clone(expr), &ctx.build.schema)
-            })
-            .collect::<Result<_>>()?;
-        Ok(Self {
-            on,
-            accumulators,
-            keys_have_null: false,
-        })
-    }
-
-    fn update(&mut self, batch: &RecordBatch) -> Result<()> {
-        for accumulator in &mut self.accumulators {
-            accumulator.update_batch(batch)?;
-        }
-        if !self.keys_have_null {
-            // Logical nulls, as the in-memory report does (dictionary keys)
-            self.keys_have_null = evaluate_expressions_to_arrays(&self.on, batch)?
-                .iter()
-                .any(|array| array.logical_null_count() > 0);
-        }
-        Ok(())
-    }
-
-    fn finish(self, partition_id: usize) -> Result<PartitionBuildData> {
-        let bounds = self
-            .accumulators
-            .into_iter()
-            .map(CollectLeftAccumulator::evaluate)
-            .collect::<Result<Vec<_>>>()?;
-        Ok(PartitionBuildData::Partitioned {
-            partition_id,
-            pushdown: PushdownStrategy::Unknown,
-            bounds: PartitionBounds::new(bounds),
-            keys_have_null: self.keys_have_null,
-        })
     }
 }
 
