@@ -351,6 +351,9 @@ impl ExecutionPlan for OutputRequirementExec {
     }
 }
 
+/// An analyzer rule: it records the query's output requirement so enforcement keeps it.
+impl crate::analyzer::PhysicalAnalyzerRule for OutputRequirements {}
+
 impl PhysicalOptimizerRule for OutputRequirements {
     fn optimize(
         &self,

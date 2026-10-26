@@ -133,6 +133,9 @@ fn supports_collect_by_thresholds(
     }
 }
 
+/// An analyzer rule: it resolves `PartitionMode::Auto`, which cannot execute.
+impl crate::analyzer::PhysicalAnalyzerRule for JoinSelection {}
+
 impl PhysicalOptimizerRule for JoinSelection {
     fn optimize(
         &self,

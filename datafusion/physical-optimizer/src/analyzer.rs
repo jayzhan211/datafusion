@@ -19,6 +19,10 @@
 
 use std::sync::Arc;
 
+use datafusion_common::Result;
+use datafusion_common::config::ConfigOptions;
+use datafusion_physical_plan::ExecutionPlan;
+
 use crate::PhysicalOptimizerRule;
 use crate::aggregate_statistics::AggregateStatistics;
 use crate::eliminate_constant_join::EliminateConstantJoin;
@@ -26,39 +30,22 @@ use crate::ensure_requirements::EnsureRequirements;
 use crate::filter_pushdown::FilterPushdown;
 use crate::join_selection::JoinSelection;
 use crate::limited_distinct_aggregation::LimitedDistinctAggregation;
+use crate::optimizer::PhysicalOptimizerContext;
 use crate::output_requirements::OutputRequirements;
 use crate::window_topn::WindowTopN;
 
-/// The physical analyzer: the rules that make an `ExecutionPlan` executable,
-/// as the logical analyzer makes a logical plan valid.
-///
-/// The list ends with [`EnsureRequirements`], which repartitions and sorts the
-/// inputs to match each operator's required distribution and ordering, so
-/// every rule of the [`PhysicalOptimizer`](crate::optimizer::PhysicalOptimizer)
-/// list receives a valid plan and must return one. Both lists hold
-/// [`PhysicalOptimizerRule`]s; the list a rule is in decides its contract.
-///
-/// Some performance rules still have to run before `EnsureRequirements`, such
-/// as `WindowTopN` and the statistics-based choices in `JoinSelection`, so they
-/// are in this list too. Performance rules that do not have to, such as
-/// `LimitPushdown`, are in the optimizer list.
-///
-/// A rule in this list must:
-///
-/// - Keep the query's results unchanged. It may leave a distribution or
-///   ordering requirement unmet; `EnsureRequirements` at the end of the list
-///   meets it.
-/// - Stay correct when the plan already contains repartitions, sorts, or
-///   operators it does not know, as happens when a plan is optimized again.
-///   It may skip its rewrite there, and decides what is safe around an
-///   operator only from what the operator declares.
-///
-/// A rule appended after `EnsureRequirements` must leave the plan valid. At
-/// the end of the analyzer list, debug builds check that the plan is valid.
+// Re-export from this module for convenience.
+pub use datafusion_session::PhysicalAnalyzerRule;
+
+/// The physical analyzer list: the rules that make an `ExecutionPlan`
+/// executable, ending with [`EnsureRequirements`]. See [`PhysicalAnalyzerRule`]
+/// for the contract. A rule appended after `EnsureRequirements` must leave the
+/// plan valid. At the end of the list, debug builds check that the plan is
+/// valid.
 #[derive(Clone, Debug)]
 pub struct PhysicalAnalyzer {
     /// All rules to apply
-    pub rules: Vec<Arc<dyn PhysicalOptimizerRule + Send + Sync>>,
+    pub rules: Vec<Arc<dyn PhysicalAnalyzerRule + Send + Sync>>,
 }
 
 impl Default for PhysicalAnalyzer {
@@ -70,20 +57,19 @@ impl Default for PhysicalAnalyzer {
 impl PhysicalAnalyzer {
     /// Create a new analyzer using the recommended list of rules
     pub fn new() -> Self {
-        // `OutputRequirements` (add) records the query's output requirement,
-        // `JoinSelection` resolves `PartitionMode::Auto`, and
-        // `EnsureRequirements` satisfies every requirement. The others are
-        // performance rules that must run before `EnsureRequirements`.
-        let rules: Vec<Arc<dyn PhysicalOptimizerRule + Send + Sync>> = vec![
+        // `OutputRequirements` (add), `JoinSelection` and `EnsureRequirements`
+        // are analyzer rules. The others are performance rules that must run
+        // before `EnsureRequirements`, so they run here through `RunInAnalyzer`.
+        let rules: Vec<Arc<dyn PhysicalAnalyzerRule + Send + Sync>> = vec![
             // If there is a output requirement of the query, make sure that
             // this information is not lost across different rules during optimization.
             Arc::new(OutputRequirements::new_add_mode()),
-            Arc::new(AggregateStatistics::new()),
+            Arc::new(RunInAnalyzer::new(Arc::new(AggregateStatistics::new()))),
             // Runs after AggregateStatistics, which can fold a scalar subquery into a
             // row of literals, and before EnsureRequirements, so that the filter
             // replacing a join against such a row keeps the other input's ordering.
             // Also runs before FilterPushdown, which pushes that filter into the scan.
-            Arc::new(EliminateConstantJoin::new()),
+            Arc::new(RunInAnalyzer::new(Arc::new(EliminateConstantJoin::new()))),
             // Statistics-based join selection will change the Auto mode to a real join implementation,
             // like collect left, or hash join, or future sort merge join, which will influence the
             // EnsureRequirements rule as it decides whether to add additional repartitioning and
@@ -93,13 +79,15 @@ impl PhysicalAnalyzer {
             // The LimitedDistinctAggregation rule should be applied before EnsureRequirements,
             // as that rule may inject other operations in between the different AggregateExecs.
             // Applying the rule early means only directly-connected AggregateExecs must be examined.
-            Arc::new(LimitedDistinctAggregation::new()),
+            Arc::new(RunInAnalyzer::new(Arc::new(
+                LimitedDistinctAggregation::new(),
+            ))),
             // The FilterPushdown rule tries to push down filters as far as it can.
             // For example, it will push down filtering from a `FilterExec` to `DataSourceExec`.
             // Note that this does not push down dynamic filters (such as those created by a `SortExec` operator in TopK mode),
             // those are handled by `FilterPushdown(Post)` in the optimizer list.
             // See `FilterPushdownPhase` for more details.
-            Arc::new(FilterPushdown::new()),
+            Arc::new(RunInAnalyzer::new(Arc::new(FilterPushdown::new()))),
             // WindowTopN: replaces Filter(rn<=K) → Window(ROW_NUMBER) with
             // PartitionedTopKExec(fetch=K), which emits `rn` itself; the
             // window node is kept above it only when it has other window
@@ -107,7 +95,7 @@ impl PhysicalAnalyzer {
             // Must run before EnsureRequirements (so it can rewrite against the
             // window's declared ordering without pattern-matching a SortExec)
             // and before ProjectionPushdown (which embeds projections into FilterExec).
-            Arc::new(WindowTopN::new()),
+            Arc::new(RunInAnalyzer::new(Arc::new(WindowTopN::new()))),
             // Ensures each input plan satisfies the distribution and ordering
             // requirements declared by `ExecutionPlan::required_input_distribution`
             // and `ExecutionPlan::required_input_ordering`.
@@ -132,10 +120,53 @@ impl PhysicalAnalyzer {
     }
 
     /// Create a new analyzer with the given rules
-    pub fn with_rules(rules: Vec<Arc<dyn PhysicalOptimizerRule + Send + Sync>>) -> Self {
+    pub fn with_rules(rules: Vec<Arc<dyn PhysicalAnalyzerRule + Send + Sync>>) -> Self {
         Self { rules }
     }
 }
+
+/// Runs a [`PhysicalOptimizerRule`] that is not an analyzer rule in an
+/// analyzer list, such as a performance rule that must run before
+/// `EnsureRequirements`.
+#[derive(Debug)]
+pub struct RunInAnalyzer {
+    rule: Arc<dyn PhysicalOptimizerRule + Send + Sync>,
+}
+
+impl RunInAnalyzer {
+    /// Run `rule` in an analyzer list.
+    pub fn new(rule: Arc<dyn PhysicalOptimizerRule + Send + Sync>) -> Self {
+        Self { rule }
+    }
+}
+
+impl PhysicalOptimizerRule for RunInAnalyzer {
+    fn optimize(
+        &self,
+        plan: Arc<dyn ExecutionPlan>,
+        config: &ConfigOptions,
+    ) -> Result<Arc<dyn ExecutionPlan>> {
+        self.rule.optimize(plan, config)
+    }
+
+    fn optimize_with_context(
+        &self,
+        plan: Arc<dyn ExecutionPlan>,
+        context: &dyn PhysicalOptimizerContext,
+    ) -> Result<Arc<dyn ExecutionPlan>> {
+        self.rule.optimize_with_context(plan, context)
+    }
+
+    fn name(&self) -> &str {
+        self.rule.name()
+    }
+
+    fn schema_check(&self) -> bool {
+        self.rule.schema_check()
+    }
+}
+
+impl PhysicalAnalyzerRule for RunInAnalyzer {}
 
 #[cfg(test)]
 mod tests {

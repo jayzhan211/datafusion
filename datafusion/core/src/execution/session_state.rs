@@ -82,7 +82,8 @@ use datafusion_physical_optimizer::optimizer::PhysicalOptimizer;
 use datafusion_physical_plan::ExecutionPlan;
 use datafusion_physical_plan::operator_statistics::StatisticsRegistry;
 use datafusion_session::{
-    CatalogProvider, PhysicalOptimizerContext, PhysicalOptimizerRule, Session,
+    CatalogProvider, PhysicalAnalyzerRule, PhysicalOptimizerContext,
+    PhysicalOptimizerRule, Session,
 };
 #[cfg(feature = "sql")]
 use datafusion_sql::{
@@ -323,7 +324,7 @@ impl Session for SessionState {
         SessionState::physical_optimizers(self)
     }
 
-    fn physical_analyzers(&self) -> &[Arc<dyn PhysicalOptimizerRule + Send + Sync>] {
+    fn physical_analyzers(&self) -> &[Arc<dyn PhysicalAnalyzerRule + Send + Sync>] {
         SessionState::physical_analyzers(self)
     }
 
@@ -515,11 +516,11 @@ impl SessionState {
     }
 
     /// Add `physical_analyzer_rule` to the end of the list of
-    /// physical analyzer rules, run before physical optimization. The rule
+    /// [`PhysicalAnalyzerRule`]s run before physical optimization. The rule
     /// runs after `EnsureRequirements`, so it must leave the plan valid.
     pub fn add_physical_analyzer_rule(
         &mut self,
-        physical_analyzer_rule: Arc<dyn PhysicalOptimizerRule + Send + Sync>,
+        physical_analyzer_rule: Arc<dyn PhysicalAnalyzerRule + Send + Sync>,
     ) -> &Self {
         Arc::make_mut(&mut self.inner)
             .physical_analyzers
@@ -1055,7 +1056,7 @@ impl SessionState {
     }
 
     /// Return the physical analyzers
-    pub fn physical_analyzers(&self) -> &[Arc<dyn PhysicalOptimizerRule + Send + Sync>] {
+    pub fn physical_analyzers(&self) -> &[Arc<dyn PhysicalAnalyzerRule + Send + Sync>] {
         &self.inner.physical_analyzers.rules
     }
 
@@ -1281,7 +1282,7 @@ pub struct SessionStateBuilder {
     // fields to support convenience functions
     analyzer_rules: Option<Vec<Arc<dyn AnalyzerRule + Send + Sync>>>,
     optimizer_rules: Option<Vec<Arc<dyn OptimizerRule + Send + Sync>>>,
-    physical_analyzer_rules: Option<Vec<Arc<dyn PhysicalOptimizerRule + Send + Sync>>>,
+    physical_analyzer_rules: Option<Vec<Arc<dyn PhysicalAnalyzerRule + Send + Sync>>>,
     physical_optimizer_rules: Option<Vec<Arc<dyn PhysicalOptimizerRule + Send + Sync>>>,
 }
 
@@ -1561,21 +1562,21 @@ impl SessionStateBuilder {
         self
     }
 
-    /// Set the physical analyzer rules, run before physical optimization.
+    /// Set the [`PhysicalAnalyzerRule`]s run before physical optimization.
     pub fn with_physical_analyzer_rules(
         mut self,
-        physical_analyzers: Vec<Arc<dyn PhysicalOptimizerRule + Send + Sync>>,
+        physical_analyzers: Vec<Arc<dyn PhysicalAnalyzerRule + Send + Sync>>,
     ) -> Self {
         self.physical_analyzers = Some(PhysicalAnalyzer::with_rules(physical_analyzers));
         self
     }
 
     /// Add `physical_analyzer_rule` to the end of the list of
-    /// physical analyzer rules, run before physical optimization. The rule
+    /// [`PhysicalAnalyzerRule`]s run before physical optimization. The rule
     /// runs after `EnsureRequirements`, so it must leave the plan valid.
     pub fn with_physical_analyzer_rule(
         mut self,
-        physical_analyzer_rule: Arc<dyn PhysicalOptimizerRule + Send + Sync>,
+        physical_analyzer_rule: Arc<dyn PhysicalAnalyzerRule + Send + Sync>,
     ) -> Self {
         let mut rules = self.physical_analyzer_rules.unwrap_or_default();
         rules.push(physical_analyzer_rule);
@@ -2201,7 +2202,7 @@ impl SessionStateBuilder {
     /// Returns the current physical_analyzer_rules value
     pub fn physical_analyzer_rules(
         &mut self,
-    ) -> &mut Option<Vec<Arc<dyn PhysicalOptimizerRule + Send + Sync>>> {
+    ) -> &mut Option<Vec<Arc<dyn PhysicalAnalyzerRule + Send + Sync>>> {
         &mut self.physical_analyzer_rules
     }
 }

@@ -51,6 +51,7 @@ use datafusion_expr::{
     ScalarUDFImpl, WindowUDF, WindowUDFImpl,
 };
 use datafusion_physical_expr::PhysicalExpr;
+use datafusion_physical_optimizer::analyzer::RunInAnalyzer;
 use datafusion_physical_plan::ExecutionPlan;
 use datafusion_proto::bytes::{
     logical_plan_from_bytes_with_extension_codec,
@@ -62,7 +63,8 @@ use datafusion_proto::logical_plan::to_proto::serialize_expr;
 use datafusion_proto::physical_plan::DefaultPhysicalExtensionCodec;
 use datafusion_proto::protobuf::LogicalExprNode;
 use datafusion_session::{
-    CatalogProviderList, PhysicalOptimizerRule, QueryPlanner, Session,
+    CatalogProviderList, PhysicalAnalyzerRule, PhysicalOptimizerRule, QueryPlanner,
+    Session,
 };
 use prost::Message;
 
@@ -384,7 +386,11 @@ unsafe extern "C" fn physical_analyzers_fn_wrapper(
         .inner()
         .physical_analyzers()
         .iter()
-        .map(|rule| FFI_PhysicalOptimizerRule::new(Arc::clone(rule), runtime.clone()))
+        .map(|rule| {
+            let rule: Arc<dyn PhysicalOptimizerRule + Send + Sync> =
+                Arc::clone(rule) as _;
+            FFI_PhysicalOptimizerRule::new(rule, runtime.clone())
+        })
         .collect()
 }
 
@@ -555,7 +561,7 @@ pub struct ForeignSession {
     props: ExecutionProps,
     query_planner: OnceLock<Arc<dyn QueryPlanner + Send + Sync>>,
     physical_optimizers: OnceLock<Vec<Arc<dyn PhysicalOptimizerRule + Send + Sync>>>,
-    physical_analyzers: OnceLock<Vec<Arc<dyn PhysicalOptimizerRule + Send + Sync>>>,
+    physical_analyzers: OnceLock<Vec<Arc<dyn PhysicalAnalyzerRule + Send + Sync>>>,
 }
 
 unsafe impl Send for ForeignSession {}
@@ -796,11 +802,15 @@ impl Session for ForeignSession {
         })
     }
 
-    fn physical_analyzers(&self) -> &[Arc<dyn PhysicalOptimizerRule + Send + Sync>] {
+    fn physical_analyzers(&self) -> &[Arc<dyn PhysicalAnalyzerRule + Send + Sync>] {
         self.physical_analyzers.get_or_init(|| unsafe {
+            // The other side's analyzer rules arrive as optimizer rules.
             (self.session.physical_analyzers)(&self.session)
                 .into_iter()
-                .map(|rule| (&rule).into())
+                .map(|rule| {
+                    Arc::new(RunInAnalyzer::new((&rule).into()))
+                        as Arc<dyn PhysicalAnalyzerRule + Send + Sync>
+                })
                 .collect()
         })
     }
@@ -1002,13 +1012,12 @@ mod tests {
             foreign_session.physical_optimizers().len(),
             state.physical_optimizers().len()
         );
-        let analyzer_names =
-            |rules: &[Arc<dyn PhysicalOptimizerRule + Send + Sync>]| {
-                rules
-                    .iter()
-                    .map(|r| r.name().to_string())
-                    .collect::<Vec<_>>()
-            };
+        let analyzer_names = |rules: &[Arc<dyn PhysicalAnalyzerRule + Send + Sync>]| {
+            rules
+                .iter()
+                .map(|r| r.name().to_string())
+                .collect::<Vec<_>>()
+        };
         assert!(!state.physical_analyzers().is_empty());
         assert_eq!(
             analyzer_names(foreign_session.physical_analyzers()),

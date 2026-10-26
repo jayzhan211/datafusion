@@ -185,6 +185,9 @@ impl EnsureRequirements {
     }
 }
 
+/// An analyzer rule: it satisfies every distribution and ordering requirement.
+impl crate::analyzer::PhysicalAnalyzerRule for EnsureRequirements {}
+
 impl PhysicalOptimizerRule for EnsureRequirements {
     fn optimize(
         &self,
