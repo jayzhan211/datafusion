@@ -303,32 +303,20 @@ fn statistical_join_selection_subrule(
             None
         } else {
             match hash_join.partition_mode() {
-                PartitionMode::Auto => try_collect_left(hash_join, false, context)?
-                    .map_or_else(
+                // A planner-created join starts as `Partitioned`; choose
+                // `CollectLeft` instead when statistics say the build side is
+                // small.
+                PartitionMode::Auto | PartitionMode::Partitioned => {
+                    try_collect_left(hash_join, false, context)?.map_or_else(
                         || partitioned_hash_join(hash_join, context).map(Some),
                         |v| Ok(Some(v)),
-                    )?,
+                    )?
+                }
                 PartitionMode::CollectLeft => try_collect_left(hash_join, true, context)?
                     .map_or_else(
                         || partitioned_hash_join(hash_join, context).map(Some),
                         |v| Ok(Some(v)),
                     )?,
-                PartitionMode::Partitioned => {
-                    let left = hash_join.left();
-                    let right = hash_join.right();
-                    if can_swap_hash_join(hash_join)
-                        && should_swap_join_order(left, right, context)?
-                    {
-                        // A null-aware join is never in `Partitioned` mode
-                        // (`NotIn::try_new` rejects it), so the swap
-                        // keeps the mode this arm matched on.
-                        hash_join
-                            .swap_inputs(PartitionMode::Partitioned)
-                            .map(Some)?
-                    } else {
-                        None
-                    }
-                }
             }
         }
     } else if let Some(cross_join) = plan.downcast_ref::<CrossJoinExec>() {

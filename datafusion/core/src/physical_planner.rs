@@ -1775,7 +1775,7 @@ impl DefaultPhysicalPlanner {
                     // Null-aware joins need global probe-side state, so keep
                     // them in CollectLeft mode.
                     let partition_mode = if can_repartition_join {
-                        PartitionMode::Auto
+                        PartitionMode::Partitioned
                     } else {
                         PartitionMode::CollectLeft
                     };
