@@ -148,7 +148,9 @@ fn create_membership_predicate(
             )) as Arc<dyn PhysicalExpr>))
         }
         // Empty partition - should not create a filter for this
-        PushdownStrategy::Empty => Ok(None),
+        // Empty partitions get a `false` branch from the caller; an unknown
+        // membership pushes its bounds only
+        PushdownStrategy::Empty | PushdownStrategy::Unknown => Ok(None),
     }
 }
 
@@ -287,6 +289,10 @@ pub(crate) enum PushdownStrategy {
     Map(Arc<Map>, Option<Arc<KeyRangeBitmap>>),
     /// There was no data in this partition, do not build a dynamic filter for it
     Empty,
+    /// The partition holds rows but no structure to test membership against
+    /// (its build side spilled): only its bounds, which stay exact, are pushed
+    /// down. Unlike `Empty`, its probe rows must not be discarded.
+    Unknown,
 }
 
 /// Build-side data reported by a single partition
