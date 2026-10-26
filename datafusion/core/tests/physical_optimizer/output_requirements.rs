@@ -188,7 +188,7 @@ async fn scalar_subquery_root_preserves_global_ordering_end_to_end() {
     let mut optimized = plan;
     for rule in PhysicalAnalyzer::new().rules {
         optimized = rule
-            .analyze(optimized, &config)
+            .optimize(optimized, &config)
             .unwrap_or_else(|e| panic!("analyzer rule {} failed: {e}", rule.name()));
     }
     for rule in PhysicalOptimizer::new().rules {

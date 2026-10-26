@@ -119,9 +119,7 @@ use datafusion_physical_plan::recursive_query::RecursiveQueryExec;
 use datafusion_physical_plan::scalar_subquery::{ScalarSubqueryExec, ScalarSubqueryLink};
 use datafusion_physical_plan::statistics::StatisticsContext;
 use datafusion_physical_plan::unnest::ListUnnest;
-use datafusion_session::{
-    PhysicalAnalyzerRule, PhysicalOptimizerContext, PhysicalOptimizerRule, Session,
-};
+use datafusion_session::{PhysicalOptimizerContext, PhysicalOptimizerRule, Session};
 
 use async_trait::async_trait;
 use datafusion_physical_plan::async_func::{AsyncFuncExec, AsyncMapper};
@@ -3309,14 +3307,11 @@ impl DefaultPhysicalPlanner {
     /// Run the two physical planning phases over `plan`, calling
     /// `observer(plan, rule)` after each rule.
     ///
-    /// The analyzer phase runs first and in full; it ends with requirement
-    /// enforcement, so every [`PhysicalOptimizerRule`] in the optimizer phase
-    /// receives a valid plan. See [`PhysicalAnalyzerRule`] for the phase
-    /// diagram. The observer sees each analyzer rule as a
-    /// [`PhysicalOptimizerRule`] with the same name.
+    /// The analyzer rules run first and in full; they end with requirement
+    /// enforcement, so every optimizer rule receives a valid plan. See
+    /// [`PhysicalAnalyzer`] for the analyzer's contract.
     ///
-    /// [`PhysicalOptimizerRule`]: datafusion_physical_optimizer::PhysicalOptimizerRule
-    /// [`PhysicalAnalyzerRule`]: datafusion_physical_optimizer::analyzer::PhysicalAnalyzerRule
+    /// [`PhysicalAnalyzer`]: datafusion_physical_optimizer::analyzer::PhysicalAnalyzer
     #[expect(clippy::needless_pass_by_value)]
     pub fn optimize_physical_plan<F>(
         &self,
@@ -3347,28 +3342,13 @@ impl DefaultPhysicalPlanner {
 
         // First the analyzer rules, which end with requirement enforcement,
         // then the optimizer rules on the resulting valid plan.
-        for analyzer in analyzers {
-            let before_schema = new_plan.schema();
-            new_plan = analyzer
-                .analyze_with_context(new_plan, &optimizer_context)
-                .map_err(|e| {
-                    DataFusionError::Context(analyzer.name().to_string(), Box::new(e))
-                })?;
-
-            // This only checks the schema in release build, and performs additional checks in debug mode.
-            OptimizationInvariantChecker::new_for_analyzer(analyzer)
-                .check(&new_plan, &before_schema)?;
-
-            debug!(
-                "Analyzed physical plan by {}:\n{}\n",
-                analyzer.name(),
-                displayable(new_plan.as_ref()).indent(false)
-            );
-            observer(
-                new_plan.as_ref(),
-                &AnalyzerRuleForObserver(Arc::clone(analyzer)),
-            );
-        }
+        new_plan = apply_rules(
+            "PhysicalAnalyzer",
+            analyzers,
+            new_plan,
+            &optimizer_context,
+            &mut observer,
+        )?;
 
         // The analyzer phase hands the optimizer a valid plan. Like the per-rule
         // invariant checks, debug builds check that here, where the phase ends.
@@ -3379,25 +3359,13 @@ impl DefaultPhysicalPlanner {
         }
 
         // Then apply the optimizer rules to make the (valid) plan faster.
-        for optimizer in optimizers {
-            let before_schema = new_plan.schema();
-            new_plan = optimizer
-                .optimize_with_context(new_plan, &optimizer_context)
-                .map_err(|e| {
-                    DataFusionError::Context(optimizer.name().to_string(), Box::new(e))
-                })?;
-
-            // This only checks the schema in release build, and performs additional checks in debug mode.
-            OptimizationInvariantChecker::new(optimizer)
-                .check(&new_plan, &before_schema)?;
-
-            debug!(
-                "Optimized physical plan by {}:\n{}\n",
-                optimizer.name(),
-                displayable(new_plan.as_ref()).indent(false)
-            );
-            observer(new_plan.as_ref(), optimizer.as_ref());
-        }
+        new_plan = apply_rules(
+            "PhysicalOptimizer",
+            optimizers,
+            new_plan,
+            &optimizer_context,
+            &mut observer,
+        )?;
 
         // The default analyzer adds `OutputRequirementExec` markers and the
         // default optimizer removes them. Remove any that a custom optimizer
@@ -3656,36 +3624,35 @@ fn tuple_err<T, R>(value: (Result<T>, Result<R>)) -> Result<(T, R)> {
     }
 }
 
-/// Passes an analyzer rule to the observer of
-/// [`DefaultPhysicalPlanner::optimize_physical_plan`], which takes a
-/// [`PhysicalOptimizerRule`].
-#[derive(Debug)]
-struct AnalyzerRuleForObserver(Arc<dyn PhysicalAnalyzerRule + Send + Sync>);
+/// Runs `rules` in order over `plan`, checking each rule's result and calling
+/// `observer(plan, rule)` after it. `phase` names the rule list in errors.
+fn apply_rules<F>(
+    phase: &'static str,
+    rules: &[Arc<dyn PhysicalOptimizerRule + Send + Sync>],
+    mut plan: Arc<dyn ExecutionPlan>,
+    context: &SessionOptimizerContext,
+    observer: &mut F,
+) -> Result<Arc<dyn ExecutionPlan>>
+where
+    F: FnMut(&dyn ExecutionPlan, &dyn PhysicalOptimizerRule),
+{
+    for rule in rules {
+        let before_schema = plan.schema();
+        plan = rule.optimize_with_context(plan, context).map_err(|e| {
+            DataFusionError::Context(rule.name().to_string(), Box::new(e))
+        })?;
 
-impl PhysicalOptimizerRule for AnalyzerRuleForObserver {
-    fn optimize(
-        &self,
-        plan: Arc<dyn ExecutionPlan>,
-        config: &ConfigOptions,
-    ) -> Result<Arc<dyn ExecutionPlan>> {
-        self.0.analyze(plan, config)
-    }
+        // This only checks the schema in release build, and performs additional checks in debug mode.
+        OptimizationInvariantChecker::new(phase, rule).check(&plan, &before_schema)?;
 
-    fn optimize_with_context(
-        &self,
-        plan: Arc<dyn ExecutionPlan>,
-        context: &dyn PhysicalOptimizerContext,
-    ) -> Result<Arc<dyn ExecutionPlan>> {
-        self.0.analyze_with_context(plan, context)
+        debug!(
+            "{phase} rule {}:\n{}\n",
+            rule.name(),
+            displayable(plan.as_ref()).indent(false)
+        );
+        observer(plan.as_ref(), rule.as_ref());
     }
-
-    fn name(&self) -> &str {
-        self.0.name()
-    }
-
-    fn schema_check(&self) -> bool {
-        self.0.schema_check()
-    }
+    Ok(plan)
 }
 
 struct OptimizationInvariantChecker<'a> {
@@ -3698,21 +3665,14 @@ struct OptimizationInvariantChecker<'a> {
 }
 
 impl<'a> OptimizationInvariantChecker<'a> {
-    /// Create an [`OptimizationInvariantChecker`] for a [`PhysicalOptimizerRule`].
-    pub fn new(rule: &'a Arc<dyn PhysicalOptimizerRule + Send + Sync>) -> Self {
-        Self {
-            phase: "PhysicalOptimizer",
-            rule_name: rule.name(),
-            schema_check: rule.schema_check(),
-        }
-    }
-
-    /// Create an [`OptimizationInvariantChecker`] for a [`PhysicalAnalyzerRule`].
-    pub fn new_for_analyzer(
-        rule: &'a Arc<dyn PhysicalAnalyzerRule + Send + Sync>,
+    /// Create an [`OptimizationInvariantChecker`] for `rule`, run in the rule
+    /// list named `phase`.
+    pub fn new(
+        phase: &'static str,
+        rule: &'a Arc<dyn PhysicalOptimizerRule + Send + Sync>,
     ) -> Self {
         Self {
-            phase: "PhysicalAnalyzer",
+            phase,
             rule_name: rule.name(),
             schema_check: rule.schema_check(),
         }
@@ -3942,7 +3902,7 @@ mod tests {
         }
     }
 
-    /// A `PhysicalAnalyzerRule` that records whether it ran and returns the
+    /// An analyzer rule that records whether it ran and returns the
     /// plan unchanged. Used to prove the analyzer phase is invoked during
     /// physical planning.
     #[derive(Debug)]
@@ -3950,8 +3910,8 @@ mod tests {
         invoked: Arc<AtomicBool>,
     }
 
-    impl PhysicalAnalyzerRule for RecordingAnalyzerRule {
-        fn analyze(
+    impl PhysicalOptimizerRule for RecordingAnalyzerRule {
+        fn optimize(
             &self,
             plan: Arc<dyn ExecutionPlan>,
             _config: &ConfigOptions,
@@ -3962,6 +3922,10 @@ mod tests {
 
         fn name(&self) -> &str {
             "recording_analyzer_rule"
+        }
+
+        fn schema_check(&self) -> bool {
+            true
         }
     }
 
@@ -4132,7 +4096,7 @@ mod tests {
             self.inner.physical_optimizers()
         }
 
-        fn physical_analyzers(&self) -> &[Arc<dyn PhysicalAnalyzerRule + Send + Sync>] {
+        fn physical_analyzers(&self) -> &[Arc<dyn PhysicalOptimizerRule + Send + Sync>] {
             self.inner.physical_analyzers()
         }
 
@@ -6061,12 +6025,13 @@ digraph {
 
         // Test: check should pass with same schema
         let equal_schema = ok_plan.schema();
-        OptimizationInvariantChecker::new(&rule).check(&ok_plan, &equal_schema)?;
+        OptimizationInvariantChecker::new("PhysicalOptimizer", &rule)
+            .check(&ok_plan, &equal_schema)?;
 
         // Test: should fail with schema changed
         let different_schema =
             Arc::new(Schema::new(vec![Field::new("a", DataType::Boolean, false)]));
-        let expected_err = OptimizationInvariantChecker::new(&rule)
+        let expected_err = OptimizationInvariantChecker::new("PhysicalOptimizer", &rule)
             .check(&ok_plan, &different_schema)
             .unwrap_err();
         assert!(expected_err.to_string().contains("PhysicalOptimizer rule 'OptimizerRuleWithSchemaCheck' failed. Schema mismatch."));
@@ -6077,7 +6042,7 @@ digraph {
 
         // Test: should fail when extension node fails it's own invariant check
         let failing_node: Arc<dyn ExecutionPlan> = Arc::new(InvariantFailsExtensionNode);
-        let result = OptimizationInvariantChecker::new(&rule)
+        let result = OptimizationInvariantChecker::new("PhysicalOptimizer", &rule)
             .check(&failing_node, &ok_plan.schema());
         if cfg!(debug_assertions) {
             assert!(result.unwrap_err().to_string().contains(
@@ -6099,7 +6064,7 @@ digraph {
             ],
             ReplaceChildrenOptions::new(ChildrenPropertiesMode::Recompute),
         )?;
-        let result = OptimizationInvariantChecker::new(&rule)
+        let result = OptimizationInvariantChecker::new("PhysicalOptimizer", &rule)
             .check(&invalid_plan, &ok_plan.schema());
         if cfg!(debug_assertions) {
             assert!(result.unwrap_err().to_string().contains(

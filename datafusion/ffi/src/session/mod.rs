@@ -51,8 +51,6 @@ use datafusion_expr::{
     ScalarUDFImpl, WindowUDF, WindowUDFImpl,
 };
 use datafusion_physical_expr::PhysicalExpr;
-use datafusion_physical_optimizer::PhysicalOptimizerContext;
-use datafusion_physical_optimizer::analyzer::RunInAnalyzer;
 use datafusion_physical_plan::ExecutionPlan;
 use datafusion_proto::bytes::{
     logical_plan_from_bytes_with_extension_codec,
@@ -64,8 +62,7 @@ use datafusion_proto::logical_plan::to_proto::serialize_expr;
 use datafusion_proto::physical_plan::DefaultPhysicalExtensionCodec;
 use datafusion_proto::protobuf::LogicalExprNode;
 use datafusion_session::{
-    CatalogProviderList, PhysicalAnalyzerRule, PhysicalOptimizerRule, QueryPlanner,
-    Session,
+    CatalogProviderList, PhysicalOptimizerRule, QueryPlanner, Session,
 };
 use prost::Message;
 
@@ -387,43 +384,8 @@ unsafe extern "C" fn physical_analyzers_fn_wrapper(
         .inner()
         .physical_analyzers()
         .iter()
-        .map(|rule| {
-            let rule = Arc::new(AnalyzerRuleAsOptimizerRule(Arc::clone(rule)));
-            FFI_PhysicalOptimizerRule::new(rule, runtime.clone())
-        })
+        .map(|rule| FFI_PhysicalOptimizerRule::new(Arc::clone(rule), runtime.clone()))
         .collect()
-}
-
-/// Lets a [`PhysicalAnalyzerRule`] cross the FFI boundary as a
-/// [`FFI_PhysicalOptimizerRule`]. The receiving side runs it in its analyzer
-/// phase through [`RunInAnalyzer`].
-#[derive(Debug)]
-struct AnalyzerRuleAsOptimizerRule(Arc<dyn PhysicalAnalyzerRule + Send + Sync>);
-
-impl PhysicalOptimizerRule for AnalyzerRuleAsOptimizerRule {
-    fn optimize(
-        &self,
-        plan: Arc<dyn ExecutionPlan>,
-        config: &ConfigOptions,
-    ) -> datafusion_common::Result<Arc<dyn ExecutionPlan>> {
-        self.0.analyze(plan, config)
-    }
-
-    fn optimize_with_context(
-        &self,
-        plan: Arc<dyn ExecutionPlan>,
-        context: &dyn PhysicalOptimizerContext,
-    ) -> datafusion_common::Result<Arc<dyn ExecutionPlan>> {
-        self.0.analyze_with_context(plan, context)
-    }
-
-    fn name(&self) -> &str {
-        self.0.name()
-    }
-
-    fn schema_check(&self) -> bool {
-        self.0.schema_check()
-    }
 }
 
 unsafe extern "C" fn release_fn_wrapper(provider: &mut FFI_SessionRef) {
@@ -593,7 +555,7 @@ pub struct ForeignSession {
     props: ExecutionProps,
     query_planner: OnceLock<Arc<dyn QueryPlanner + Send + Sync>>,
     physical_optimizers: OnceLock<Vec<Arc<dyn PhysicalOptimizerRule + Send + Sync>>>,
-    physical_analyzers: OnceLock<Vec<Arc<dyn PhysicalAnalyzerRule + Send + Sync>>>,
+    physical_analyzers: OnceLock<Vec<Arc<dyn PhysicalOptimizerRule + Send + Sync>>>,
 }
 
 unsafe impl Send for ForeignSession {}
@@ -834,14 +796,11 @@ impl Session for ForeignSession {
         })
     }
 
-    fn physical_analyzers(&self) -> &[Arc<dyn PhysicalAnalyzerRule + Send + Sync>] {
+    fn physical_analyzers(&self) -> &[Arc<dyn PhysicalOptimizerRule + Send + Sync>] {
         self.physical_analyzers.get_or_init(|| unsafe {
             (self.session.physical_analyzers)(&self.session)
                 .into_iter()
-                .map(|rule| {
-                    Arc::new(RunInAnalyzer::new((&rule).into()))
-                        as Arc<dyn PhysicalAnalyzerRule + Send + Sync>
-                })
+                .map(|rule| (&rule).into())
                 .collect()
         })
     }
@@ -1043,12 +1002,13 @@ mod tests {
             foreign_session.physical_optimizers().len(),
             state.physical_optimizers().len()
         );
-        let analyzer_names = |rules: &[Arc<dyn PhysicalAnalyzerRule + Send + Sync>]| {
-            rules
-                .iter()
-                .map(|r| r.name().to_string())
-                .collect::<Vec<_>>()
-        };
+        let analyzer_names =
+            |rules: &[Arc<dyn PhysicalOptimizerRule + Send + Sync>]| {
+                rules
+                    .iter()
+                    .map(|r| r.name().to_string())
+                    .collect::<Vec<_>>()
+            };
         assert!(!state.physical_analyzers().is_empty());
         assert_eq!(
             analyzer_names(foreign_session.physical_analyzers()),

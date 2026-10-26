@@ -53,6 +53,6 @@ pub mod update_aggr_exprs;
 pub mod utils;
 pub mod window_topn;
 
-pub use analyzer::{PhysicalAnalyzer, PhysicalAnalyzerRule};
+pub use analyzer::PhysicalAnalyzer;
 
 pub use optimizer::{ConfigOnlyContext, PhysicalOptimizerContext, PhysicalOptimizerRule};
