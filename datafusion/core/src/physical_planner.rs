@@ -3196,8 +3196,8 @@ impl DefaultPhysicalPlanner {
                     let optimized_plan = self.optimize_physical_plan(
                         input,
                         session_state,
-                        |plan, rule_name| {
-                            let optimizer_name = rule_name.to_string();
+                        |plan, rule| {
+                            let optimizer_name = rule.name().to_string();
                             let plan_type = OptimizedPhysicalPlan { optimizer_name };
                             stringified_plans.push(StringifiedPlan::new(
                                 plan_type,
@@ -3302,12 +3302,13 @@ impl DefaultPhysicalPlanner {
     }
 
     /// Run the two physical planning phases over `plan`, calling
-    /// `observer(plan, rule_name)` after each rule.
+    /// `observer(plan, rule)` after each rule.
     ///
     /// The analyzer phase runs first and in full; it ends with requirement
     /// enforcement, so every [`PhysicalOptimizerRule`] in the optimizer phase
     /// receives a valid plan. See [`PhysicalAnalyzerRule`] for the phase
-    /// diagram.
+    /// diagram. The observer sees each analyzer rule as a
+    /// [`PhysicalOptimizerRule`] with the same name.
     ///
     /// [`PhysicalOptimizerRule`]: datafusion_physical_optimizer::PhysicalOptimizerRule
     /// [`PhysicalAnalyzerRule`]: datafusion_physical_optimizer::analyzer::PhysicalAnalyzerRule
@@ -3319,7 +3320,7 @@ impl DefaultPhysicalPlanner {
         mut observer: F,
     ) -> Result<Arc<dyn ExecutionPlan>>
     where
-        F: FnMut(&dyn ExecutionPlan, &str),
+        F: FnMut(&dyn ExecutionPlan, &dyn PhysicalOptimizerRule),
     {
         let analyzers = session_state.physical_analyzers();
         let optimizers = session_state.physical_optimizers();
@@ -3358,7 +3359,10 @@ impl DefaultPhysicalPlanner {
                 analyzer.name(),
                 displayable(new_plan.as_ref()).indent(false)
             );
-            observer(new_plan.as_ref(), analyzer.name());
+            observer(
+                new_plan.as_ref(),
+                &AnalyzerRuleForObserver(Arc::clone(analyzer)),
+            );
         }
 
         // Then apply the optimizer rules to make the (valid) plan faster.
@@ -3379,7 +3383,7 @@ impl DefaultPhysicalPlanner {
                 optimizer.name(),
                 displayable(new_plan.as_ref()).indent(false)
             );
-            observer(new_plan.as_ref(), optimizer.name());
+            observer(new_plan.as_ref(), optimizer.as_ref());
         }
 
         // This runs once after all optimizer runs are complete,
@@ -3628,6 +3632,38 @@ fn tuple_err<T, R>(value: (Result<T>, Result<R>)) -> Result<(T, R)> {
         (Err(e), Ok(_)) => Err(e),
         (Ok(_), Err(e1)) => Err(e1),
         (Err(e), Err(_)) => Err(e),
+    }
+}
+
+/// Passes an analyzer rule to the observer of
+/// [`DefaultPhysicalPlanner::optimize_physical_plan`], which takes a
+/// [`PhysicalOptimizerRule`].
+#[derive(Debug)]
+struct AnalyzerRuleForObserver(Arc<dyn PhysicalAnalyzerRule + Send + Sync>);
+
+impl PhysicalOptimizerRule for AnalyzerRuleForObserver {
+    fn optimize(
+        &self,
+        plan: Arc<dyn ExecutionPlan>,
+        config: &ConfigOptions,
+    ) -> Result<Arc<dyn ExecutionPlan>> {
+        self.0.analyze(plan, config)
+    }
+
+    fn optimize_with_context(
+        &self,
+        plan: Arc<dyn ExecutionPlan>,
+        context: &dyn PhysicalOptimizerContext,
+    ) -> Result<Arc<dyn ExecutionPlan>> {
+        self.0.analyze_with_context(plan, context)
+    }
+
+    fn name(&self) -> &str {
+        self.0.name()
+    }
+
+    fn schema_check(&self) -> bool {
+        self.0.schema_check()
     }
 }
 
