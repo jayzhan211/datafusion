@@ -213,7 +213,7 @@ async fn spill_join(
         spilled_buckets[*bucket] = true;
     }
     let probe_files = Arc::new(Mutex::new(empty_sides()));
-    let router = ProbeRouter {
+    let router = SharedRouter(Arc::new(Mutex::new(ProbeRouter {
         input: right,
         on_right: ctx.stream.on_right.clone(),
         spill: ctx.probe_spill.clone(),
@@ -223,28 +223,75 @@ async fn spill_join(
         sides: empty_sides(),
         output: Arc::clone(&probe_files),
         finished: false,
-    };
-    let resident_join = ctx
-        .stream
-        .stream(left_data, Box::pin(router), None, false, None);
+    })));
+    let resident_join =
+        ctx.stream
+            .stream(left_data, Box::pin(router.clone()), None, false, None);
 
+    // The join of the kept buckets stops reading probe rows once its result
+    // is complete (e.g. an inner join with no rows kept), but the spilled
+    // buckets still need theirs: route the rest of the probe side first. The
+    // probe rows of kept buckets read here cannot change that result.
     let schema = Arc::clone(&ctx.stream.schema);
-    let spilled_joins = stream::iter(spilled)
-        .then(move |(bucket, build)| {
-            let probe = probe_files.lock()[bucket].take();
-            join_pair(
-                Arc::clone(&ctx),
-                Arc::clone(&kept),
-                build,
-                probe.unwrap_or_default(),
-                0,
-            )
-        })
-        .try_flatten();
+    let spilled_joins = stream::once(async move {
+        router.drain().await?;
+        let joins = stream::iter(spilled)
+            .then(move |(bucket, build)| {
+                let probe = probe_files.lock()[bucket].take();
+                join_pair(
+                    Arc::clone(&ctx),
+                    Arc::clone(&kept),
+                    build,
+                    probe.unwrap_or_default(),
+                    0,
+                )
+            })
+            .try_flatten();
+        Ok::<_, datafusion_common::DataFusionError>(joins)
+    })
+    .try_flatten();
     Ok(Box::pin(RecordBatchStreamAdapter::new(
         schema,
         resident_join.chain(spilled_joins),
     )))
+}
+
+/// The probe router, shared by the join of the kept buckets and the drain
+/// that runs after it
+#[derive(Clone)]
+struct SharedRouter(Arc<Mutex<ProbeRouter>>);
+
+impl SharedRouter {
+    async fn drain(self) -> Result<()> {
+        futures::future::poll_fn(|cx| {
+            let mut router = self.0.lock();
+            loop {
+                match ready!(router.poll_next_unpin(cx)) {
+                    Some(Ok(_)) => continue,
+                    Some(Err(e)) => return Poll::Ready(Err(e)),
+                    None => return Poll::Ready(Ok(())),
+                }
+            }
+        })
+        .await
+    }
+}
+
+impl Stream for SharedRouter {
+    type Item = Result<RecordBatch>;
+
+    fn poll_next(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<Self::Item>> {
+        self.0.lock().poll_next_unpin(cx)
+    }
+}
+
+impl RecordBatchStream for SharedRouter {
+    fn schema(&self) -> SchemaRef {
+        self.0.lock().input.schema()
+    }
 }
 
 /// Memory a spilling partition holds from the first refusal until it finishes
