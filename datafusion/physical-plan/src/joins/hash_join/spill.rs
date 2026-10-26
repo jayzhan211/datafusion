@@ -230,6 +230,7 @@ async fn spill_join(
         level: 0,
         spilled: spilled_buckets,
         batch_size: ctx.stream.batch_size,
+        memory: kept.buffers.new_empty(),
         writers: (0..BUCKETS).map(|_| None).collect(),
         sides: empty_sides(),
         output: Arc::clone(&probe_files),
@@ -382,33 +383,44 @@ const BUCKET_FILE_BUFFER_BYTES: usize = 1024 * 1024;
 /// One bucket's spill file. A split batch leaves each bucket only about
 /// 1/16 of its rows, so rows are buffered and written in batches of
 /// `batch_size` rows: fewer, larger writes, and full batches when joined.
+/// The buffered rows are charged to the kept memory; when it refuses them,
+/// they are written right away.
 struct BucketFile {
     file: InProgressSpillFile,
     schema: SchemaRef,
     buffered: Vec<RecordBatch>,
     buffered_rows: usize,
-    buffered_bytes: usize,
     batch_size: usize,
+    reservation: MemoryReservation,
 }
 
 impl BucketFile {
-    fn try_new(spill: &SpillManager, batch_size: usize, request: &str) -> Result<Self> {
+    fn try_new(
+        spill: &SpillManager,
+        batch_size: usize,
+        request: &str,
+        reservation: MemoryReservation,
+    ) -> Result<Self> {
         Ok(Self {
             file: spill.create_in_progress_file(request)?,
             schema: Arc::clone(spill.schema()),
             buffered: vec![],
             buffered_rows: 0,
-            buffered_bytes: 0,
             batch_size,
+            reservation,
         })
     }
 
     fn append(&mut self, batch: &RecordBatch) -> Result<()> {
+        let granted = self
+            .reservation
+            .try_grow(get_record_batch_memory_size(batch))
+            .is_ok();
         self.buffered_rows += batch.num_rows();
-        self.buffered_bytes += get_record_batch_memory_size(batch);
         self.buffered.push(batch.clone());
-        if self.buffered_rows >= self.batch_size
-            || self.buffered_bytes >= BUCKET_FILE_BUFFER_BYTES
+        if !granted
+            || self.buffered_rows >= self.batch_size
+            || self.reservation.size() >= BUCKET_FILE_BUFFER_BYTES
         {
             self.write_buffered()?;
         }
@@ -423,8 +435,8 @@ impl BucketFile {
         };
         self.buffered.clear();
         self.buffered_rows = 0;
-        self.buffered_bytes = 0;
         self.file.append_batch(&batch)?;
+        self.reservation.free();
         Ok(())
     }
 
@@ -557,6 +569,7 @@ impl BucketedBuild {
             &ctx.build_spill,
             ctx.stream.batch_size,
             "HashJoin build bucket",
+            kept.buffers.new_empty(),
         )?;
         for batch in &batches {
             file.append(batch)?;
@@ -637,10 +650,24 @@ fn join_pair(
         let level = level + 1;
         let batch_size = ctx.stream.batch_size;
         let builds =
-            resplit(&ctx.build_spill, batch_size, &ctx.build.on_left, build, level)
+            resplit(
+                &ctx.build_spill,
+                batch_size,
+                &kept.buffers,
+                &ctx.build.on_left,
+                build,
+                level,
+            )
                 .await?;
         let probes =
-            resplit(&ctx.probe_spill, batch_size, &ctx.stream.on_right, probe, level)
+            resplit(
+                &ctx.probe_spill,
+                batch_size,
+                &kept.buffers,
+                &ctx.stream.on_right,
+                probe,
+                level,
+            )
                 .await?;
         let total_rows: usize = builds.iter().map(|b| b.rows).sum();
         let schema = Arc::clone(&ctx.stream.schema);
@@ -696,6 +723,7 @@ async fn join_in_memory(
 async fn resplit(
     spill: &SpillManager,
     batch_size: usize,
+    memory: &MemoryReservation,
     on: &[PhysicalExprRef],
     side: SpilledSide,
     level: usize,
@@ -712,6 +740,7 @@ async fn resplit(
                         spill,
                         batch_size,
                         "HashJoin bucket",
+                        memory.new_empty(),
                     )?),
                 };
                 writer.append(&part)?;
@@ -783,6 +812,8 @@ struct ProbeRouter {
     level: usize,
     spilled: [bool; BUCKETS],
     batch_size: usize,
+    /// Charges the buffered probe rows to the kept memory
+    memory: MemoryReservation,
     writers: Vec<Option<BucketFile>>,
     sides: Vec<Option<SpilledSide>>,
     /// The probe files, handed over once the input is exhausted
@@ -816,6 +847,7 @@ impl ProbeRouter {
                     &self.spill,
                     self.batch_size,
                     "HashJoin probe bucket",
+                    self.memory.new_empty(),
                 )?),
             };
             writer.append(&part)?;
