@@ -380,6 +380,34 @@ impl PhysicalOptimizerRule for OutputRequirements {
     }
 }
 
+/// Runs in both lists: the analyzer list uses one mode, the optimizer list
+/// the other.
+impl crate::analyzer::PhysicalAnalyzerRule for OutputRequirements {
+    fn analyze(
+        &self,
+        plan: Arc<dyn ExecutionPlan>,
+        config: &ConfigOptions,
+    ) -> Result<Arc<dyn ExecutionPlan>> {
+        PhysicalOptimizerRule::optimize(self, plan, config)
+    }
+
+    fn analyze_with_context(
+        &self,
+        plan: Arc<dyn ExecutionPlan>,
+        context: &dyn crate::optimizer::PhysicalOptimizerContext,
+    ) -> Result<Arc<dyn ExecutionPlan>> {
+        PhysicalOptimizerRule::optimize_with_context(self, plan, context)
+    }
+
+    fn name(&self) -> &str {
+        PhysicalOptimizerRule::name(self)
+    }
+
+    fn schema_check(&self) -> bool {
+        PhysicalOptimizerRule::schema_check(self)
+    }
+}
+
 /// This functions adds ancillary `OutputRequirementExec` to the physical plan, so that
 /// global requirements are not lost during optimization.
 ///

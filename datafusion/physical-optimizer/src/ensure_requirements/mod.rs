@@ -157,7 +157,7 @@ pub use satisfy::satisfy_requirements;
 
 use std::sync::Arc;
 
-use crate::PhysicalOptimizerRule;
+use crate::analyzer::PhysicalAnalyzerRule;
 use crate::optimizer::{
     ConfigOnlyContext, PhysicalOptimizerContext, with_statistics_context,
 };
@@ -185,16 +185,16 @@ impl EnsureRequirements {
     }
 }
 
-impl PhysicalOptimizerRule for EnsureRequirements {
-    fn optimize(
+impl PhysicalAnalyzerRule for EnsureRequirements {
+    fn analyze(
         &self,
         plan: Arc<dyn ExecutionPlan>,
         config: &ConfigOptions,
     ) -> Result<Arc<dyn ExecutionPlan>> {
-        self.optimize_with_context(plan, &ConfigOnlyContext::new(config))
+        self.analyze_with_context(plan, &ConfigOnlyContext::new(config))
     }
 
-    fn optimize_with_context(
+    fn analyze_with_context(
         &self,
         plan: Arc<dyn ExecutionPlan>,
         context: &dyn PhysicalOptimizerContext,

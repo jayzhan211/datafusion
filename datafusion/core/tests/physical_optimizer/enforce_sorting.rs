@@ -52,6 +52,7 @@ use datafusion_physical_plan::sorts::sort::SortExec;
 use datafusion_physical_plan::{displayable, get_plan_string, ExecutionPlan, ExecutionPlanProperties};
 use datafusion::datasource::physical_plan::CsvSource;
 use datafusion::datasource::listing::PartitionedFile;
+use datafusion_physical_optimizer::PhysicalAnalyzerRule;
 use datafusion_physical_optimizer::enforce_sorting::{PlanWithCorrespondingCoalescePartitions, PlanWithCorrespondingSort, parallelize_sorts, ensure_sorting};
 use datafusion_physical_optimizer::sanity_checker::SanityCheckPlan;
 use datafusion_physical_optimizer::enforce_sorting::replace_with_order_preserving_variants::{replace_with_order_preserving_variants, OrderPreservationContext};
@@ -191,7 +192,7 @@ impl EnforceSortingTest {
 
         // Run the actual optimizer
         let optimized_physical_plan = EnsureRequirements::new()
-            .optimize(Arc::clone(&self.plan), &config)
+            .analyze(Arc::clone(&self.plan), &config)
             .expect("ensure_requirements failed");
 
         // Get string representation of the plan
@@ -305,7 +306,7 @@ async fn test_hash_join_interleaved_projection_preserves_parent_sort() -> Result
     let mut config = ConfigOptions::new();
     config.execution.target_partitions = 10;
     let optimized_plan =
-        EnsureRequirements::new().optimize(Arc::clone(&physical_plan), &config)?;
+        EnsureRequirements::new().analyze(Arc::clone(&physical_plan), &config)?;
     let optimized_plan = SanityCheckPlan::new().optimize(optimized_plan, &config)?;
 
     assert_snapshot!(displayable(optimized_plan.as_ref()).indent(true), @r"
@@ -2502,10 +2503,10 @@ async fn test_commutativity() -> Result<()> {
     // "running EnsureRequirements N times is the same as running it once",
     // which is the idempotency guarantee the merged rule provides.
     let rule = EnsureRequirements::new();
-    let first_plan = rule.optimize(orig_plan.clone(), &config)?;
+    let first_plan = rule.analyze(orig_plan.clone(), &config)?;
     let mut second_plan = orig_plan.clone();
     for _ in 0..3 {
-        second_plan = rule.optimize(second_plan, &config)?;
+        second_plan = rule.analyze(second_plan, &config)?;
     }
 
     assert_eq!(get_plan_string(&first_plan), get_plan_string(&second_plan));
@@ -3085,7 +3086,7 @@ async fn test_parallelize_sorts_remaps_index_through_reordering_projection() -> 
     // enforcement pass, including `parallelize_sorts`.
     let mut config = ConfigOptions::new();
     config.optimizer.repartition_sorts = true;
-    let optimized = EnsureRequirements::new().optimize(physical_plan, &config)?;
+    let optimized = EnsureRequirements::new().analyze(physical_plan, &config)?;
 
     // The optimized plan must be physically valid. Before the fix this fails:
     // the per-partition `SortExec` was relocated below the reordering projection
