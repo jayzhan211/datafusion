@@ -176,8 +176,8 @@ struct SessionStateInner {
     type_planner: Option<Arc<dyn TypePlanner>>,
     /// Responsible for optimizing a logical plan
     optimizer: Optimizer,
-    /// Responsible for enforcing invariants on a physical execution plan
-    /// (distribution, ordering) before optimization
+    /// Rules that make the plan executable before the physical optimizer runs,
+    /// ending with `EnsureRequirements`
     physical_analyzers: PhysicalAnalyzer,
     /// Responsible for optimizing a physical execution plan
     physical_optimizers: PhysicalOptimizer,
@@ -516,7 +516,8 @@ impl SessionState {
     }
 
     /// Add `physical_analyzer_rule` to the end of the list of
-    /// [`PhysicalAnalyzerRule`]s run before physical optimization.
+    /// [`PhysicalAnalyzerRule`]s run before physical optimization. The rule
+    /// runs after `EnsureRequirements`, so it must leave the plan valid.
     pub fn add_physical_analyzer_rule(
         &mut self,
         physical_analyzer_rule: Arc<dyn PhysicalAnalyzerRule + Send + Sync>,
@@ -1571,7 +1572,8 @@ impl SessionStateBuilder {
     }
 
     /// Add `physical_analyzer_rule` to the end of the list of
-    /// [`PhysicalAnalyzerRule`]s run before physical optimization.
+    /// [`PhysicalAnalyzerRule`]s run before physical optimization. The rule
+    /// runs after `EnsureRequirements`, so it must leave the plan valid.
     pub fn with_physical_analyzer_rule(
         mut self,
         physical_analyzer_rule: Arc<dyn PhysicalAnalyzerRule + Send + Sync>,

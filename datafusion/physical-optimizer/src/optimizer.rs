@@ -88,13 +88,23 @@ impl PhysicalOptimizerContext for ConfigOnlyContext<'_> {
 /// for projects that extend or reorder the default rule list and for
 /// contributors adding new built-in rules.
 ///
+/// The [`PhysicalAnalyzer`] phase runs before these rules and ends with
+/// [`EnsureRequirements`], so the first rule already receives a valid plan. A
+/// rule whose rewrite breaks a requirement can repair the plan with
+/// [`satisfy_requirements`].
+///
+/// [`PhysicalAnalyzer`]: crate::analyzer::PhysicalAnalyzer
+/// [`EnsureRequirements`]: crate::ensure_requirements::EnsureRequirements
+/// [`satisfy_requirements`]: crate::ensure_requirements::satisfy_requirements
+///
 /// ## Invariants
 ///
 /// The following properties hold for all rules (built-in and custom):
 ///
 /// 1. **Correctness.** The returned plan must a) be valid (it can be executed
-///    without internal errors) and b) produce the same results as the input
-///    plan. A rule may change the operators in the plan, such as changing
+///    without internal errors, and it meets every distribution and ordering
+///    requirement its operators declare, as [`SanityCheckPlan`] checks) and
+///    b) produce the same results as the input plan. A rule may change the operators in the plan, such as changing
 ///    which operator implements a join, but it may never change the query's
 ///    semantics.
 ///
@@ -104,13 +114,10 @@ impl PhysicalOptimizerContext for ConfigOnlyContext<'_> {
 ///
 /// ### Exceptions
 ///
-/// Some built-in rules do not yet fully satisfy the invariants above because
-/// they are responsible for making an initial plan *executable* rather than for
-/// optimizing an existing plan:
+/// Some built-in rules do not yet fully satisfy the invariants above:
 ///
-/// - [`EnsureRequirements`] inserts the repartitioning and sorting needed to
-///   satisfy the distribution and ordering requirements.
-/// - [`OutputRequirements`] records output requirements.
+/// - [`OutputRequirements`] in remove mode drops the markers that record the
+///   query's output requirements, so the rules after it no longer see them.
 /// - [`SanityCheckPlan`] rejects plans whose requirements are not satisfied.
 ///   It should run last.
 ///
@@ -158,6 +165,8 @@ impl PhysicalOptimizerContext for ConfigOnlyContext<'_> {
 ///
 /// If you do build a custom pipeline:
 ///
+/// - **End a custom analyzer list with [`EnsureRequirements`],** or repair the
+///   plan with [`satisfy_requirements`]. Debug builds check this.
 /// - **Reordering must still yield a valid plan.** Downstream projects are
 ///   encouraged to add tests that run their pipeline end to end and check
 ///   results, as DataFusion's own tests only cover the default order.

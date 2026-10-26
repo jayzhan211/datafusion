@@ -255,8 +255,7 @@ fn satisfy_distribution(
                 repartition(Arc::clone(&children[idx]), partitioning, preserve_order)?;
             changed = true;
         }
-        if !unmet_co_partitioned_children(&plan, &requirements, &children)?.is_empty()
-        {
+        if !unmet_co_partitioned_children(&plan, &requirements, &children)?.is_empty() {
             return internal_err!(
                 "{} has co-partitioning requirements that could not be satisfied",
                 plan.name()

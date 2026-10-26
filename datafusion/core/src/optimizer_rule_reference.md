@@ -40,25 +40,13 @@ Rule order matters. The default pipeline may change between releases.
   ExecutionPlan       every operator declares its required input distribution
         │             and ordering; nothing satisfies them yet
         │
-        │  PhysicalAnalyzer ... ends with enforcement, the plan is VALID
-        │    1. OutputRequirements (add)   establish the output boundary
-        │    2. aggregate_statistics
-        │    3. EliminateConstantJoin
-        │    4. join_selection             resolve each join's PartitionMode::Auto
-        │    5. LimitedDistinctAggregation
-        │    6. FilterPushdown             push predicates into sources
-        │    7. WindowTopN
-        │    8. EnsureRequirements         satisfy required_input_distribution
-        │                                  and required_input_ordering
+        │  PhysicalAnalyzer ... make the plan VALID   (rules that must run
+        │                       before EnsureRequirements, then EnsureRequirements)
         │
         │  ==> from here on every PhysicalOptimizerRule receives a valid plan
         │      and must leave a valid plan
         │
-        │  PhysicalOptimizer .. make the plan FASTER
-        │    CombinePartialFinalAggregate
-        │    ... (full list in the table below)
-        │    OutputRequirements (remove)
-        │    SanityCheckPlan
+        │  PhysicalOptimizer .. make the plan FASTER  (valid plan in, valid plan out)
         ▼
   valid, optimized ExecutionPlan
 ```
@@ -103,16 +91,12 @@ Rule order matters. The default pipeline may change between releases.
 
 ### Physical Analyzer Rules
 
-Analyzer rules run before the physical optimizer rules, as their own phase, and
-end with requirement enforcement, so every physical optimizer rule receives a
-valid plan. The default list is the prefix of the former single optimizer list
-up to and including `EnsureRequirements`, in the same order, so the split into
-two phases changes no plan. The rules ahead of `EnsureRequirements` run here
-because enforcement has to see their output: `join_selection` resolves each
-join's `PartitionMode::Auto`, which declares no requirement, and the others
-rewrite aggregates and windows that enforcement then repartitions and sorts.
-Some of them are optimizations; moving those into the optimizer phase is
-follow-up work.
+Physical analyzer rules make the plan executable, as the logical analyzer
+rules make a logical plan valid. They run as their own phase before the
+physical optimizer rules and end with `EnsureRequirements`, so every physical
+optimizer rule receives a valid plan. Some performance rules still have to run
+before `EnsureRequirements`, such as `WindowTopN` and the statistics-based
+choices in `join_selection`, so they run in this phase too.
 
 | order | rule                         | summary                                                                                                 |
 | ----- | ---------------------------- | ------------------------------------------------------------------------------------------------------- |
@@ -131,8 +115,9 @@ The same rule name may appear more than once when the default pipeline runs it
 in multiple phases.
 
 The rules up to and including `EnsureRequirements` run in the analyzer phase
-(see above), so they do not appear in this list. The matching
-`OutputRequirements` remove phase still runs here, late, once planning is done.
+(see above), so they do not appear in this list. `OutputRequirements` is in both
+lists: the analyzer adds its markers and the optimizer removes them (rule 4
+below).
 
 | order | rule                           | phase                   | summary                                                                                                      |
 | ----- | ------------------------------ | ----------------------- | ------------------------------------------------------------------------------------------------------------ |

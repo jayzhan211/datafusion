@@ -39,10 +39,10 @@ pub use datafusion_session::PhysicalAnalyzerRule;
 
 /// A rule-based physical analyzer.
 ///
-/// The analyzer phase runs before the
-/// [`PhysicalOptimizer`](crate::optimizer::PhysicalOptimizer) phase and ends
-/// with requirement enforcement, so every optimizer rule receives a valid plan.
-/// See [`PhysicalAnalyzerRule`] for details.
+/// The analyzer phase makes the plan executable and ends with
+/// `EnsureRequirements`, so every rule of the
+/// [`PhysicalOptimizer`](crate::optimizer::PhysicalOptimizer) phase receives a
+/// valid plan. See [`PhysicalAnalyzerRule`] for details.
 #[derive(Clone, Debug)]
 pub struct PhysicalAnalyzer {
     /// All rules to apply
@@ -58,14 +58,22 @@ impl Default for PhysicalAnalyzer {
 impl PhysicalAnalyzer {
     /// Create a new analyzer using the recommended list of rules
     pub fn new() -> Self {
-        // This is the prefix of the former single optimizer list, up to and
-        // including `EnsureRequirements`, in the same order, so the split into
-        // two phases changes no plan. The rules ahead of `EnsureRequirements`
-        // run here because enforcement has to see their output: `JoinSelection`
-        // resolves `PartitionMode::Auto`, which declares no requirement; the
-        // others rewrite aggregates and windows that enforcement then
-        // repartitions and sorts. Moving the ones that are optimizations into
-        // the optimizer phase is follow-up work.
+        // `EnsureRequirements`, after the rules that must run before it today.
+        // See `PhysicalAnalyzerRule`.
+        //
+        // Every built-in rule is still a `PhysicalOptimizerRule`, so each one
+        // runs through `RunInAnalyzer`, the correctness rules included:
+        // `OutputRequirements` (add) records the query's output requirement,
+        // `JoinSelection` resolves `PartitionMode::Auto`, and
+        // `EnsureRequirements` satisfies every requirement. The others are
+        // performance rules that must run before `EnsureRequirements`.
+        //
+        // <https://github.com/apache/datafusion/issues/26481> plans to move the
+        // correctness work out of these rules: the planner records the output
+        // requirement and creates joins in an executable mode, and the
+        // insert-only part of `EnsureRequirements` becomes a
+        // `PhysicalAnalyzerRule`. `RunInAnalyzer` then wraps only performance
+        // rules that must run before enforcement.
         let rules: Vec<Arc<dyn PhysicalAnalyzerRule + Send + Sync>> = vec![
             // If there is a output requirement of the query, make sure that
             // this information is not lost across different rules during optimization.
@@ -76,6 +84,7 @@ impl PhysicalAnalyzer {
             // Runs after AggregateStatistics, which can fold a scalar subquery into a
             // row of literals, and before EnsureRequirements, so that the filter
             // replacing a join against such a row keeps the other input's ordering.
+            // Also runs before FilterPushdown, which pushes that filter into the scan.
             Arc::new(RunInAnalyzer::new(Arc::new(EliminateConstantJoin::new()))),
             // Statistics-based join selection will change the Auto mode to a real join implementation,
             // like collect left, or hash join, or future sort merge join, which will influence the
@@ -92,7 +101,7 @@ impl PhysicalAnalyzer {
             // The FilterPushdown rule tries to push down filters as far as it can.
             // For example, it will push down filtering from a `FilterExec` to `DataSourceExec`.
             // Note that this does not push down dynamic filters (such as those created by a `SortExec` operator in TopK mode),
-            // those are handled by the later `FilterPushdown` rule.
+            // those are handled by `FilterPushdown(Post)` in the optimizer list.
             // See `FilterPushdownPhase` for more details.
             Arc::new(RunInAnalyzer::new(Arc::new(FilterPushdown::new()))),
             // WindowTopN: replaces Filter(rn<=K) → Window(ROW_NUMBER) with
@@ -134,8 +143,10 @@ impl PhysicalAnalyzer {
 
 /// Runs a [`PhysicalOptimizerRule`] as a [`PhysicalAnalyzerRule`].
 ///
-/// The default analyzer runs its built-in rules through this adapter. Use it
-/// the same way to put a built-in rule into a custom analyzer list.
+/// Use it for a performance rule that must run before `EnsureRequirements`,
+/// built-in or your own. Every built-in rule runs through it today, the
+/// correctness rules included, because none of them implements
+/// [`PhysicalAnalyzerRule`] yet; see [`PhysicalAnalyzer::new`].
 #[derive(Debug)]
 pub struct RunInAnalyzer {
     rule: Arc<dyn PhysicalOptimizerRule + Send + Sync>,
