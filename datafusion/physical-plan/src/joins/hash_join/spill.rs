@@ -238,7 +238,9 @@ async fn spill_join(
                     spilled.push((bucket, side));
                 }
             }
-            ctx.build.build(&mut vec![], &mut kept.buffers.new_empty())?
+            ctx.build
+                .build(&mut vec![], &mut kept.buffers.new_empty())
+                .map_err(|e| e.context("PoC: empty resident build"))?
         }
         Err(e) => return Err(e),
     };
@@ -677,7 +679,14 @@ fn join_pair(
                     if build.rows > 0
                         && level < MAX_LEVEL
                         && is_resources_exhausted(&e) => {}
-                Err(e) => return Err(e),
+                Err(e) => {
+                    return Err(e.context(format!(
+                        "PoC: joining a spilled pair at level {level}: {} build rows, {} bytes, capacity {}",
+                        build.rows,
+                        build.bytes,
+                        kept.capacity()
+                    )));
+                }
             }
         }
 
@@ -791,8 +800,14 @@ async fn resplit(
     Ok(sides)
 }
 
+/// A seed per level. Seeds that differ in a few low bits give nearly the same
+/// high hash bits, so a split would route every row as the level before did:
+/// mix the level in first (splitmix64).
 fn bucket_random_state(level: usize) -> RandomState {
-    RandomState::with_seed(BUCKET_SEED.wrapping_add(level as u64))
+    let mut z = BUCKET_SEED.wrapping_add((level as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15));
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    RandomState::with_seed(z ^ (z >> 31))
 }
 
 /// The bucket of every row of `batch` at `level`
