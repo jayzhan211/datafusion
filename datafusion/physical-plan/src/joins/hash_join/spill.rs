@@ -42,7 +42,7 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 
 use arrow::array::{BooleanArray, RecordBatch, UInt32Array};
-use arrow::compute::{filter_record_batch, take_record_batch};
+use arrow::compute::{concat_batches, filter_record_batch, take_record_batch};
 use arrow::datatypes::SchemaRef;
 use datafusion_common::hash_utils::{RandomState, create_hashes};
 use datafusion_common::utils::memory::get_record_batch_memory_size;
@@ -229,6 +229,7 @@ async fn spill_join(
         spill: ctx.probe_spill.clone(),
         level: 0,
         spilled: spilled_buckets,
+        batch_size: ctx.stream.batch_size,
         writers: (0..BUCKETS).map(|_| None).collect(),
         sides: empty_sides(),
         output: Arc::clone(&probe_files),
@@ -375,6 +376,64 @@ fn join_bytes(rows: usize, bytes: usize) -> usize {
         .saturating_add(rows.div_ceil(8))
 }
 
+/// Most bytes a bucket file buffers before writing
+const BUCKET_FILE_BUFFER_BYTES: usize = 1024 * 1024;
+
+/// One bucket's spill file. A split batch leaves each bucket only about
+/// 1/16 of its rows, so rows are buffered and written in batches of
+/// `batch_size` rows: fewer, larger writes, and full batches when joined.
+struct BucketFile {
+    file: InProgressSpillFile,
+    schema: SchemaRef,
+    buffered: Vec<RecordBatch>,
+    buffered_rows: usize,
+    buffered_bytes: usize,
+    batch_size: usize,
+}
+
+impl BucketFile {
+    fn try_new(spill: &SpillManager, batch_size: usize, request: &str) -> Result<Self> {
+        Ok(Self {
+            file: spill.create_in_progress_file(request)?,
+            schema: Arc::clone(spill.schema()),
+            buffered: vec![],
+            buffered_rows: 0,
+            buffered_bytes: 0,
+            batch_size,
+        })
+    }
+
+    fn append(&mut self, batch: &RecordBatch) -> Result<()> {
+        self.buffered_rows += batch.num_rows();
+        self.buffered_bytes += get_record_batch_memory_size(batch);
+        self.buffered.push(batch.clone());
+        if self.buffered_rows >= self.batch_size
+            || self.buffered_bytes >= BUCKET_FILE_BUFFER_BYTES
+        {
+            self.write_buffered()?;
+        }
+        Ok(())
+    }
+
+    fn write_buffered(&mut self) -> Result<()> {
+        let batch = match self.buffered.len() {
+            0 => return Ok(()),
+            1 => self.buffered.pop().expect("one batch"),
+            _ => concat_batches(&self.schema, &self.buffered)?,
+        };
+        self.buffered.clear();
+        self.buffered_rows = 0;
+        self.buffered_bytes = 0;
+        self.file.append_batch(&batch)?;
+        Ok(())
+    }
+
+    fn finish(mut self) -> Result<Option<Arc<dyn SpillFile>>> {
+        self.write_buffered()?;
+        self.file.finish()
+    }
+}
+
 /// One side of a spilled bucket
 #[derive(Default)]
 struct SpilledSide {
@@ -394,7 +453,7 @@ enum Bucket {
         bytes: usize,
     },
     Disk {
-        file: InProgressSpillFile,
+        file: BucketFile,
         rows: usize,
         bytes: usize,
     },
@@ -438,7 +497,7 @@ impl BucketedBuild {
             loop {
                 match &mut self.buckets[bucket] {
                     Bucket::Disk { file, rows, bytes } => {
-                        file.append_batch_async(&part).await?;
+                        file.append(&part)?;
                         *rows += part.num_rows();
                         *bytes += part_bytes;
                         break;
@@ -494,9 +553,13 @@ impl BucketedBuild {
         else {
             unreachable!("only buckets in memory are destaged")
         };
-        let mut file = ctx.build_spill.create_in_progress_file("HashJoin build bucket")?;
+        let mut file = BucketFile::try_new(
+            &ctx.build_spill,
+            ctx.stream.batch_size,
+            "HashJoin build bucket",
+        )?;
         for batch in &batches {
-            file.append_batch_async(batch).await?;
+            file.append(batch)?;
         }
         drop(batches);
         // Back to the kept pool, not to the execution pool
@@ -534,14 +597,10 @@ impl BucketedBuild {
         for (bucket, b) in self.buckets.into_iter().enumerate() {
             match b {
                 Bucket::Memory { batches, .. } => resident.extend(batches),
-                Bucket::Disk {
-                    mut file,
-                    rows,
-                    bytes,
-                } => spilled.push((
+                Bucket::Disk { file, rows, bytes } => spilled.push((
                     bucket,
                     SpilledSide {
-                        file: file.finish_async().await?,
+                        file: file.finish()?,
                         rows,
                         bytes,
                     },
@@ -576,9 +635,13 @@ fn join_pair(
         }
 
         let level = level + 1;
-        let builds = resplit(&ctx.build_spill, &ctx.build.on_left, build, level).await?;
+        let batch_size = ctx.stream.batch_size;
+        let builds =
+            resplit(&ctx.build_spill, batch_size, &ctx.build.on_left, build, level)
+                .await?;
         let probes =
-            resplit(&ctx.probe_spill, &ctx.stream.on_right, probe, level).await?;
+            resplit(&ctx.probe_spill, batch_size, &ctx.stream.on_right, probe, level)
+                .await?;
         let total_rows: usize = builds.iter().map(|b| b.rows).sum();
         let schema = Arc::clone(&ctx.stream.schema);
         let pairs = builds.into_iter().zip(probes).filter_map(move |(b, p)| {
@@ -632,12 +695,12 @@ async fn join_in_memory(
 /// Splits one spilled side into the buckets of the next level
 async fn resplit(
     spill: &SpillManager,
+    batch_size: usize,
     on: &[PhysicalExprRef],
     side: SpilledSide,
     level: usize,
 ) -> Result<Vec<SpilledSide>> {
-    let mut writers: Vec<Option<InProgressSpillFile>> =
-        (0..BUCKETS).map(|_| None).collect();
+    let mut writers: Vec<Option<BucketFile>> = (0..BUCKETS).map(|_| None).collect();
     let mut sides: Vec<SpilledSide> = (0..BUCKETS).map(|_| SpilledSide::default()).collect();
     if let Some(file) = side.file {
         let mut rows = spill.read_spill_as_stream(file, None)?;
@@ -645,17 +708,21 @@ async fn resplit(
             for (bucket, part) in split(&batch, on, level)? {
                 let writer = match &mut writers[bucket] {
                     Some(writer) => writer,
-                    slot => slot.insert(spill.create_in_progress_file("HashJoin bucket")?),
+                    slot => slot.insert(BucketFile::try_new(
+                        spill,
+                        batch_size,
+                        "HashJoin bucket",
+                    )?),
                 };
-                writer.append_batch_async(&part).await?;
+                writer.append(&part)?;
                 sides[bucket].rows += part.num_rows();
                 sides[bucket].bytes += get_record_batch_memory_size(&part);
             }
         }
     }
     for (side, writer) in sides.iter_mut().zip(writers) {
-        if let Some(mut writer) = writer {
-            side.file = writer.finish_async().await?;
+        if let Some(writer) = writer {
+            side.file = writer.finish()?;
         }
     }
     Ok(sides)
@@ -715,7 +782,8 @@ struct ProbeRouter {
     spill: SpillManager,
     level: usize,
     spilled: [bool; BUCKETS],
-    writers: Vec<Option<InProgressSpillFile>>,
+    batch_size: usize,
+    writers: Vec<Option<BucketFile>>,
     sides: Vec<Option<SpilledSide>>,
     /// The probe files, handed over once the input is exhausted
     output: Arc<Mutex<Vec<Option<SpilledSide>>>>,
@@ -744,11 +812,13 @@ impl ProbeRouter {
             let part = take_record_batch(&batch, &UInt32Array::from(rows))?;
             let writer = match &mut self.writers[bucket] {
                 Some(writer) => writer,
-                slot => slot.insert(
-                    self.spill.create_in_progress_file("HashJoin probe bucket")?,
-                ),
+                slot => slot.insert(BucketFile::try_new(
+                    &self.spill,
+                    self.batch_size,
+                    "HashJoin probe bucket",
+                )?),
             };
-            writer.append_batch(&part)?;
+            writer.append(&part)?;
             let side = self.sides[bucket].get_or_insert_with(SpilledSide::default);
             side.rows += part.num_rows();
             side.bytes += get_record_batch_memory_size(&part);
@@ -763,7 +833,7 @@ impl ProbeRouter {
     fn finish(&mut self) -> Result<()> {
         let mut output = self.output.lock();
         for bucket in 0..BUCKETS {
-            if let Some(mut writer) = self.writers[bucket].take() {
+            if let Some(writer) = self.writers[bucket].take() {
                 let mut side = self.sides[bucket].take().unwrap_or_default();
                 side.file = writer.finish()?;
                 output[bucket] = Some(side);
