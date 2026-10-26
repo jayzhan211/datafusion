@@ -3310,6 +3310,8 @@ impl DefaultPhysicalPlanner {
     /// The analyzer rules run first and in full; they end with requirement
     /// enforcement, so every optimizer rule receives a valid plan. See
     /// [`PhysicalAnalyzerRule`] for the analyzer's contract.
+    ///
+    /// [`PhysicalAnalyzerRule`]: datafusion_physical_optimizer::analyzer::PhysicalAnalyzerRule
     #[expect(clippy::needless_pass_by_value)]
     pub fn optimize_physical_plan<F>(
         &self,
