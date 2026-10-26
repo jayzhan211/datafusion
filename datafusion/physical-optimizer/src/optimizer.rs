@@ -23,7 +23,6 @@ use std::fmt::Debug;
 use std::sync::Arc;
 
 use crate::combine_partial_final_agg::CombinePartialFinalAggregate;
-use crate::ensure_coop::EnsureCooperative;
 use crate::filter_pushdown::DynamicFilterPushdown;
 use crate::limit_pushdown::LimitPushdown;
 use crate::output_requirements::OutputRequirements;
@@ -243,7 +242,6 @@ impl PhysicalOptimizer {
             Arc::new(ProjectionPushdown::new()),
             // PushdownSort: Detect sorts that can be pushed down to data sources.
             Arc::new(PushdownSort::new()),
-            Arc::new(EnsureCooperative::new()),
             // This FilterPushdown handles dynamic filters that may have references to the source ExecutionPlan.
             // Therefore, it should be run at the end of the optimization process since any changes to the plan may break the dynamic filter's references.
             // See `FilterPushdownPhase` for more details.

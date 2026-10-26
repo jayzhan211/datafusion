@@ -67,64 +67,71 @@ impl PhysicalOptimizerRule for EnsureCooperative {
         plan: Arc<dyn ExecutionPlan>,
         _config: &ConfigOptions,
     ) -> Result<Arc<dyn ExecutionPlan>> {
-        use std::cell::RefCell;
-
-        let ancestry_stack = RefCell::new(Vec::<(SchedulingType, EvaluationType)>::new());
-
-        plan.transform_down_up(
-            // Down phase: Push parent properties <SchedulingType, EvaluationType> into the stack
-            |plan| {
-                let props = plan.properties();
-                ancestry_stack
-                    .borrow_mut()
-                    .push((props.scheduling_type, props.evaluation_type));
-                Ok(Transformed::no(plan))
-            },
-            // Up phase: Wrap nodes with CooperativeExec if needed
-            |plan| {
-                ancestry_stack.borrow_mut().pop();
-
-                let props = plan.properties();
-                let is_cooperative = props.scheduling_type == SchedulingType::Cooperative;
-                let is_leaf = plan.children().is_empty();
-                let is_exchange = props.evaluation_type == EvaluationType::Eager;
-
-                let mut is_under_cooperative_context = false;
-                for (scheduling_type, evaluation_type) in
-                    ancestry_stack.borrow().iter().rev()
-                {
-                    // If nearest ancestor is cooperative, we are under a cooperative context
-                    if *scheduling_type == SchedulingType::Cooperative {
-                        is_under_cooperative_context = true;
-                        break;
-                    // If nearest ancestor is eager, the cooperative context will be reset
-                    } else if *evaluation_type == EvaluationType::Eager {
-                        is_under_cooperative_context = false;
-                        break;
-                    }
-                }
-
-                // Wrap if:
-                // 1. Node is a leaf or exchange point
-                // 2. Node is not already cooperative
-                // 3. Not under any Cooperative context
-                if (is_leaf || is_exchange)
-                    && !is_cooperative
-                    && !is_under_cooperative_context
-                {
-                    return Ok(Transformed::yes(Arc::new(CooperativeExec::new(plan))));
-                }
-
-                Ok(Transformed::no(plan))
-            },
-        )
-        .map(|t| t.data)
+        ensure_cooperative(plan)
     }
 
     fn schema_check(&self) -> bool {
         // Wrapping a leaf in YieldStreamExec preserves the schema, so it is safe.
         true
     }
+}
+
+/// Wraps leaves and eager evaluation roots that do not take part in
+/// cooperative scheduling in a [`CooperativeExec`]. See [`EnsureCooperative`].
+pub(crate) fn ensure_cooperative(
+    plan: Arc<dyn ExecutionPlan>,
+) -> Result<Arc<dyn ExecutionPlan>> {
+    use std::cell::RefCell;
+
+    let ancestry_stack = RefCell::new(Vec::<(SchedulingType, EvaluationType)>::new());
+
+    plan.transform_down_up(
+        // Down phase: Push parent properties <SchedulingType, EvaluationType> into the stack
+        |plan| {
+            let props = plan.properties();
+            ancestry_stack
+                .borrow_mut()
+                .push((props.scheduling_type, props.evaluation_type));
+            Ok(Transformed::no(plan))
+        },
+        // Up phase: Wrap nodes with CooperativeExec if needed
+        |plan| {
+            ancestry_stack.borrow_mut().pop();
+
+            let props = plan.properties();
+            let is_cooperative = props.scheduling_type == SchedulingType::Cooperative;
+            let is_leaf = plan.children().is_empty();
+            let is_exchange = props.evaluation_type == EvaluationType::Eager;
+
+            let mut is_under_cooperative_context = false;
+            for (scheduling_type, evaluation_type) in ancestry_stack.borrow().iter().rev()
+            {
+                // If nearest ancestor is cooperative, we are under a cooperative context
+                if *scheduling_type == SchedulingType::Cooperative {
+                    is_under_cooperative_context = true;
+                    break;
+                // If nearest ancestor is eager, the cooperative context will be reset
+                } else if *evaluation_type == EvaluationType::Eager {
+                    is_under_cooperative_context = false;
+                    break;
+                }
+            }
+
+            // Wrap if:
+            // 1. Node is a leaf or exchange point
+            // 2. Node is not already cooperative
+            // 3. Not under any Cooperative context
+            if (is_leaf || is_exchange)
+                && !is_cooperative
+                && !is_under_cooperative_context
+            {
+                return Ok(Transformed::yes(Arc::new(CooperativeExec::new(plan))));
+            }
+
+            Ok(Transformed::no(plan))
+        },
+    )
+    .map(|t| t.data)
 }
 
 #[cfg(test)]

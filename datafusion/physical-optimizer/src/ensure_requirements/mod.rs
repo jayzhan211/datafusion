@@ -276,10 +276,14 @@ impl PhysicalOptimizerRule for EnsureRequirements {
         let adjusted = pushdown_sorts(sort_pushdown)?;
 
         // 3d: Partial sort
-        adjusted
+        let plan = adjusted
             .plan
             .transform_up(|p| Ok(Transformed::yes(replace_with_partial_sort(p)?)))
-            .data()
+            .data()?;
+
+        // Phase 4: wrap operators that do not yield to the scheduler in a
+        // `CooperativeExec`, which used to be the `EnsureCooperative` rule.
+        crate::ensure_coop::ensure_cooperative(plan)
     }
 
     fn name(&self) -> &str {
