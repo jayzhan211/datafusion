@@ -71,7 +71,7 @@ const PG_COMPAT_FILE_PREFIX: &str = "pg_compat_";
 const TPCH_PREFIX: &str = "tpch";
 const SQLITE_PREFIX: &str = "sqlite";
 const ENCRYPTED_PARQUET_FILE: &str = "encrypted_parquet.slt";
-const ERRS_PER_FILE_LIMIT: usize = 10;
+const ERRS_PER_FILE_LIMIT: usize = 100000;
 const TIMING_DEBUG_SLOW_FILES_ENV: &str = "SLT_TIMING_DEBUG_SLOW_FILES";
 
 #[derive(Debug)]
