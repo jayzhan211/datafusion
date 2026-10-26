@@ -59,7 +59,8 @@ use datafusion_physical_expr::{
     aggregate::AggregateExprBuilder,
 };
 use datafusion_physical_optimizer::{
-    PhysicalOptimizerRule, filter_pushdown::FilterPushdown,
+    PhysicalOptimizerRule,
+    filter_pushdown::{DynamicFilterPushdown, FilterPushdown},
 };
 use datafusion_physical_plan::{
     ExecutionPlan,
@@ -930,7 +931,7 @@ async fn test_topk_filter_passes_through_coalesce_partitions() {
     // Test optimization - the filter SHOULD pass through CoalescePartitionsExec
     // if it properly implements from_children (not all_unsupported)
     insta::assert_snapshot!(
-        OptimizationTest::new(Arc::clone(&plan), FilterPushdown::new_post_optimization(), true),
+        OptimizationTest::new(Arc::clone(&plan), DynamicFilterPushdown::new(), true),
         @r"
     OptimizationTest:
       input:
@@ -993,7 +994,7 @@ async fn optimize_and_collect_pushdown_plan(
     plan: Arc<dyn ExecutionPlan>,
     config: ConfigOptions,
 ) -> (Arc<dyn ExecutionPlan>, Vec<RecordBatch>) {
-    let plan = FilterPushdown::new_post_optimization()
+    let plan = DynamicFilterPushdown::new()
         .optimize(plan, &config)
         .unwrap();
     let session_ctx =
@@ -1125,7 +1126,7 @@ async fn test_hashjoin_dynamic_filter_pushdown_partitioned() {
 
     // expect the predicate to be pushed down into the probe side DataSource
     insta::assert_snapshot!(
-        OptimizationTest::new(Arc::clone(&plan), FilterPushdown::new_post_optimization(), true),
+        OptimizationTest::new(Arc::clone(&plan), DynamicFilterPushdown::new(), true),
         @r"
     OptimizationTest:
       input:
@@ -1341,7 +1342,7 @@ async fn test_hashjoin_dynamic_filter_pushdown_range_partitioned() {
 
     // expect the predicate to be pushed down into the probe side DataSource
     insta::assert_snapshot!(
-        OptimizationTest::new(Arc::clone(&plan), FilterPushdown::new_post_optimization(), true),
+        OptimizationTest::new(Arc::clone(&plan), DynamicFilterPushdown::new(), true),
         @r"
     OptimizationTest:
       input:
@@ -1473,7 +1474,7 @@ async fn test_hashjoin_dynamic_filter_pushdown_collect_left() {
 
     // expect the predicate to be pushed down into the probe side DataSource
     insta::assert_snapshot!(
-        OptimizationTest::new(Arc::clone(&plan), FilterPushdown::new_post_optimization(), true),
+        OptimizationTest::new(Arc::clone(&plan), DynamicFilterPushdown::new(), true),
         @r"
     OptimizationTest:
       input:
@@ -2803,7 +2804,7 @@ async fn test_hashjoin_dynamic_filter_transferred_through_nested_join() {
     )) as Arc<dyn ExecutionPlan>;
 
     insta::assert_snapshot!(
-        OptimizationTest::new(Arc::clone(&plan), FilterPushdown::new_post_optimization(), true),
+        OptimizationTest::new(Arc::clone(&plan), DynamicFilterPushdown::new(), true),
         @r"
     OptimizationTest:
       input:
@@ -3149,7 +3150,7 @@ fn test_aggregate_dynamic_filter_not_created_for_single_mode() {
     config.execution.parquet.pushdown_filters = true;
     config.optimizer.enable_dynamic_filter_pushdown = true;
 
-    let optimized = FilterPushdown::new_post_optimization()
+    let optimized = DynamicFilterPushdown::new()
         .optimize(plan, &config)
         .unwrap();
 
@@ -3819,7 +3820,7 @@ async fn test_hashjoin_dynamic_filter_all_partitions_empty() {
     // Apply the filter pushdown optimizer
     let mut config = SessionConfig::new();
     config.options_mut().execution.parquet.pushdown_filters = true;
-    let optimizer = FilterPushdown::new_post_optimization();
+    let optimizer = DynamicFilterPushdown::new();
     let plan = optimizer.optimize(plan, config.options()).unwrap();
 
     insta::assert_snapshot!(
@@ -4136,7 +4137,7 @@ fn test_hashjoin_dynamic_filter_requires_probe_consumer() {
         let mut config = ConfigOptions::default();
         config.execution.parquet.pushdown_filters = true;
         config.optimizer.enable_dynamic_filter_pushdown = true;
-        let plan = FilterPushdown::new_post_optimization()
+        let plan = DynamicFilterPushdown::new()
             .optimize(plan, &config)
             .unwrap();
         let hash_join = plan
@@ -4229,7 +4230,7 @@ async fn test_nlj_dynamic_filter_pushdown_preserves_unmatched_rows() {
         let mut config = ConfigOptions::default();
         config.execution.parquet.pushdown_filters = true;
         config.optimizer.enable_join_dynamic_filter_pushdown = enabled;
-        let plan = FilterPushdown::new_post_optimization()
+        let plan = DynamicFilterPushdown::new()
             .optimize(plan, &config)
             .unwrap();
         assert_eq!(
@@ -4317,7 +4318,7 @@ async fn test_nlj_dynamic_filter_pushdown_from_hashjoin() {
             let mut config = ConfigOptions::default();
             config.execution.parquet.pushdown_filters = true;
             config.optimizer.enable_join_dynamic_filter_pushdown = enabled;
-            let plan = FilterPushdown::new_post_optimization()
+            let plan = DynamicFilterPushdown::new()
                 .optimize(plan, &config)
                 .unwrap();
             assert_eq!(
@@ -4392,7 +4393,7 @@ async fn test_hashjoin_dynamic_filter_survives_probe_subtree_replacement() {
     let mut config = ConfigOptions::default();
     config.execution.parquet.pushdown_filters = true;
     config.optimizer.enable_dynamic_filter_pushdown = true;
-    let plan = FilterPushdown::new_post_optimization()
+    let plan = DynamicFilterPushdown::new()
         .optimize(plan, &config)
         .unwrap();
 
@@ -4501,7 +4502,7 @@ fn test_hashjoin_dynamic_filter_recreated_when_pushdown_reruns() {
     config.optimizer.enable_dynamic_filter_pushdown = true;
 
     // Nothing in the probe side accepts the filter, so the join drops it.
-    let plan = FilterPushdown::new_post_optimization()
+    let plan = DynamicFilterPushdown::new()
         .optimize(plan, &config)
         .unwrap();
     assert_eq!(plan.dynamic_expressions_produced().len(), 0);
@@ -4518,7 +4519,7 @@ fn test_hashjoin_dynamic_filter_recreated_when_pushdown_reruns() {
             ReplaceChildrenOptions::new(ChildrenPropertiesMode::Recompute),
         )
         .unwrap();
-    let plan = FilterPushdown::new_post_optimization()
+    let plan = DynamicFilterPushdown::new()
         .optimize(plan, &config)
         .unwrap();
     assert_eq!(plan.dynamic_expressions_produced().len(), 1);
@@ -4702,7 +4703,7 @@ async fn test_discover_dynamic_filters_via_expressions_api() {
     let mut config = ConfigOptions::default();
     config.optimizer.enable_dynamic_filter_pushdown = true;
     config.execution.parquet.pushdown_filters = true;
-    let optimized_plan = FilterPushdown::new_post_optimization()
+    let optimized_plan = DynamicFilterPushdown::new()
         .optimize(plan, &config)
         .unwrap();
 
@@ -4777,7 +4778,7 @@ fn test_discover_dynamic_expression_producers() {
     let mut config = ConfigOptions::default();
     config.optimizer.enable_dynamic_filter_pushdown = true;
     config.execution.parquet.pushdown_filters = true;
-    let optimized_plan = FilterPushdown::new_post_optimization()
+    let optimized_plan = DynamicFilterPushdown::new()
         .optimize(plan, &config)
         .unwrap();
     assert_eq!(producer_count(&optimized_plan), 1);
@@ -5111,7 +5112,7 @@ fn test_filter_pushdown_through_sort_with_projection() {
     );
 }
 
-/// `FilterPushdown::new_post_optimization()` must be idempotent. When applied
+/// `DynamicFilterPushdown::new()` must be idempotent. When applied
 /// to a HashJoinExec, the rule installs a dynamic filter on the probe-side
 /// scan; before the fix in `HashJoinExec::gather_filters_for_pushdown`, every
 /// invocation created a *new* `DynamicFilterPhysicalExpr` and ANDed it onto
@@ -5124,7 +5125,7 @@ fn test_filter_pushdown_through_sort_with_projection() {
 fn post_phase_is_idempotent_on_hash_join() {
     use crate::physical_optimizer::test_utils::{hash_join_exec, parquet_exec, schema};
     use datafusion_physical_expr::expressions::Column;
-    use datafusion_physical_optimizer::filter_pushdown::FilterPushdown;
+    use datafusion_physical_optimizer::filter_pushdown::DynamicFilterPushdown;
     use datafusion_physical_plan::get_plan_string;
     use datafusion_physical_plan::joins::utils::JoinOn;
 
@@ -5138,7 +5139,7 @@ fn post_phase_is_idempotent_on_hash_join() {
     let plan = hash_join_exec(left, right, join_on, None, &JoinType::Inner).unwrap();
 
     let config = ConfigOptions::new();
-    let rule = FilterPushdown::new_post_optimization();
+    let rule = DynamicFilterPushdown::new();
     let once = rule.optimize(plan, &config).unwrap();
     let twice = rule.optimize(Arc::clone(&once), &config).unwrap();
 
