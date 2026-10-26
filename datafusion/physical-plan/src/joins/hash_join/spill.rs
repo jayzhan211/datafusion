@@ -37,21 +37,25 @@
 //! more at a point where it could no longer react by spilling.
 
 use std::pin::Pin;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::task::{Context, Poll};
 
-use arrow::array::{BooleanArray, RecordBatch, UInt32Array};
-use arrow::compute::{concat_batches, filter_record_batch, take_record_batch};
+use arrow::array::{BooleanArray, RecordBatch, RecordBatchOptions, UInt32Array};
+use arrow::compute::{
+    SortOptions, concat_batches, filter_record_batch, take_record_batch,
+};
 use arrow::datatypes::SchemaRef;
 use datafusion_common::hash_utils::{RandomState, create_hashes};
 use datafusion_common::utils::memory::get_record_batch_memory_size;
-use datafusion_common::{JoinType, NullEquality, Result};
-use datafusion_execution::SpillFile;
+use datafusion_common::{JoinType, NullEquality, Result, internal_datafusion_err};
 use datafusion_execution::memory_pool::{
     MemoryConsumer, MemoryPool, MemoryReservation, MergeMemoryPool,
 };
+use datafusion_execution::runtime_env::RuntimeEnvBuilder;
+use datafusion_execution::{SpillFile, TaskContext};
 use datafusion_physical_expr::PhysicalExprRef;
+use datafusion_physical_expr_common::sort_expr::{LexOrdering, PhysicalSortExpr};
 use datafusion_physical_expr_common::utils::evaluate_expressions_to_arrays;
 use futures::future::BoxFuture;
 use futures::{FutureExt, Stream, StreamExt, TryStreamExt, ready, stream};
@@ -66,7 +70,12 @@ use super::stream::{
     BuildSide, BuildSideInitialState, HashJoinStream, HashJoinStreamState,
 };
 use crate::joins::PartitionMode;
-use crate::joins::utils::{BuildProbeJoinMetrics, ColumnIndex, JoinFilter, OnceFut};
+use crate::joins::sort_merge_join::{SortMergeJoinInputs, sort_merge_join_stream};
+use crate::joins::utils::{
+    BuildProbeJoinMetrics, ColumnIndex, JoinFilter, OnceFut, build_join_schema,
+};
+use crate::metrics::ExecutionPlanMetricsSet;
+use crate::sorts::sort::ExternalSorter;
 use crate::spill::in_progress_spill_file::InProgressSpillFile;
 use crate::spill::spill_manager::SpillManager;
 use crate::stream::RecordBatchStreamAdapter;
@@ -136,6 +145,7 @@ pub(super) struct SpillContext {
     pub(super) build_spill: SpillManager,
     pub(super) probe_spill: SpillManager,
     pub(super) pool: Arc<dyn MemoryPool>,
+    pub(super) context: Arc<TaskContext>,
     pub(super) trigger: SpillTrigger,
     pub(super) fetch: Option<usize>,
     pub(super) right_side_ordered: bool,
@@ -328,10 +338,7 @@ impl SharedRouter {
 impl Stream for SharedRouter {
     type Item = Result<RecordBatch>;
 
-    fn poll_next(
-        self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-    ) -> Poll<Option<Self::Item>> {
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         self.0.lock().poll_next_unpin(cx)
     }
 }
@@ -358,7 +365,8 @@ impl KeptMemory {
         let partition = ctx.stream.partition;
         let pool = Arc::new(MergeMemoryPool::new(
             Arc::clone(&ctx.pool),
-            MemoryConsumer::new(format!("HashJoinSpill[{partition}]")).with_can_spill(true),
+            MemoryConsumer::new(format!("HashJoinSpill[{partition}]"))
+                .with_can_spill(true),
         ));
         let buffers = MemoryConsumer::new(format!("HashJoinSpillBuffers[{partition}]"))
             .register(&(Arc::clone(&pool) as Arc<dyn MemoryPool>));
@@ -679,6 +687,17 @@ fn join_pair(
                     if build.rows > 0
                         && level < MAX_LEVEL
                         && is_resources_exhausted(&e) => {}
+                // Splitting cannot shrink this pair any further
+                Err(e) if is_resources_exhausted(&e) => {
+                    return join_sort_merge(&ctx, &kept, &build, &probe)
+                        .await
+                        .map_err(|e| {
+                            e.context(format!(
+                                "PoC: sort-merge joining a pair at level {level}: {} build rows",
+                                build.rows
+                            ))
+                        });
+                }
                 Err(e) => {
                     return Err(e.context(format!(
                         "PoC: joining a spilled pair at level {level}: {} build rows, {} bytes, capacity {}",
@@ -752,7 +771,9 @@ async fn join_in_memory(
     }
     let left_data = ctx.build.build(&mut batches, &mut reservation)?;
     let probe_rows = match &probe.file {
-        Some(file) => ctx.probe_spill.read_spill_as_stream(Arc::clone(file), None)?,
+        Some(file) => ctx
+            .probe_spill
+            .read_spill_as_stream(Arc::clone(file), None)?,
         None => Box::pin(EmptyRecordBatchStream::new(Arc::clone(
             ctx.probe_spill.schema(),
         ))),
@@ -760,6 +781,147 @@ async fn join_in_memory(
     Ok(Box::pin(
         ctx.stream.stream(left_data, probe_rows, None, false, None),
     ))
+}
+
+/// Joins a pair that splitting cannot shrink (one hot key, or the depth cap)
+/// and that does not fit, as a sort-merge join: its sorts and its buffered key
+/// groups spill, so it finishes in whatever memory it gets. It draws on the
+/// kept memory first.
+async fn join_sort_merge(
+    ctx: &SpillContext,
+    kept: &KeptMemory,
+    build: &SpilledSide,
+    probe: &SpilledSide,
+) -> Result<SendableRecordBatchStream> {
+    let task = &ctx.context;
+    let runtime = RuntimeEnvBuilder::from_runtime_env(&task.runtime_env())
+        .with_memory_pool(Arc::clone(&kept.pool) as Arc<dyn MemoryPool>)
+        .build_arc()?;
+    let context = Arc::new(TaskContext::new(
+        task.task_id(),
+        task.session_id(),
+        task.session_config().clone(),
+        task.scalar_functions().clone(),
+        task.higher_order_functions().clone(),
+        task.aggregate_functions().clone(),
+        task.window_functions().clone(),
+        runtime,
+    ));
+    let partition = ctx.stream.partition;
+    let sort_options = vec![SortOptions::default(); ctx.build.on_left.len()];
+    let left = sort_side(
+        &context,
+        partition,
+        &ctx.build_spill,
+        build,
+        &ctx.build.on_left,
+        &sort_options,
+    )
+    .await?;
+    let right = sort_side(
+        &context,
+        partition,
+        &ctx.probe_spill,
+        probe,
+        &ctx.stream.on_right,
+        &sort_options,
+    )
+    .await?;
+    let (join_schema, columns) = build_join_schema(
+        ctx.build_spill.schema(),
+        ctx.probe_spill.schema(),
+        &ctx.stream.join_type,
+    );
+    let joined = sort_merge_join_stream(
+        SortMergeJoinInputs {
+            schema: Arc::new(join_schema),
+            sort_options,
+            null_equality: ctx.stream.null_equality,
+            left,
+            right,
+            on_left: ctx.build.on_left.clone(),
+            on_right: ctx.stream.on_right.clone(),
+            filter: ctx.stream.filter.clone(),
+            join_type: ctx.stream.join_type,
+            partition,
+        },
+        &ExecutionPlanMetricsSet::new(),
+        &context,
+    )?;
+    // The hash join's output columns, in its order
+    let projection = ctx
+        .stream
+        .column_indices
+        .iter()
+        .map(|column| {
+            columns.iter().position(|c| c == column).ok_or_else(|| {
+                internal_datafusion_err!(
+                    "join output column {column:?} not in the join schema"
+                )
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let schema = Arc::clone(&ctx.stream.schema);
+    let output = Arc::clone(&schema);
+    Ok(Box::pin(RecordBatchStreamAdapter::new(
+        schema,
+        joined.map(move |batch| {
+            let batch = batch?;
+            let columns = projection
+                .iter()
+                .map(|&i| Arc::clone(batch.column(i)))
+                .collect();
+            let options =
+                RecordBatchOptions::new().with_row_count(Some(batch.num_rows()));
+            Ok(RecordBatch::try_new_with_options(
+                Arc::clone(&output),
+                columns,
+                &options,
+            )?)
+        }),
+    )))
+}
+
+/// One spilled side, sorted on the join keys by an external sort
+async fn sort_side(
+    context: &Arc<TaskContext>,
+    partition: usize,
+    spill: &SpillManager,
+    side: &SpilledSide,
+    on: &[PhysicalExprRef],
+    options: &[SortOptions],
+) -> Result<SendableRecordBatchStream> {
+    let schema = Arc::clone(spill.schema());
+    let Some(file) = &side.file else {
+        return Ok(Box::pin(EmptyRecordBatchStream::new(schema)));
+    };
+    let ordering = LexOrdering::new(
+        on.iter()
+            .zip(options)
+            .map(|(expr, options)| PhysicalSortExpr::new(Arc::clone(expr), *options)),
+    )
+    .ok_or_else(|| internal_datafusion_err!("join without keys"))?;
+    let config = context.session_config();
+    let execution = &config.options().execution;
+    let mut sorter = ExternalSorter::new(
+        partition,
+        Arc::clone(&schema),
+        ordering,
+        config.batch_size(),
+        execution.sort_spill_reservation_bytes,
+        execution.sort_in_place_threshold_bytes,
+        config.spill_compression(),
+        &ExecutionPlanMetricsSet::new(),
+        context.runtime_env(),
+    )?;
+    let mut rows = spill.read_spill_as_stream(Arc::clone(file), None)?;
+    while let Some(batch) = rows.try_next().await? {
+        if let Err(e) = sorter.insert_batch(batch).await {
+            sorter.abort_in_progress_spill().await;
+            return Err(e);
+        }
+    }
+    sorter.sort().await
 }
 
 /// Splits one spilled side into the buckets of the next level
@@ -772,7 +934,8 @@ async fn resplit(
     level: usize,
 ) -> Result<Vec<SpilledSide>> {
     let mut writers: Vec<Option<BucketFile>> = (0..BUCKETS).map(|_| None).collect();
-    let mut sides: Vec<SpilledSide> = (0..BUCKETS).map(|_| SpilledSide::default()).collect();
+    let mut sides: Vec<SpilledSide> =
+        (0..BUCKETS).map(|_| SpilledSide::default()).collect();
     if let Some(file) = side.file {
         let mut rows = spill.read_spill_as_stream(file, None)?;
         while let Some(batch) = rows.try_next().await? {
@@ -804,7 +967,8 @@ async fn resplit(
 /// high hash bits, so a split would route every row as the level before did:
 /// mix the level in first (splitmix64).
 fn bucket_random_state(level: usize) -> RandomState {
-    let mut z = BUCKET_SEED.wrapping_add((level as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15));
+    let mut z =
+        BUCKET_SEED.wrapping_add((level as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15));
     z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
     z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
     RandomState::with_seed(z ^ (z >> 31))
@@ -904,7 +1068,8 @@ impl ProbeRouter {
             side.rows += part.num_rows();
             side.bytes += get_record_batch_memory_size(&part);
         }
-        let resident: BooleanArray = ids.iter().map(|b| Some(!self.spilled[*b])).collect();
+        let resident: BooleanArray =
+            ids.iter().map(|b| Some(!self.spilled[*b])).collect();
         if resident.true_count() == 0 {
             return Ok(None);
         }
@@ -927,10 +1092,7 @@ impl ProbeRouter {
 impl Stream for ProbeRouter {
     type Item = Result<RecordBatch>;
 
-    fn poll_next(
-        self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-    ) -> Poll<Option<Self::Item>> {
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let this = self.get_mut();
         loop {
             if this.finished {

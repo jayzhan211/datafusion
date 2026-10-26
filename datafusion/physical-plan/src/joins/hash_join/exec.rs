@@ -1248,7 +1248,10 @@ impl HashJoinExec {
             && self.cache.output_ordering().is_none()
             && context.runtime_env().disk_manager.tmp_files_enabled()
             && (cap.is_some()
-                || !matches!(context.memory_pool().memory_limit(), MemoryLimit::Infinite));
+                || !matches!(
+                    context.memory_pool().memory_limit(),
+                    MemoryLimit::Infinite
+                ));
         eligible.then_some(SpillTrigger { cap })
     }
 
@@ -1309,6 +1312,7 @@ impl HashJoinExec {
             probe_spill: SpillManager::new(env, spill_metrics, self.right.schema())
                 .with_compression_type(compression),
             pool: Arc::clone(context.memory_pool()),
+            context: Arc::clone(&context),
             trigger,
             fetch: self.fetch,
             right_side_ordered: self.right.output_ordering().is_some(),
