@@ -32,7 +32,7 @@ use datafusion_physical_plan::ExecutionPlan;
 use datafusion_physical_plan::coop::CooperativeExec;
 use datafusion_physical_plan::execution_plan::{EvaluationType, SchedulingType};
 
-/// `EnsureCooperative` is a [`PhysicalOptimizerRule`] that inspects the physical plan for
+/// `EnsureCooperative` is a [`PhysicalAnalyzerRule`] that inspects the physical plan for
 /// sub plans that do not participate in cooperative scheduling. The plan is subdivided into sub
 /// plans on eager evaluation boundaries. Leaf nodes and eager evaluation roots are checked
 /// to see if they participate in cooperative scheduling. Those that do no are wrapped in

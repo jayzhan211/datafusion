@@ -94,6 +94,7 @@ impl PhysicalOptimizerContext for ConfigOnlyContext<'_> {
 /// [`PhysicalAnalyzer`]: crate::analyzer::PhysicalAnalyzer
 /// [`EnsureRequirements`]: crate::ensure_requirements::EnsureRequirements
 /// [`satisfy_requirements`]: crate::ensure_requirements::satisfy_requirements
+/// [`SanityCheckPlan`]: crate::sanity_checker::SanityCheckPlan
 ///
 /// ## Invariants
 ///
@@ -116,11 +117,9 @@ impl PhysicalOptimizerContext for ConfigOnlyContext<'_> {
 ///
 /// - [`RemoveOutputRequirements`] drops the markers that record the
 ///   query's output requirements, so the rules after it no longer see them.
-/// - [`SanityCheckPlan`] rejects plans whose requirements are not satisfied.
-///   It should run last.
 ///
-/// Custom pipelines must keep these rules in a compatible relative order. We
-/// are working to remove these exceptions, so that all rules can be reordered
+/// Custom pipelines must keep this rule in a compatible relative order. We
+/// are working to remove this exception, so that all rules can be reordered
 /// freely.
 ///
 /// ## Optimization Coverage Is Not Guaranteed
