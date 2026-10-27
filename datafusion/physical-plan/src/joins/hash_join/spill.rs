@@ -683,7 +683,12 @@ fn join_pair(
     async move {
         let fits = join_bytes(build.rows, build.bytes) <= kept.capacity();
         if build.rows == 0 || fits || level >= MAX_LEVEL {
-            match join_in_memory(&ctx, &kept, &build, &probe).await {
+            let forced = if level >= MAX_LEVEL { forced_rung() } else { None };
+            let joined = match forced {
+                Some(_) => resources_err!("PoC: DF_HJ_RUNG skips the in-memory join"),
+                None => join_in_memory(&ctx, &kept, &build, &probe).await,
+            };
+            match joined {
                 Ok(stream) => return Ok(stream),
                 // The estimate fell short: split further rather than fail
                 Err(e)
@@ -693,7 +698,11 @@ fn join_pair(
                 // Splitting cannot shrink this pair any further: hash its
                 // probe rows instead if they fit, else sort-merge it
                 Err(e) if is_resources_exhausted(&e) => {
-                    if join_bytes(probe.rows, probe.bytes) <= kept.capacity() {
+                    let reversed = match forced.as_deref() {
+                        Some(rung) => rung == "reversed",
+                        None => join_bytes(probe.rows, probe.bytes) <= kept.capacity(),
+                    };
+                    if reversed {
                         rung_log("reversed", level, &build, &probe);
                         match join_reversed(&ctx, &kept, &build, &probe).await {
                             Ok(stream) => return Ok(stream),
@@ -834,7 +843,7 @@ async fn hash_side(
             // Within the kept memory unless the pair cannot be split further,
             // which then needs the pool to grant the rest
             let size = get_record_batch_memory_size(&batch);
-            if kept.trigger.refuses(reservation.size(), size) {
+            if forced_rung().is_none() && kept.trigger.refuses(reservation.size(), size) {
                 return resources_err!("PoC: test knob refused reloading a spilled side");
             }
             reservation.try_grow(size)?;
@@ -957,6 +966,12 @@ async fn join_sort_merge(
 }
 
 /// PoC: DF_HJ_RUNG_LOG=1 prints which rung joins an unsplittable pair
+/// PoC test knob (`DF_HJ_RUNG=reversed|sort-merge`): the rung every pair at the
+/// depth cap takes, so the fuzz covers each rung for every join type
+fn forced_rung() -> Option<String> {
+    std::env::var("DF_HJ_RUNG").ok()
+}
+
 fn rung_log(rung: &str, level: usize, build: &SpilledSide, probe: &SpilledSide) {
     if std::env::var_os("DF_HJ_RUNG_LOG").is_some() {
         eprintln!(
