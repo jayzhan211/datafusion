@@ -26,6 +26,7 @@ use datafusion_physical_plan::ExecutionPlan;
 use crate::PhysicalOptimizerRule;
 use crate::aggregate_statistics::AggregateStatistics;
 use crate::eliminate_constant_join::EliminateConstantJoin;
+use crate::ensure_coop::EnsureCooperative;
 use crate::ensure_requirements::EnsureRequirements;
 use crate::filter_pushdown::FilterPushdown;
 use crate::join_selection::JoinSelection;
@@ -131,6 +132,10 @@ impl PhysicalAnalyzer {
             // breakdown, and <https://github.com/apache/datafusion/issues/21973>
             // for the original failure mode.
             Arc::new(RunInAnalyzer::new(Arc::new(EnsureRequirements::new()))),
+            // Wraps operators that do not yield to the scheduler in a
+            // `CooperativeExec`. It keeps the plan valid, so it can run after
+            // `EnsureRequirements`.
+            Arc::new(RunInAnalyzer::new(Arc::new(EnsureCooperative::new()))),
         ];
         Self::with_rules(rules)
     }
