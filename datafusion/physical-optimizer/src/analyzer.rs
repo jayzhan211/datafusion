@@ -212,6 +212,7 @@ mod tests {
                 "FilterPushdown",
                 "WindowTopN",
                 "EnsureRequirements",
+                "EnsureCooperative",
             ]
         );
     }

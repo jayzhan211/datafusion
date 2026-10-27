@@ -4003,6 +4003,7 @@ mod tests {
                 "FilterPushdown",
                 "WindowTopN",
                 "EnsureRequirements",
+                "EnsureCooperative",
             ],
             "unexpected analyzer phase: {analyzer_names:?}"
         );
@@ -4021,6 +4022,9 @@ mod tests {
             "FilterPushdown",
             "WindowTopN",
             "EnsureRequirements",
+            "EnsureCooperative",
+            // Now the planner's final check.
+            "SanityCheckPlan",
         ] {
             assert!(
                 !optimizer_names.contains(&moved),

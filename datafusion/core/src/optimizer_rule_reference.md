@@ -108,13 +108,14 @@ choices in `join_selection`, so they run in this phase too.
 | 6     | `FilterPushdown`             | Pushes supported physical filters into sources, so enforcement sees final statistics.                   |
 | 7     | `WindowTopN`                 | Replaces eligible row-number window and filter patterns with per-partition TopK execution.              |
 | 8     | `EnsureRequirements`         | Enforces the distribution and ordering requirements each operator declares.                             |
+| 9     | `EnsureCooperative`          | Wraps non-cooperative plan parts so long-running tasks yield fairly.                                    |
 
 ### Physical Optimizer Rules
 
 The same rule name may appear more than once when the default pipeline runs it
 in multiple phases.
 
-The rules up to and including `EnsureRequirements` run in the analyzer phase
+The rules up to and including `EnsureCooperative` run in the analyzer phase
 (see above), so they do not appear in this list. `OutputRequirements` is in both
 lists: the analyzer adds its markers and the optimizer removes them (rule 4
 below).
@@ -132,6 +133,9 @@ below).
 | 9     | `TopKRepartition`              | -                       | Pushes TopK below hash repartition when the partition key is a prefix of the sort key.                       |
 | 10    | `ProjectionPushdown`           | late pass               | Runs projection pushdown again after limit and TopK rewrites expose new pruning opportunities.               |
 | 11    | `PushdownSort`                 | -                       | Pushes sort requirements into data sources that can already return sorted output.                            |
-| 12    | `EnsureCooperative`            | -                       | Wraps non-cooperative plan parts so long-running tasks yield fairly.                                         |
-| 13    | `FilterPushdown(Post)`         | post-optimization phase | Pushes dynamic filters at the end of optimization, after plan references stop moving.                        |
-| 14    | `SanityCheckPlan`              | -                       | Validates that the final physical plan meets ordering, distribution, and infinite-input safety requirements. |
+| 12    | `FilterPushdown(Post)`         | post-optimization phase | Pushes dynamic filters at the end of optimization, after plan references stop moving.                        |
+
+After the optimizer rules, the planner checks the final plan with
+`SanityCheckPlan`: every ordering and distribution requirement is met and no
+pipeline-breaking operator reads an infinite input. A session with no physical
+analyzer rules is not checked.
