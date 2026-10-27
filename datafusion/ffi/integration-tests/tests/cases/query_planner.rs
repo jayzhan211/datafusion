@@ -40,6 +40,7 @@ mod tests {
     };
     use datafusion_ffi::util::FFI_Option;
     use datafusion_physical_plan::ExecutionPlan;
+    use datafusion_physical_plan::coop::CooperativeExec;
     use datafusion_physical_plan::empty::EmptyExec;
     use datafusion_physical_plan::sorts::sort::SortExec;
     use datafusion_physical_plan::union::UnionExec;
@@ -336,8 +337,13 @@ mod tests {
             let sort = child
                 .downcast_ref::<SortExec>()
                 .expect("library A could not downcast the SortExec it planned");
-            assert!(sort.input().is::<EmptyExec>());
-            assert!(!sort.input().is::<ForeignExecutionPlan>());
+            // The analyzer wraps the scan in a `CooperativeExec`.
+            let input = sort
+                .input()
+                .downcast_ref::<CooperativeExec>()
+                .map_or(sort.input(), |cooperative| cooperative.input());
+            assert!(input.is::<EmptyExec>());
+            assert!(!input.is::<ForeignExecutionPlan>());
         }
 
         Ok(())

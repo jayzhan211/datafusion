@@ -24,6 +24,7 @@ use datafusion_catalog::default_table_source::source_as_provider;
 use datafusion_common::{DataFusionError, Result, exec_err};
 use datafusion_expr::LogicalPlan;
 use datafusion_physical_plan::ExecutionPlan;
+use datafusion_physical_plan::coop::CooperativeExec;
 use datafusion_physical_plan::empty::EmptyExec;
 use datafusion_physical_plan::sorts::sort::SortExec;
 use datafusion_physical_plan::union::UnionExec;
@@ -156,7 +157,12 @@ impl QueryPlanner for SwappedQueryPlanner {
         };
         // Library B's scan is still foreign to library C. Only a codec boundary
         // reconstructs it, and library A's codec hands back an A-local node.
-        if !sort.input().is::<ForeignExecutionPlan>() {
+        // The analyzer wraps the scan in a `CooperativeExec`.
+        let scan = match sort.input().downcast_ref::<CooperativeExec>() {
+            Some(cooperative) => cooperative.input(),
+            None => sort.input(),
+        };
+        if !scan.is::<ForeignExecutionPlan>() {
             return exec_err!("library B's scan unexpectedly downcast as C-local");
         }
 
