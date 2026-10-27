@@ -39,7 +39,7 @@ use datafusion_physical_expr::expressions::{
 };
 use datafusion_physical_expr_common::physical_expr::PhysicalExpr;
 use datafusion_physical_expr_common::sort_expr::{LexOrdering, PhysicalSortExpr};
-use datafusion_physical_optimizer::PhysicalAnalyzerRule;
+use datafusion_physical_optimizer::PhysicalOptimizerRule;
 use datafusion_physical_optimizer::ensure_coop::EnsureCooperative;
 use datafusion_physical_plan::coop::make_cooperative;
 use datafusion_physical_plan::filter::FilterExec;
@@ -827,7 +827,7 @@ async fn query_yields(
 ) -> Result<(), Box<dyn Error>> {
     // Run plan through EnsureCooperative
     let optimized =
-        EnsureCooperative::new().analyze(plan, task_ctx.session_config().options())?;
+        EnsureCooperative::new().optimize(plan, task_ctx.session_config().options())?;
 
     // Get the stream
     let stream = physical_plan::execute_stream(optimized, task_ctx)?;

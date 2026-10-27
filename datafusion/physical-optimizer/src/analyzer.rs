@@ -21,7 +21,6 @@ use std::sync::Arc;
 
 use crate::aggregate_statistics::AggregateStatistics;
 use crate::eliminate_constant_join::EliminateConstantJoin;
-use crate::ensure_coop::EnsureCooperative;
 use crate::ensure_requirements::EnsureRequirements;
 use crate::filter_pushdown::FilterPushdown;
 use crate::join_selection::JoinSelection;
@@ -55,7 +54,7 @@ impl PhysicalAnalyzer {
     pub fn new() -> Self {
         // `AddOutputRequirements` and `EnsureRequirements` make the plan
         // executable. The others are performance rules that must run before
-        // `EnsureRequirements`, and `EnsureCooperative` keeps the plan valid.
+        // `EnsureRequirements`.
         let rules: Vec<Arc<dyn PhysicalAnalyzerRule + Send + Sync>> = vec![
             // If there is a output requirement of the query, make sure that
             // this information is not lost across different rules during optimization.
@@ -109,10 +108,6 @@ impl PhysicalAnalyzer {
             // breakdown, and <https://github.com/apache/datafusion/issues/21973>
             // for the original failure mode.
             Arc::new(EnsureRequirements::new()),
-            // Wraps operators that do not yield to the scheduler in a
-            // `CooperativeExec`. It keeps the plan valid, so it can run after
-            // `EnsureRequirements`.
-            Arc::new(EnsureCooperative::new()),
         ];
         Self::with_rules(rules)
     }
@@ -144,7 +139,6 @@ mod tests {
                 "FilterPushdown",
                 "WindowTopN",
                 "EnsureRequirements",
-                "EnsureCooperative",
             ]
         );
     }

@@ -110,7 +110,6 @@ one list only.
 | 6     | `FilterPushdown`             | Pushes supported physical filters into sources, so enforcement sees final statistics.                   |
 | 7     | `WindowTopN`                 | Replaces eligible row-number window and filter patterns with per-partition TopK execution.              |
 | 8     | `EnsureRequirements`         | Enforces the distribution and ordering requirements each operator declares.                             |
-| 9     | `EnsureCooperative`          | Wraps non-cooperative plan parts so long-running tasks yield fairly.                                    |
 
 ### Physical Optimizer Rules
 
@@ -129,7 +128,8 @@ one list only.
 | 9     | `TopKRepartition`              | -                       | Pushes TopK below hash repartition when the partition key is a prefix of the sort key.                       |
 | 10    | `ProjectionPushdown`           | late pass               | Runs projection pushdown again after limit and TopK rewrites expose new pruning opportunities.               |
 | 11    | `PushdownSort`                 | -                       | Pushes sort requirements into data sources that can already return sorted output.                            |
-| 12    | `DynamicFilterPushdown`        | -                       | Pushes dynamic filters at the end of optimization, after plan references stop moving.                        |
+| 12    | `EnsureCooperative`            | -                       | Wraps non-cooperative plan parts so long-running tasks yield fairly.                                         |
+| 13    | `DynamicFilterPushdown`        | -                       | Pushes dynamic filters at the end of optimization, after plan references stop moving.                        |
 
 After the optimizer rules, the planner checks the final plan with
 `SanityCheckPlan`: every ordering and distribution requirement is met and no

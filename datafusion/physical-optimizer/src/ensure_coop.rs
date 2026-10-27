@@ -23,7 +23,7 @@
 use std::fmt::{Debug, Formatter};
 use std::sync::Arc;
 
-use crate::analyzer::PhysicalAnalyzerRule;
+use crate::PhysicalOptimizerRule;
 
 use datafusion_common::Result;
 use datafusion_common::config::ConfigOptions;
@@ -32,7 +32,7 @@ use datafusion_physical_plan::ExecutionPlan;
 use datafusion_physical_plan::coop::CooperativeExec;
 use datafusion_physical_plan::execution_plan::{EvaluationType, SchedulingType};
 
-/// `EnsureCooperative` is a [`PhysicalAnalyzerRule`] that inspects the physical plan for
+/// `EnsureCooperative` is a [`PhysicalOptimizerRule`] that inspects the physical plan for
 /// sub plans that do not participate in cooperative scheduling. The plan is subdivided into sub
 /// plans on eager evaluation boundaries. Leaf nodes and eager evaluation roots are checked
 /// to see if they participate in cooperative scheduling. Those that do no are wrapped in
@@ -57,12 +57,12 @@ impl Debug for EnsureCooperative {
     }
 }
 
-impl PhysicalAnalyzerRule for EnsureCooperative {
+impl PhysicalOptimizerRule for EnsureCooperative {
     fn name(&self) -> &str {
         "EnsureCooperative"
     }
 
-    fn analyze(
+    fn optimize(
         &self,
         plan: Arc<dyn ExecutionPlan>,
         _config: &ConfigOptions,
@@ -141,7 +141,7 @@ mod tests {
         let test_custom_exec = scan_partitioned(1);
         let config = ConfigOptions::new();
         let optimized = EnsureCooperative::new()
-            .analyze(test_custom_exec, &config)
+            .optimize(test_custom_exec, &config)
             .unwrap();
 
         let display = displayable(optimized.as_ref()).indent(true).to_string();
@@ -169,7 +169,7 @@ mod tests {
         let mut stable_result = String::new();
 
         for run in 1..=5 {
-            current = rule.analyze(current, &config).unwrap();
+            current = rule.optimize(current, &config).unwrap();
             let display = displayable(current.as_ref()).indent(true).to_string();
 
             if run == 1 {
@@ -190,7 +190,7 @@ mod tests {
 
         // Test 2: Start with already-wrapped plan, verify no double wrapping
         let pre_wrapped = Arc::new(CooperativeExec::new(scan_partitioned(1)));
-        let result = rule.analyze(pre_wrapped, &config).unwrap();
+        let result = rule.optimize(pre_wrapped, &config).unwrap();
         let display = displayable(result.as_ref()).indent(true).to_string();
 
         assert_eq!(
@@ -217,7 +217,7 @@ mod tests {
         // Case 1: Filter -> Scan (middle node should not be wrapped)
         let scan = scan_partitioned(1);
         let filter = Arc::new(FilterExec::try_new(lit(true), scan).unwrap());
-        let optimized = rule.analyze(filter, &config).unwrap();
+        let optimized = rule.optimize(filter, &config).unwrap();
         let display = displayable(optimized.as_ref()).indent(true).to_string();
 
         assert_eq!(display.matches("CooperativeExec").count(), 1);
@@ -227,7 +227,7 @@ mod tests {
         let scan2 = scan_partitioned(1);
         let wrapped_scan = Arc::new(CooperativeExec::new(scan2));
         let filter2 = Arc::new(FilterExec::try_new(lit(true), wrapped_scan).unwrap());
-        let optimized2 = rule.analyze(filter2, &config).unwrap();
+        let optimized2 = rule.optimize(filter2, &config).unwrap();
         let display2 = displayable(optimized2.as_ref()).indent(true).to_string();
 
         assert_eq!(display2.matches("CooperativeExec").count(), 1);
@@ -244,7 +244,7 @@ mod tests {
 
         let config = ConfigOptions::new();
         let optimized = EnsureCooperative::new()
-            .analyze(union as Arc<dyn ExecutionPlan>, &config)
+            .optimize(union as Arc<dyn ExecutionPlan>, &config)
             .unwrap();
 
         let display = displayable(optimized.as_ref()).indent(true).to_string();
@@ -398,7 +398,7 @@ mod tests {
         ));
 
         let config = ConfigOptions::new();
-        let optimized = EnsureCooperative::new().analyze(filter2, &config).unwrap();
+        let optimized = EnsureCooperative::new().optimize(filter2, &config).unwrap();
 
         let display = displayable(optimized.as_ref()).indent(true).to_string();
 

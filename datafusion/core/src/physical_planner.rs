@@ -3967,7 +3967,6 @@ mod tests {
                 "FilterPushdown",
                 "WindowTopN",
                 "EnsureRequirements",
-                "EnsureCooperative",
             ],
         );
 
@@ -3990,6 +3989,7 @@ mod tests {
                 "TopKRepartition",
                 "ProjectionPushdown",
                 "PushdownSort",
+                "EnsureCooperative",
                 "DynamicFilterPushdown",
             ],
         );
