@@ -108,7 +108,7 @@ use datafusion_physical_expr::{
 #[cfg(debug_assertions)]
 use datafusion_physical_optimizer::ensure_requirements::satisfy_requirements;
 use datafusion_physical_optimizer::output_requirements::{
-    OutputRequirementExec, OutputRequirements,
+    OutputRequirementExec, RemoveOutputRequirements,
 };
 use datafusion_physical_optimizer::sanity_checker::SanityCheckPlan;
 use datafusion_physical_plan::empty::EmptyExec;
@@ -3110,7 +3110,7 @@ impl DefaultPhysicalPlanner {
                 let optimized_plan = self.optimize_physical_plan(
                     physical_plan,
                     session_state,
-                    |_plan, _optimizer| {},
+                    |_plan, _rule_name| {},
                 )?;
 
                 stringified_plans.push(StringifiedPlan::new(
@@ -3202,8 +3202,8 @@ impl DefaultPhysicalPlanner {
                     let optimized_plan = self.optimize_physical_plan(
                         input,
                         session_state,
-                        |plan, rule| {
-                            let optimizer_name = rule.name().to_string();
+                        |plan, rule_name| {
+                            let optimizer_name = rule_name.to_string();
                             let plan_type = OptimizedPhysicalPlan { optimizer_name };
                             stringified_plans.push(StringifiedPlan::new(
                                 plan_type,
@@ -3308,13 +3308,12 @@ impl DefaultPhysicalPlanner {
     }
 
     /// Run the two physical planning phases over `plan`, calling
-    /// `observer(plan, rule)` after each rule.
+    /// `observer(plan, rule_name)` after each rule.
     ///
     /// The analyzer phase runs first and in full; it ends with requirement
     /// enforcement, so every [`PhysicalOptimizerRule`] in the optimizer phase
     /// receives a valid plan. See [`PhysicalAnalyzerRule`] for the phase
-    /// diagram. The observer sees each analyzer rule as a
-    /// [`PhysicalOptimizerRule`] with the same name.
+    /// diagram.
     ///
     /// [`PhysicalOptimizerRule`]: datafusion_physical_optimizer::PhysicalOptimizerRule
     /// [`PhysicalAnalyzerRule`]: datafusion_physical_optimizer::analyzer::PhysicalAnalyzerRule
@@ -3326,7 +3325,7 @@ impl DefaultPhysicalPlanner {
         mut observer: F,
     ) -> Result<Arc<dyn ExecutionPlan>>
     where
-        F: FnMut(&dyn ExecutionPlan, &dyn PhysicalOptimizerRule),
+        F: FnMut(&dyn ExecutionPlan, &str),
     {
         let analyzers = session_state.physical_analyzers();
         let optimizers = session_state.physical_optimizers();
@@ -3365,10 +3364,7 @@ impl DefaultPhysicalPlanner {
                 analyzer.name(),
                 displayable(new_plan.as_ref()).indent(false)
             );
-            observer(
-                new_plan.as_ref(),
-                &AnalyzerRuleForObserver(Arc::clone(analyzer)),
-            );
+            observer(new_plan.as_ref(), analyzer.name());
         }
 
         // The analyzer phase hands the optimizer a valid plan. Like the per-rule
@@ -3397,7 +3393,7 @@ impl DefaultPhysicalPlanner {
                 optimizer.name(),
                 displayable(new_plan.as_ref()).indent(false)
             );
-            observer(new_plan.as_ref(), optimizer.as_ref());
+            observer(new_plan.as_ref(), optimizer.name());
         }
 
         // The final check, which used to be the last optimizer rule
@@ -3417,7 +3413,7 @@ impl DefaultPhysicalPlanner {
         // default optimizer removes them. Remove any that a custom optimizer
         // list left in place, so they never reach execution.
         if new_plan.exists(|plan| Ok(plan.is::<OutputRequirementExec>()))? {
-            new_plan = OutputRequirements::new_remove_mode()
+            new_plan = RemoveOutputRequirements::new()
                 .optimize(new_plan, session_state.config_options())?;
         }
 
@@ -3667,38 +3663,6 @@ fn tuple_err<T, R>(value: (Result<T>, Result<R>)) -> Result<(T, R)> {
         (Err(e), Ok(_)) => Err(e),
         (Ok(_), Err(e1)) => Err(e1),
         (Err(e), Err(_)) => Err(e),
-    }
-}
-
-/// Passes an analyzer rule to the observer of
-/// [`DefaultPhysicalPlanner::optimize_physical_plan`], which takes a
-/// [`PhysicalOptimizerRule`].
-#[derive(Debug)]
-struct AnalyzerRuleForObserver(Arc<dyn PhysicalAnalyzerRule + Send + Sync>);
-
-impl PhysicalOptimizerRule for AnalyzerRuleForObserver {
-    fn optimize(
-        &self,
-        plan: Arc<dyn ExecutionPlan>,
-        config: &ConfigOptions,
-    ) -> Result<Arc<dyn ExecutionPlan>> {
-        self.0.analyze(plan, config)
-    }
-
-    fn optimize_with_context(
-        &self,
-        plan: Arc<dyn ExecutionPlan>,
-        context: &dyn PhysicalOptimizerContext,
-    ) -> Result<Arc<dyn ExecutionPlan>> {
-        self.0.analyze_with_context(plan, context)
-    }
-
-    fn name(&self) -> &str {
-        self.0.name()
-    }
-
-    fn schema_check(&self) -> bool {
-        self.0.schema_check()
     }
 }
 
@@ -3980,9 +3944,9 @@ mod tests {
     }
 
     /// The default session state runs the former optimizer prefix, up to and
-    /// including `EnsureRequirements`, as the analyzer phase, and none of those
-    /// rules again in the optimizer phase (only the post-phase `FilterPushdown`,
-    /// which links dynamic filters, stays there).
+    /// including `EnsureRequirements`, as the analyzer phase, then the
+    /// optimizer rules. `SanityCheckPlan` is the planner's final check, in
+    /// neither list.
     #[test]
     fn default_session_runs_the_analyzer_prefix_then_the_optimizer() {
         let state = make_session_state();
@@ -3995,7 +3959,7 @@ mod tests {
         assert_eq!(
             analyzer_names,
             vec![
-                "OutputRequirements",
+                "AddOutputRequirements",
                 "aggregate_statistics",
                 "EliminateConstantJoin",
                 "join_selection",
@@ -4005,7 +3969,6 @@ mod tests {
                 "EnsureRequirements",
                 "EnsureCooperative",
             ],
-            "unexpected analyzer phase: {analyzer_names:?}"
         );
 
         let optimizer_names: Vec<&str> = state
@@ -4013,24 +3976,23 @@ mod tests {
             .iter()
             .map(|r| r.name())
             .collect();
-        assert!(optimizer_names.contains(&"FilterPushdown(Post)"));
-        for moved in [
-            "aggregate_statistics",
-            "EliminateConstantJoin",
-            "join_selection",
-            "LimitedDistinctAggregation",
-            "FilterPushdown",
-            "WindowTopN",
-            "EnsureRequirements",
-            "EnsureCooperative",
-            // Now the planner's final check.
-            "SanityCheckPlan",
-        ] {
-            assert!(
-                !optimizer_names.contains(&moved),
-                "{moved} runs in the analyzer and must not repeat in the optimizer, got {optimizer_names:?}"
-            );
-        }
+        assert_eq!(
+            optimizer_names,
+            vec![
+                "CombinePartialFinalAggregate",
+                "OptimizeAggregateOrder",
+                "ProjectionPushdown",
+                "RemoveOutputRequirements",
+                "LimitAggregation",
+                "LimitPushPastWindows",
+                "HashJoinBuffering",
+                "LimitPushdown",
+                "TopKRepartition",
+                "ProjectionPushdown",
+                "PushdownSort",
+                "DynamicFilterPushdown",
+            ],
+        );
     }
 
     #[tokio::test]

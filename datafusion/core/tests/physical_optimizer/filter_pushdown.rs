@@ -80,6 +80,7 @@ use datafusion_physical_plan::{
 use super::pushdown_utils::{
     OptimizationTest, TestNode, TestScanBuilder, TestSource, format_plan_for_test,
 };
+use datafusion_physical_optimizer::PhysicalAnalyzerRule;
 use datafusion_physical_plan::union::UnionExec;
 use object_store::memory::InMemory;
 
@@ -91,7 +92,7 @@ fn test_pushdown_into_scan() {
 
     // expect the predicate to be pushed down into the DataSource
     insta::assert_snapshot!(
-        OptimizationTest::new(plan, FilterPushdown::new(), true),
+        OptimizationTest::new_analyzer(plan, FilterPushdown::new(), true),
         @r"
     OptimizationTest:
       input:
@@ -126,7 +127,7 @@ fn test_pushdown_volatile_functions_not_allowed() {
     let plan = Arc::new(FilterExec::try_new(predicate, scan).unwrap());
     // expect the filter to not be pushed down
     insta::assert_snapshot!(
-        OptimizationTest::new(plan, FilterPushdown::new(), true),
+        OptimizationTest::new_analyzer(plan, FilterPushdown::new(), true),
         @r"
     OptimizationTest:
       input:
@@ -149,7 +150,7 @@ fn test_pushdown_into_scan_with_config_options() {
 
     let mut cfg = ConfigOptions::default();
     insta::assert_snapshot!(
-        OptimizationTest::new(
+        OptimizationTest::new_analyzer(
             Arc::clone(&plan),
             FilterPushdown::new(),
             false
@@ -168,7 +169,7 @@ fn test_pushdown_into_scan_with_config_options() {
 
     cfg.execution.parquet.pushdown_filters = true;
     insta::assert_snapshot!(
-        OptimizationTest::new(
+        OptimizationTest::new_analyzer(
             plan,
             FilterPushdown::new(),
             true
@@ -273,7 +274,7 @@ async fn test_static_filter_pushdown_through_hash_join() {
 
     // Test that filters are pushed down correctly to each side of the join
     insta::assert_snapshot!(
-        OptimizationTest::new(Arc::clone(&plan), FilterPushdown::new(), true),
+        OptimizationTest::new_analyzer(Arc::clone(&plan), FilterPushdown::new(), true),
         @r"
     OptimizationTest:
       input:
@@ -327,7 +328,7 @@ async fn test_static_filter_pushdown_through_hash_join() {
         as Arc<dyn ExecutionPlan>;
 
     insta::assert_snapshot!(
-        OptimizationTest::new(plan, FilterPushdown::new(), true),
+        OptimizationTest::new_analyzer(plan, FilterPushdown::new(), true),
         @r"
     OptimizationTest:
       input:
@@ -356,7 +357,7 @@ fn test_filter_collapse() {
     let plan = Arc::new(FilterExec::try_new(predicate2, filter1).unwrap());
 
     insta::assert_snapshot!(
-        OptimizationTest::new(plan, FilterPushdown::new(), true),
+        OptimizationTest::new_analyzer(plan, FilterPushdown::new(), true),
         @r"
     OptimizationTest:
       input:
@@ -385,7 +386,7 @@ fn test_filter_with_projection() {
 
     // expect the predicate to be pushed down into the DataSource but the FilterExec to be converted to ProjectionExec
     insta::assert_snapshot!(
-        OptimizationTest::new(plan, FilterPushdown::new(), true),
+        OptimizationTest::new_analyzer(plan, FilterPushdown::new(), true),
         @r"
     OptimizationTest:
       input:
@@ -409,7 +410,7 @@ fn test_filter_with_projection() {
             .unwrap(),
     );
     insta::assert_snapshot!(
-        OptimizationTest::new(plan, FilterPushdown::new(),true),
+        OptimizationTest::new_analyzer(plan, FilterPushdown::new(),true),
         @r"
     OptimizationTest:
       input:
@@ -438,7 +439,7 @@ fn test_filter_collapse_outer_fetch_preserved() {
     );
 
     insta::assert_snapshot!(
-        OptimizationTest::new(plan, FilterPushdown::new(), true),
+        OptimizationTest::new_analyzer(plan, FilterPushdown::new(), true),
         @r"
     OptimizationTest:
       input:
@@ -468,7 +469,7 @@ fn test_filter_collapse_inner_fetch_preserved() {
     let plan = Arc::new(FilterExec::try_new(predicate2, filter1).unwrap());
 
     insta::assert_snapshot!(
-        OptimizationTest::new(plan, FilterPushdown::new(), true),
+        OptimizationTest::new_analyzer(plan, FilterPushdown::new(), true),
         @r"
     OptimizationTest:
       input:
@@ -504,7 +505,7 @@ fn test_filter_collapse_both_fetch_uses_minimum() {
     );
 
     insta::assert_snapshot!(
-        OptimizationTest::new(plan, FilterPushdown::new(), true),
+        OptimizationTest::new_analyzer(plan, FilterPushdown::new(), true),
         @r"
     OptimizationTest:
       input:
@@ -534,7 +535,7 @@ fn test_filter_with_fetch_fully_pushed_to_scan() {
     );
 
     insta::assert_snapshot!(
-        OptimizationTest::new(plan, FilterPushdown::new(), true),
+        OptimizationTest::new_analyzer(plan, FilterPushdown::new(), true),
         @r"
     OptimizationTest:
       input:
@@ -565,7 +566,7 @@ fn test_filter_with_fetch_and_projection_fully_pushed_to_scan() {
     );
 
     insta::assert_snapshot!(
-        OptimizationTest::new(plan, FilterPushdown::new(), true),
+        OptimizationTest::new_analyzer(plan, FilterPushdown::new(), true),
         @r"
     OptimizationTest:
       input:
@@ -615,7 +616,7 @@ fn test_filter_with_fetch_partially_pushed_to_scan() {
     );
 
     insta::assert_snapshot!(
-        OptimizationTest::new(plan, FilterPushdown::new(), true),
+        OptimizationTest::new_analyzer(plan, FilterPushdown::new(), true),
         @r"
     OptimizationTest:
       input:
@@ -643,7 +644,7 @@ fn test_filter_with_fetch_not_pushed_to_unsupportive_scan() {
     );
 
     insta::assert_snapshot!(
-        OptimizationTest::new(plan, FilterPushdown::new(), true),
+        OptimizationTest::new_analyzer(plan, FilterPushdown::new(), true),
         @r"
     OptimizationTest:
       input:
@@ -671,7 +672,7 @@ fn test_push_down_through_transparent_nodes() {
 
     // expect the predicate to be pushed down into the DataSource
     insta::assert_snapshot!(
-        OptimizationTest::new(plan, FilterPushdown::new(),true),
+        OptimizationTest::new_analyzer(plan, FilterPushdown::new(),true),
         @r"
     OptimizationTest:
       input:
@@ -736,7 +737,7 @@ fn test_pushdown_through_aggregates_on_grouping_columns() {
 
     // Both filters should be pushed down to the DataSource since both reference grouping columns
     insta::assert_snapshot!(
-        OptimizationTest::new(plan, FilterPushdown::new(), true),
+        OptimizationTest::new_analyzer(plan, FilterPushdown::new(), true),
         @r"
     OptimizationTest:
       input:
@@ -795,7 +796,7 @@ fn test_pushdown_through_aggregates_preserves_parent_filter_order() {
     let plan = Arc::new(FilterExec::try_new(predicate, aggregate).unwrap());
 
     insta::assert_snapshot!(
-        OptimizationTest::new(plan, FilterPushdown::new(), true),
+        OptimizationTest::new_analyzer(plan, FilterPushdown::new(), true),
         @r"
     OptimizationTest:
       input:
@@ -821,7 +822,7 @@ fn test_node_handles_child_pushdown_result() {
     let predicate = col_lit_predicate("a", "foo", &schema());
     let plan = Arc::new(TestNode::new(true, Arc::clone(&scan), predicate));
     insta::assert_snapshot!(
-        OptimizationTest::new(plan, FilterPushdown::new(), true),
+        OptimizationTest::new_analyzer(plan, FilterPushdown::new(), true),
         @r"
     OptimizationTest:
       input:
@@ -840,7 +841,7 @@ fn test_node_handles_child_pushdown_result() {
     let predicate = col_lit_predicate("a", "foo", &schema());
     let plan = Arc::new(TestNode::new(true, Arc::clone(&scan), predicate));
     insta::assert_snapshot!(
-        OptimizationTest::new(plan, FilterPushdown::new(), true),
+        OptimizationTest::new_analyzer(plan, FilterPushdown::new(), true),
         @r"
     OptimizationTest:
       input:
@@ -860,7 +861,7 @@ fn test_node_handles_child_pushdown_result() {
     let predicate = col_lit_predicate("a", "foo", &schema());
     let plan = Arc::new(TestNode::new(false, Arc::clone(&scan), predicate));
     insta::assert_snapshot!(
-        OptimizationTest::new(plan, FilterPushdown::new(), true),
+        OptimizationTest::new_analyzer(plan, FilterPushdown::new(), true),
         @r"
     OptimizationTest:
       input:
@@ -1584,7 +1585,7 @@ fn test_hashjoin_parent_filter_pushdown_same_column_names() {
         as Arc<dyn ExecutionPlan>;
 
     insta::assert_snapshot!(
-        OptimizationTest::new(Arc::clone(&plan), FilterPushdown::new(), true),
+        OptimizationTest::new_analyzer(Arc::clone(&plan), FilterPushdown::new(), true),
         @r"
     OptimizationTest:
       input:
@@ -2063,7 +2064,7 @@ fn test_hashjoin_parent_filter_pushdown_mark_join() {
         as Arc<dyn ExecutionPlan>;
 
     insta::assert_snapshot!(
-        OptimizationTest::new(Arc::clone(&plan), FilterPushdown::new(), true),
+        OptimizationTest::new_analyzer(Arc::clone(&plan), FilterPushdown::new(), true),
         @r"
     OptimizationTest:
       input:
@@ -2134,7 +2135,7 @@ fn test_hashjoin_parent_filter_pushdown_semi_anti_join() {
         as Arc<dyn ExecutionPlan>;
 
     insta::assert_snapshot!(
-        OptimizationTest::new(Arc::clone(&plan), FilterPushdown::new(), true),
+        OptimizationTest::new_analyzer(Arc::clone(&plan), FilterPushdown::new(), true),
         @r"
     OptimizationTest:
       input:
@@ -2239,7 +2240,7 @@ async fn test_hashjoin_parent_filter_transfer_null_equals_null_inner_join() {
         Arc::new(FilterExec::try_new(predicate, join).unwrap()) as Arc<dyn ExecutionPlan>;
 
     insta::assert_snapshot!(
-        OptimizationTest::new(Arc::clone(&plan), FilterPushdown::new(), true),
+        OptimizationTest::new_analyzer(Arc::clone(&plan), FilterPushdown::new(), true),
         @r"
     OptimizationTest:
       input:
@@ -2257,7 +2258,7 @@ async fn test_hashjoin_parent_filter_transfer_null_equals_null_inner_join() {
 
     let mut config = ConfigOptions::default();
     config.execution.parquet.pushdown_filters = true;
-    let optimized = FilterPushdown::new().optimize(plan, &config).unwrap();
+    let optimized = FilterPushdown::new().analyze(plan, &config).unwrap();
     let session_ctx = SessionContext::new();
     session_ctx.register_object_store(
         ObjectStoreUrl::parse("test://").unwrap().as_ref(),
@@ -2332,7 +2333,7 @@ fn test_hashjoin_parent_filter_transferred_across_join_keys() {
         as Arc<dyn ExecutionPlan>;
 
     insta::assert_snapshot!(
-        OptimizationTest::new(Arc::clone(&plan), FilterPushdown::new(), true),
+        OptimizationTest::new_analyzer(Arc::clone(&plan), FilterPushdown::new(), true),
         @r"
     OptimizationTest:
       input:
@@ -2396,7 +2397,7 @@ fn test_hashjoin_parent_filter_transfer_semi_join_different_key_names() {
         as Arc<dyn ExecutionPlan>;
 
     insta::assert_snapshot!(
-        OptimizationTest::new(Arc::clone(&plan), FilterPushdown::new(), true),
+        OptimizationTest::new_analyzer(Arc::clone(&plan), FilterPushdown::new(), true),
         @r"
     OptimizationTest:
       input:
@@ -2458,7 +2459,7 @@ fn test_hashjoin_parent_filter_transfer_right_semi_join_different_key_names() {
         as Arc<dyn ExecutionPlan>;
 
     insta::assert_snapshot!(
-        OptimizationTest::new(Arc::clone(&plan), FilterPushdown::new(), true),
+        OptimizationTest::new_analyzer(Arc::clone(&plan), FilterPushdown::new(), true),
         @r"
     OptimizationTest:
       input:
@@ -2519,7 +2520,7 @@ fn test_hashjoin_parent_filter_transfer_semi_join_key_name_shadowed_by_non_key()
         as Arc<dyn ExecutionPlan>;
 
     insta::assert_snapshot!(
-        OptimizationTest::new(Arc::clone(&plan), FilterPushdown::new(), true),
+        OptimizationTest::new_analyzer(Arc::clone(&plan), FilterPushdown::new(), true),
         @r"
     OptimizationTest:
       input:
@@ -2563,7 +2564,7 @@ fn test_hashjoin_parent_filter_transfer_semi_join_key_name_shadowed_by_non_key()
         as Arc<dyn ExecutionPlan>;
 
     insta::assert_snapshot!(
-        OptimizationTest::new(Arc::clone(&plan), FilterPushdown::new(), true),
+        OptimizationTest::new_analyzer(Arc::clone(&plan), FilterPushdown::new(), true),
         @r"
     OptimizationTest:
       input:
@@ -2627,7 +2628,7 @@ fn test_hashjoin_parent_filter_transfer_uses_first_on_pair() {
         as Arc<dyn ExecutionPlan>;
 
     insta::assert_snapshot!(
-        OptimizationTest::new(Arc::clone(&plan), FilterPushdown::new(), true),
+        OptimizationTest::new_analyzer(Arc::clone(&plan), FilterPushdown::new(), true),
         @r"
     OptimizationTest:
       input:
@@ -2692,7 +2693,7 @@ fn test_hashjoin_parent_filter_transfer_cast_key_with_projection() {
         as Arc<dyn ExecutionPlan>;
 
     insta::assert_snapshot!(
-        OptimizationTest::new(Arc::clone(&plan), FilterPushdown::new(), true),
+        OptimizationTest::new_analyzer(Arc::clone(&plan), FilterPushdown::new(), true),
         @r"
     OptimizationTest:
       input:
@@ -2873,7 +2874,7 @@ fn test_filter_pushdown_through_union() {
     let plan = Arc::new(FilterExec::try_new(predicate, union).unwrap());
 
     insta::assert_snapshot!(
-        OptimizationTest::new(plan, FilterPushdown::new(), true),
+        OptimizationTest::new_analyzer(plan, FilterPushdown::new(), true),
         @r"
     OptimizationTest:
       input:
@@ -2902,7 +2903,7 @@ fn test_filter_pushdown_through_union_mixed_support() {
     let plan = Arc::new(FilterExec::try_new(predicate, union).unwrap());
 
     insta::assert_snapshot!(
-        OptimizationTest::new(plan, FilterPushdown::new(), true),
+        OptimizationTest::new_analyzer(plan, FilterPushdown::new(), true),
         @r"
     OptimizationTest:
       input:
@@ -2932,7 +2933,7 @@ fn test_filter_pushdown_through_union_does_not_support() {
     let plan = Arc::new(FilterExec::try_new(predicate, union).unwrap());
 
     insta::assert_snapshot!(
-        OptimizationTest::new(plan, FilterPushdown::new(), true),
+        OptimizationTest::new_analyzer(plan, FilterPushdown::new(), true),
         @"
     OptimizationTest:
       input:
@@ -2968,7 +2969,7 @@ fn test_filter_with_fetch_fully_pushed_through_union() {
     );
 
     insta::assert_snapshot!(
-        OptimizationTest::new(plan, FilterPushdown::new(), true),
+        OptimizationTest::new_analyzer(plan, FilterPushdown::new(), true),
         @"
     OptimizationTest:
       input:
@@ -3006,7 +3007,7 @@ fn test_filter_with_fetch_and_projection_fully_pushed_through_union() {
     );
 
     insta::assert_snapshot!(
-        OptimizationTest::new(plan, FilterPushdown::new(), true),
+        OptimizationTest::new_analyzer(plan, FilterPushdown::new(), true),
         @"
     OptimizationTest:
       input:
@@ -3041,7 +3042,7 @@ fn test_filter_with_fetch_not_fully_pushed_through_union() {
     );
 
     insta::assert_snapshot!(
-        OptimizationTest::new(plan, FilterPushdown::new(), true),
+        OptimizationTest::new_analyzer(plan, FilterPushdown::new(), true),
         @"
     OptimizationTest:
       input:
@@ -3101,7 +3102,7 @@ fn col_lit_predicate(
 fn assert_parent_filter_remains(plan: Arc<dyn ExecutionPlan>) {
     let mut config = ConfigOptions::default();
     config.execution.parquet.pushdown_filters = true;
-    let optimized = FilterPushdown::new().optimize(plan, &config).unwrap();
+    let optimized = FilterPushdown::new().analyze(plan, &config).unwrap();
     assert!(
         optimized.downcast_ref::<FilterExec>().is_some(),
         "parent filter must remain"
@@ -3198,7 +3199,7 @@ fn test_pushdown_filter_on_non_first_grouping_column() {
     let plan = Arc::new(FilterExec::try_new(predicate, aggregate).unwrap());
 
     insta::assert_snapshot!(
-        OptimizationTest::new(plan, FilterPushdown::new(), true),
+        OptimizationTest::new_analyzer(plan, FilterPushdown::new(), true),
         @r"
     OptimizationTest:
       input:
@@ -3267,7 +3268,7 @@ fn test_no_pushdown_grouping_sets_filter_on_missing_column() {
     let plan = Arc::new(FilterExec::try_new(predicate, aggregate).unwrap());
 
     insta::assert_snapshot!(
-        OptimizationTest::new(plan, FilterPushdown::new(), true),
+        OptimizationTest::new_analyzer(plan, FilterPushdown::new(), true),
         @r"
     OptimizationTest:
       input:
@@ -3337,7 +3338,7 @@ fn test_pushdown_grouping_sets_filter_on_common_column() {
     let plan = Arc::new(FilterExec::try_new(predicate, aggregate).unwrap());
 
     insta::assert_snapshot!(
-        OptimizationTest::new(plan, FilterPushdown::new(), true),
+        OptimizationTest::new_analyzer(plan, FilterPushdown::new(), true),
         @r"
     OptimizationTest:
       input:
@@ -3391,7 +3392,7 @@ async fn test_no_pushdown_through_global_aggregate_with_name_collision() {
 
     let mut config = ConfigOptions::default();
     config.execution.parquet.pushdown_filters = true;
-    let optimized = FilterPushdown::new().optimize(plan, &config).unwrap();
+    let optimized = FilterPushdown::new().analyze(plan, &config).unwrap();
     assert!(optimized.downcast_ref::<FilterExec>().is_some());
 
     let session_ctx = SessionContext::new();
@@ -3533,7 +3534,7 @@ fn test_pushdown_through_aggregate_with_reordered_input_columns() {
 
     // The filter should be pushed down
     insta::assert_snapshot!(
-        OptimizationTest::new(plan, FilterPushdown::new(), true),
+        OptimizationTest::new_analyzer(plan, FilterPushdown::new(), true),
         @r"
     OptimizationTest:
       input:
@@ -3622,7 +3623,7 @@ fn test_pushdown_through_aggregate_grouping_sets_with_reordered_input() {
     let plan = Arc::new(FilterExec::try_new(predicate, aggregate.clone()).unwrap());
 
     insta::assert_snapshot!(
-        OptimizationTest::new(plan, FilterPushdown::new(), true),
+        OptimizationTest::new_analyzer(plan, FilterPushdown::new(), true),
         @r"
     OptimizationTest:
       input:
@@ -3643,7 +3644,7 @@ fn test_pushdown_through_aggregate_grouping_sets_with_reordered_input() {
     let plan = Arc::new(FilterExec::try_new(predicate, aggregate).unwrap());
 
     insta::assert_snapshot!(
-        OptimizationTest::new(plan, FilterPushdown::new(), true),
+        OptimizationTest::new_analyzer(plan, FilterPushdown::new(), true),
         @r"
     OptimizationTest:
       input:
@@ -3711,7 +3712,7 @@ fn test_pushdown_with_computed_grouping_key() {
 
     // The filter should be pushed down because 'c' is extracted from the grouping expression (c + 1.0)
     insta::assert_snapshot!(
-        OptimizationTest::new(plan, FilterPushdown::new(), true),
+        OptimizationTest::new_analyzer(plan, FilterPushdown::new(), true),
         @r"
     OptimizationTest:
       input:
@@ -4603,7 +4604,7 @@ async fn test_filter_with_projection_pushdown() {
     // Apply filter pushdown optimization
     let config = ConfigOptions::default();
     let optimized_plan = FilterPushdown::new()
-        .optimize(Arc::clone(&filter2) as Arc<dyn ExecutionPlan>, &config)
+        .analyze(Arc::clone(&filter2) as Arc<dyn ExecutionPlan>, &config)
         .unwrap();
 
     // Execute the optimized plan - this should not error
@@ -4802,7 +4803,7 @@ fn test_filter_pushdown_through_sort_into_scan() {
     let plan = Arc::new(FilterExec::try_new(predicate, sort).unwrap());
 
     insta::assert_snapshot!(
-        OptimizationTest::new(plan, FilterPushdown::new(), true),
+        OptimizationTest::new_analyzer(plan, FilterPushdown::new(), true),
         @r"
     OptimizationTest:
       input:
@@ -4834,7 +4835,7 @@ fn test_filter_pushdown_through_sort_no_scan_support() {
     let plan = Arc::new(FilterExec::try_new(predicate, sort).unwrap());
 
     insta::assert_snapshot!(
-        OptimizationTest::new(plan, FilterPushdown::new(), false),
+        OptimizationTest::new_analyzer(plan, FilterPushdown::new(), false),
         @r"
     OptimizationTest:
       input:
@@ -4871,7 +4872,7 @@ fn test_multiple_filters_pushdown_through_sort() {
     let plan = Arc::new(FilterExec::try_new(predicate, sort).unwrap());
 
     insta::assert_snapshot!(
-        OptimizationTest::new(plan, FilterPushdown::new(), false),
+        OptimizationTest::new_analyzer(plan, FilterPushdown::new(), false),
         @r"
     OptimizationTest:
       input:
@@ -4907,7 +4908,7 @@ fn test_filter_not_pushed_through_sort_with_fetch() {
     let plan = Arc::new(FilterExec::try_new(predicate, sort).unwrap());
 
     insta::assert_snapshot!(
-        OptimizationTest::new(plan, FilterPushdown::new(), false),
+        OptimizationTest::new_analyzer(plan, FilterPushdown::new(), false),
         @r"
     OptimizationTest:
       input:
@@ -4943,7 +4944,7 @@ fn test_filter_pushed_through_sort_with_fetch() {
     let plan = Arc::new(FilterExec::try_new(predicate, sort).unwrap());
 
     insta::assert_snapshot!(
-        OptimizationTest::new(plan, FilterPushdown::new(), false),
+        OptimizationTest::new_analyzer(plan, FilterPushdown::new(), false),
         @r"
     OptimizationTest:
       input:
@@ -4983,7 +4984,7 @@ fn test_filter_with_projection_pushdown_through_sort() {
     );
 
     insta::assert_snapshot!(
-        OptimizationTest::new(plan, FilterPushdown::new(), false),
+        OptimizationTest::new_analyzer(plan, FilterPushdown::new(), false),
         @r"
     OptimizationTest:
       input:
@@ -5019,7 +5020,7 @@ fn test_filter_pushdown_through_sort_preserves_partitioning() {
     let plan = Arc::new(FilterExec::try_new(predicate, sort).unwrap());
 
     insta::assert_snapshot!(
-        OptimizationTest::new(plan, FilterPushdown::new(), false),
+        OptimizationTest::new_analyzer(plan, FilterPushdown::new(), false),
         @r"
     OptimizationTest:
       input:
@@ -5057,7 +5058,7 @@ fn test_filter_with_fetch_pushdown_through_sort() {
     );
 
     insta::assert_snapshot!(
-        OptimizationTest::new(plan, FilterPushdown::new(), false),
+        OptimizationTest::new_analyzer(plan, FilterPushdown::new(), false),
         @r"
     OptimizationTest:
       input:
@@ -5095,7 +5096,7 @@ fn test_filter_pushdown_through_sort_with_projection() {
     );
 
     insta::assert_snapshot!(
-        OptimizationTest::new(plan, FilterPushdown::new(), false),
+        OptimizationTest::new_analyzer(plan, FilterPushdown::new(), false),
         @r"
     OptimizationTest:
       input:
@@ -5146,6 +5147,6 @@ fn post_phase_is_idempotent_on_hash_join() {
     assert_eq!(
         get_plan_string(&once),
         get_plan_string(&twice),
-        "second invocation of FilterPushdown::new_post_optimization mutated the plan",
+        "second invocation of DynamicFilterPushdown mutated the plan",
     );
 }

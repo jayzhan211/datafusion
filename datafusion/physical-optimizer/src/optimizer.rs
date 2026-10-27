@@ -25,7 +25,7 @@ use std::sync::Arc;
 use crate::combine_partial_final_agg::CombinePartialFinalAggregate;
 use crate::filter_pushdown::DynamicFilterPushdown;
 use crate::limit_pushdown::LimitPushdown;
-use crate::output_requirements::OutputRequirements;
+use crate::output_requirements::RemoveOutputRequirements;
 use crate::projection_pushdown::ProjectionPushdown;
 use crate::topk_aggregation::TopKAggregation;
 use crate::topk_repartition::TopKRepartition;
@@ -114,7 +114,7 @@ impl PhysicalOptimizerContext for ConfigOnlyContext<'_> {
 ///
 /// Some built-in rules do not yet fully satisfy the invariants above:
 ///
-/// - [`OutputRequirements`] in remove mode drops the markers that record the
+/// - [`RemoveOutputRequirements`] drops the markers that record the
 ///   query's output requirements, so the rules after it no longer see them.
 /// - [`SanityCheckPlan`] rejects plans whose requirements are not satisfied.
 ///   It should run last.
@@ -209,7 +209,7 @@ impl PhysicalOptimizer {
             Arc::new(ProjectionPushdown::new()),
             // Remove the ancillary output requirement operator since we are done with the planning
             // phase.
-            Arc::new(OutputRequirements::new_remove_mode()),
+            Arc::new(RemoveOutputRequirements::new()),
             // The aggregation limiter will try to find situations where the accumulator count
             // is not tied to the cardinality, i.e. when the output of the aggregation is passed
             // into an `order by max(x) limit y`. In this case it will copy the limit value down

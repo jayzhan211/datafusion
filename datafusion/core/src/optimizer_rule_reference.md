@@ -96,11 +96,13 @@ rules make a logical plan valid. They run as their own phase before the
 physical optimizer rules and end with `EnsureRequirements`, so every physical
 optimizer rule receives a valid plan. Some performance rules still have to run
 before `EnsureRequirements`, such as `WindowTopN` and the statistics-based
-choices in `join_selection`, so they run in this phase too.
+choices in `join_selection`, so they are analyzer rules too. A rule is either
+a `PhysicalAnalyzerRule` or a `PhysicalOptimizerRule`, so each rule appears in
+one list only.
 
 | order | rule                         | summary                                                                                                 |
 | ----- | ---------------------------- | ------------------------------------------------------------------------------------------------------- |
-| 1     | `OutputRequirements`         | Adds helper nodes so output requirements survive enforcement and later physical rewrites.               |
+| 1     | `AddOutputRequirements`      | Adds helper nodes so output requirements survive enforcement and later physical rewrites.               |
 | 2     | `aggregate_statistics`       | Uses exact source statistics to answer some aggregates without scanning data.                           |
 | 3     | `EliminateConstantJoin`      | Replaces inner joins against a single row of literals with a filter that keeps the other input's order. |
 | 4     | `join_selection`             | Resolves each join's partition mode and build side, so enforcement sees its requirements.               |
@@ -112,20 +114,14 @@ choices in `join_selection`, so they run in this phase too.
 
 ### Physical Optimizer Rules
 
-The same rule name may appear more than once when the default pipeline runs it
-in multiple phases.
-
-The rules up to and including `EnsureCooperative` run in the analyzer phase
-(see above), so they do not appear in this list. `OutputRequirements` is in both
-lists: the analyzer adds its markers and the optimizer removes them (rule 4
-below).
+`ProjectionPushdown` runs twice: before and after the limit and TopK rewrites.
 
 | order | rule                           | phase                   | summary                                                                                                      |
 | ----- | ------------------------------ | ----------------------- | ------------------------------------------------------------------------------------------------------------ |
 | 1     | `CombinePartialFinalAggregate` | -                       | Collapses adjacent partial and final aggregates when the distributed shape makes them redundant.             |
 | 2     | `OptimizeAggregateOrder`       | -                       | Updates aggregate expressions to use the best ordering once sort requirements are known.                     |
 | 3     | `ProjectionPushdown`           | early pass              | Pushes projections toward inputs before later physical rewrites add more limit and TopK structure.           |
-| 4     | `OutputRequirements`           | remove phase            | Removes the temporary output-requirement helper nodes after requirement-sensitive planning is done.          |
+| 4     | `RemoveOutputRequirements`     | -                       | Removes the temporary output-requirement helper nodes after requirement-sensitive planning is done.          |
 | 5     | `LimitAggregation`             | -                       | Passes a limit hint into eligible aggregations so they can keep fewer accumulator buckets.                   |
 | 6     | `LimitPushPastWindows`         | -                       | Pushes fetch limits through bounded window operators when doing so keeps the result correct.                 |
 | 7     | `HashJoinBuffering`            | -                       | Adds buffering on the probe side of hash joins so probing can start before build completion.                 |
@@ -133,7 +129,7 @@ below).
 | 9     | `TopKRepartition`              | -                       | Pushes TopK below hash repartition when the partition key is a prefix of the sort key.                       |
 | 10    | `ProjectionPushdown`           | late pass               | Runs projection pushdown again after limit and TopK rewrites expose new pruning opportunities.               |
 | 11    | `PushdownSort`                 | -                       | Pushes sort requirements into data sources that can already return sorted output.                            |
-| 12    | `FilterPushdown(Post)`         | post-optimization phase | Pushes dynamic filters at the end of optimization, after plan references stop moving.                        |
+| 12    | `DynamicFilterPushdown`        | -                       | Pushes dynamic filters at the end of optimization, after plan references stop moving.                        |
 
 After the optimizer rules, the planner checks the final plan with
 `SanityCheckPlan`: every ordering and distribution requirement is met and no

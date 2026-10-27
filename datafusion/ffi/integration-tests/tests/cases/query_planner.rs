@@ -341,7 +341,7 @@ mod tests {
             let input = sort
                 .input()
                 .downcast_ref::<CooperativeExec>()
-                .map_or(sort.input(), |cooperative| cooperative.input());
+                .map_or_else(|| sort.input(), |cooperative| cooperative.input());
             assert!(input.is::<EmptyExec>());
             assert!(!input.is::<ForeignExecutionPlan>());
         }

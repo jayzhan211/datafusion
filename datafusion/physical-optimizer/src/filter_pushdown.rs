@@ -34,6 +34,7 @@
 use std::sync::Arc;
 
 use crate::PhysicalOptimizerRule;
+use crate::analyzer::PhysicalAnalyzerRule;
 
 use datafusion_common::{Result, assert_eq_or_internal_err, config::ConfigOptions};
 use datafusion_physical_expr::PhysicalExpr;
@@ -389,12 +390,6 @@ impl FilterPushdown {
     pub fn new() -> Self {
         Self {}
     }
-
-    /// Create the rule that pushes dynamic filters.
-    #[deprecated(since = "56.0.0", note = "Use `DynamicFilterPushdown::new()` instead")]
-    pub fn new_post_optimization() -> DynamicFilterPushdown {
-        DynamicFilterPushdown::new()
-    }
 }
 
 /// Pushes dynamic filters, such as those a TopK `SortExec` or a `HashJoinExec`
@@ -429,7 +424,7 @@ impl PhysicalOptimizerRule for DynamicFilterPushdown {
     }
 
     fn name(&self) -> &str {
-        "FilterPushdown(Post)"
+        "DynamicFilterPushdown"
     }
 
     fn schema_check(&self) -> bool {
@@ -437,8 +432,8 @@ impl PhysicalOptimizerRule for DynamicFilterPushdown {
     }
 }
 
-impl PhysicalOptimizerRule for FilterPushdown {
-    fn optimize(
+impl PhysicalAnalyzerRule for FilterPushdown {
+    fn analyze(
         &self,
         plan: Arc<dyn ExecutionPlan>,
         config: &ConfigOptions,

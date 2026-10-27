@@ -26,15 +26,15 @@ use datafusion::prelude::SessionContext;
 use datafusion_common::config::ConfigOptions;
 use datafusion_expr::physical_planning_context::{ScalarSubqueryResults, SubqueryIndex};
 use datafusion_physical_expr_common::sort_expr::LexOrdering;
-use datafusion_physical_optimizer::PhysicalOptimizerRule;
+use datafusion_physical_optimizer::PhysicalAnalyzerRule;
 use datafusion_physical_optimizer::analyzer::PhysicalAnalyzer;
 use datafusion_physical_optimizer::optimizer::PhysicalOptimizer;
-use datafusion_physical_optimizer::output_requirements::OutputRequirements;
+use datafusion_physical_optimizer::output_requirements::AddOutputRequirements;
 use datafusion_physical_plan::scalar_subquery::{ScalarSubqueryExec, ScalarSubqueryLink};
 use datafusion_physical_plan::sorts::sort_preserving_merge::SortPreservingMergeExec;
 use datafusion_physical_plan::{ExecutionPlan, collect, displayable, get_plan_string};
 
-/// `OutputRequirements::new_add_mode()` must be idempotent: re-applying it to
+/// `AddOutputRequirements` must be idempotent: re-applying it to
 /// its own output must not stack additional `OutputRequirementExec` wrappers.
 ///
 /// AQE (datafusion-ballista#1359) re-runs the optimizer chain after every
@@ -84,19 +84,19 @@ fn add_mode_is_idempotent_on_scalar_subquery() {
 
 fn assert_add_mode_idempotent(plan: Arc<dyn ExecutionPlan>) {
     let config = ConfigOptions::new();
-    let rule = OutputRequirements::new_add_mode();
+    let rule = AddOutputRequirements::new();
 
     let once = rule
-        .optimize(plan, &config)
-        .expect("first add-mode optimize pass should succeed");
+        .analyze(plan, &config)
+        .expect("first analyze pass should succeed");
     let twice = rule
-        .optimize(Arc::clone(&once), &config)
-        .expect("second add-mode optimize pass should succeed");
+        .analyze(Arc::clone(&once), &config)
+        .expect("second analyze pass should succeed");
 
     assert_eq!(
         get_plan_string(&once),
         get_plan_string(&twice),
-        "second invocation of OutputRequirements::new_add_mode mutated the plan",
+        "second invocation of AddOutputRequirements mutated the plan",
     );
 }
 
@@ -122,9 +122,9 @@ fn require_top_ordering_descends_through_scalar_subquery() {
         ScalarSubqueryResults::new(1),
     )) as Arc<dyn ExecutionPlan>;
 
-    let optimized = OutputRequirements::new_add_mode()
-        .optimize(plan, &ConfigOptions::new())
-        .expect("add-mode optimize should succeed");
+    let optimized = AddOutputRequirements::new()
+        .analyze(plan, &ConfigOptions::new())
+        .expect("analyze should succeed");
 
     insta::assert_snapshot!(
         displayable(optimized.as_ref()).indent(true).to_string(),

@@ -51,8 +51,6 @@ use datafusion_expr::{
     ScalarUDFImpl, WindowUDF, WindowUDFImpl,
 };
 use datafusion_physical_expr::PhysicalExpr;
-use datafusion_physical_optimizer::PhysicalOptimizerContext;
-use datafusion_physical_optimizer::analyzer::RunInAnalyzer;
 use datafusion_physical_plan::ExecutionPlan;
 use datafusion_proto::bytes::{
     logical_plan_from_bytes_with_extension_codec,
@@ -78,6 +76,7 @@ use crate::arrow_wrappers::WrappedSchema;
 use crate::catalog_provider_list::FFI_CatalogProviderList;
 use crate::execution::FFI_TaskContext;
 use crate::execution_plan::FFI_ExecutionPlan;
+use crate::physical_analyzer::FFI_PhysicalAnalyzerRule;
 use crate::physical_expr::FFI_PhysicalExpr;
 use crate::physical_optimizer::FFI_PhysicalOptimizerRule;
 use crate::proto::logical_extension_codec::FFI_LogicalExtensionCodec;
@@ -170,10 +169,9 @@ pub(crate) struct FFI_SessionRef {
     /// the foreign interface.
     pub library_marker_id: extern "C" fn() -> usize,
 
-    /// The session's physical analyzer rules, each passed as a
-    /// [`FFI_PhysicalOptimizerRule`] that runs the analyzer rule. Placed last
-    /// so the fields before it keep their offsets.
-    physical_analyzers: unsafe extern "C" fn(&Self) -> SVec<FFI_PhysicalOptimizerRule>,
+    /// The session's physical analyzer rules. Placed last so the fields
+    /// before it keep their offsets.
+    physical_analyzers: unsafe extern "C" fn(&Self) -> SVec<FFI_PhysicalAnalyzerRule>,
 }
 
 unsafe impl Send for FFI_SessionRef {}
@@ -381,49 +379,14 @@ unsafe extern "C" fn physical_optimizers_fn_wrapper(
 
 unsafe extern "C" fn physical_analyzers_fn_wrapper(
     session: &FFI_SessionRef,
-) -> SVec<FFI_PhysicalOptimizerRule> {
+) -> SVec<FFI_PhysicalAnalyzerRule> {
     let runtime = unsafe { session.runtime().cloned() };
     session
         .inner()
         .physical_analyzers()
         .iter()
-        .map(|rule| {
-            let rule = Arc::new(AnalyzerRuleAsOptimizerRule(Arc::clone(rule)));
-            FFI_PhysicalOptimizerRule::new(rule, runtime.clone())
-        })
+        .map(|rule| FFI_PhysicalAnalyzerRule::new(Arc::clone(rule), runtime.clone()))
         .collect()
-}
-
-/// Lets a [`PhysicalAnalyzerRule`] cross the FFI boundary as a
-/// [`FFI_PhysicalOptimizerRule`]. The receiving side runs it in its analyzer
-/// phase through [`RunInAnalyzer`].
-#[derive(Debug)]
-struct AnalyzerRuleAsOptimizerRule(Arc<dyn PhysicalAnalyzerRule + Send + Sync>);
-
-impl PhysicalOptimizerRule for AnalyzerRuleAsOptimizerRule {
-    fn optimize(
-        &self,
-        plan: Arc<dyn ExecutionPlan>,
-        config: &ConfigOptions,
-    ) -> datafusion_common::Result<Arc<dyn ExecutionPlan>> {
-        self.0.analyze(plan, config)
-    }
-
-    fn optimize_with_context(
-        &self,
-        plan: Arc<dyn ExecutionPlan>,
-        context: &dyn PhysicalOptimizerContext,
-    ) -> datafusion_common::Result<Arc<dyn ExecutionPlan>> {
-        self.0.analyze_with_context(plan, context)
-    }
-
-    fn name(&self) -> &str {
-        self.0.name()
-    }
-
-    fn schema_check(&self) -> bool {
-        self.0.schema_check()
-    }
 }
 
 unsafe extern "C" fn release_fn_wrapper(provider: &mut FFI_SessionRef) {
@@ -838,10 +801,7 @@ impl Session for ForeignSession {
         self.physical_analyzers.get_or_init(|| unsafe {
             (self.session.physical_analyzers)(&self.session)
                 .into_iter()
-                .map(|rule| {
-                    Arc::new(RunInAnalyzer::new((&rule).into()))
-                        as Arc<dyn PhysicalAnalyzerRule + Send + Sync>
-                })
+                .map(|rule| (&rule).into())
                 .collect()
         })
     }

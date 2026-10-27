@@ -36,12 +36,11 @@ use crate::physical_optimizer::PhysicalOptimizerContext;
 /// one.
 ///
 /// Some performance rules still have to run before `EnsureRequirements`, such
-/// as `WindowTopN` and the statistics-based choices in `join_selection`. They
-/// are [`PhysicalOptimizerRule`]s that run in the analyzer list through
-/// `RunInAnalyzer`. Performance rules that do not have to, such as
-/// `LimitPushdown`, run in the optimizer list (see also [`OptimizerRule`]).
-/// Today every built-in rule in the analyzer list, the correctness rules
-/// included, is a `PhysicalOptimizerRule` that runs through `RunInAnalyzer`.
+/// as `WindowTopN` and the statistics-based choices in `join_selection`, so
+/// they are analyzer rules too. Performance rules that do not have to, such as
+/// `LimitPushdown`, are [`PhysicalOptimizerRule`]s (see also
+/// [`OptimizerRule`]). A rule is one or the other: moving it to the other
+/// phase means implementing the other trait.
 ///
 /// An analyzer rule must:
 ///
