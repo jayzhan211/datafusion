@@ -1312,7 +1312,7 @@ impl HashJoinExec {
             probe_spill: SpillManager::new(env, spill_metrics, self.right.schema())
                 .with_compression_type(compression),
             pool: Arc::clone(context.memory_pool()),
-            context: Arc::clone(&context),
+            context: Arc::clone(context),
             trigger,
             fetch: self.fetch,
             right_side_ordered: self.right.output_ordering().is_some(),
@@ -3237,6 +3237,7 @@ async fn collect_left_input(
 }
 
 /// The result of collecting a build side that may spill
+#[expect(clippy::large_enum_variant)]
 pub(super) enum BuildOutcome {
     /// The build side fit: today's in-memory join data
     InMemory(JoinLeftData),

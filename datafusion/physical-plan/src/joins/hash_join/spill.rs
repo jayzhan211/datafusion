@@ -207,18 +207,18 @@ async fn spill_join(
     let mut build = BucketedBuild::new(0);
     let mut collected = kept.buffers.size();
     for batch in batches {
-        build.push(&ctx, &kept, &batch).await?;
+        build.push(&ctx, &kept, &batch)?;
         let released = get_record_batch_memory_size(&batch).min(collected);
         kept.buffers.shrink(released);
         collected -= released;
     }
     kept.buffers.shrink(collected);
     while let Some(batch) = rest.try_next().await? {
-        build.push(&ctx, &kept, &batch).await?;
+        build.push(&ctx, &kept, &batch)?;
     }
     drop(rest);
 
-    let (mut resident, mut spilled) = build.finish(&ctx, &kept).await?;
+    let (mut resident, mut spilled) = build.finish(&ctx, &kept)?;
     let mut reservation = kept.buffers.split(kept.buffers.size());
     let left_data = match ctx.build.build(&mut resident, &mut reservation) {
         Ok(left_data) => left_data,
@@ -328,7 +328,7 @@ impl SharedRouter {
             let mut router = self.0.lock();
             loop {
                 match ready!(router.poll_next_unpin(cx)) {
-                    Some(Ok(_)) => continue,
+                    Some(Ok(_)) => {}
                     Some(Err(e)) => return Poll::Ready(Err(e)),
                     None => return Poll::Ready(Ok(())),
                 }
@@ -505,6 +505,7 @@ fn empty_sides() -> Vec<Option<SpilledSide>> {
     (0..BUCKETS).map(|_| None).collect()
 }
 
+#[expect(clippy::large_enum_variant)]
 enum Bucket {
     Memory {
         batches: Vec<RecordBatch>,
@@ -545,7 +546,7 @@ impl BucketedBuild {
         Self { level, buckets }
     }
 
-    async fn push(
+    fn push(
         &mut self,
         ctx: &SpillContext,
         kept: &KeptMemory,
@@ -576,7 +577,7 @@ impl BucketedBuild {
                 }
                 // Refused: write the largest bucket in memory to disk and retry
                 let victim = self.largest_in_memory().unwrap_or(bucket);
-                self.destage(ctx, kept, victim).await?;
+                self.destage(ctx, kept, victim)?;
             }
         }
         Ok(())
@@ -591,7 +592,7 @@ impl BucketedBuild {
             .map(|(_, b)| b)
     }
 
-    async fn destage(
+    fn destage(
         &mut self,
         ctx: &SpillContext,
         kept: &KeptMemory,
@@ -630,7 +631,8 @@ impl BucketedBuild {
 
     /// Makes room for the hash table of the buckets kept in memory, then
     /// returns their rows and the spilled build sides
-    async fn finish(
+    #[expect(clippy::type_complexity)]
+    fn finish(
         mut self,
         ctx: &SpillContext,
         kept: &KeptMemory,
@@ -649,7 +651,7 @@ impl BucketedBuild {
                 break;
             }
             let victim = self.largest_in_memory().expect("rows are in memory");
-            self.destage(ctx, kept, victim).await?;
+            self.destage(ctx, kept, victim)?;
         }
 
         let mut resident = vec![];
@@ -1288,7 +1290,7 @@ impl Stream for ProbeRouter {
             match ready!(this.input.poll_next_unpin(cx)) {
                 Some(Ok(batch)) => match this.route(batch) {
                     Ok(Some(batch)) => return Poll::Ready(Some(Ok(batch))),
-                    Ok(None) => continue,
+                    Ok(None) => {}
                     Err(e) => return Poll::Ready(Some(Err(e))),
                 },
                 Some(Err(e)) => return Poll::Ready(Some(Err(e))),
