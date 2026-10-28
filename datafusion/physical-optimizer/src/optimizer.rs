@@ -155,7 +155,7 @@ impl PhysicalOptimizerContext for ConfigOnlyContext<'_> {
 /// If you do build a custom pipeline:
 ///
 /// - **End a custom analyzer list with [`EnsureRequirements`],** so the
-///   optimizer rules receive a valid plan.
+///   optimizer rules receive a valid plan. Debug builds check this.
 /// - **Reordering must still yield a valid plan.** Downstream projects are
 ///   encouraged to add tests that run their pipeline end to end and check
 ///   results, as DataFusion's own tests only cover the default order.

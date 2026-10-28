@@ -45,7 +45,8 @@ use crate::physical_optimizer::PhysicalOptimizerContext;
 ///
 /// [`DefaultPhysicalPlanner::optimize_physical_plan`] runs every analyzer rule,
 /// then every optimizer rule. A rule appended to the analyzer list runs after
-/// `EnsureRequirements`, so it must leave the plan valid.
+/// `EnsureRequirements`, so it must leave the plan valid. At the end of the
+/// analyzer phase, debug builds check that the plan is valid.
 ///
 /// ```text
 /// ExecutionPlan  (every operator declares its distribution and ordering

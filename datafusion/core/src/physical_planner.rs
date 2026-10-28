@@ -93,6 +93,8 @@ use datafusion_physical_expr::{
     LexOrdering, PhysicalSortExpr, create_physical_sort_exprs,
 };
 use datafusion_physical_optimizer::output_requirements::RemoveOutputRequirements;
+#[cfg(debug_assertions)]
+use datafusion_physical_optimizer::sanity_checker::SanityCheckPlan;
 use datafusion_physical_plan::empty::EmptyExec;
 use datafusion_physical_plan::execution_plan::InvariantLevel;
 use datafusion_physical_plan::joins::PiecewiseMergeJoinExec;
@@ -3426,6 +3428,14 @@ impl DefaultPhysicalPlanner {
             observer(new_plan.as_ref(), analyzer.name());
         }
 
+        // The analyzer phase hands the optimizer a valid plan. Like the per-rule
+        // invariant checks, debug builds check that here, where the phase ends.
+        // A session with no analyzer rules has opted out of the phase.
+        #[cfg(debug_assertions)]
+        if !analyzers.is_empty() {
+            check_analyzed_plan(&new_plan, session_state.config_options())?;
+        }
+
         // Then apply the optimizer rules to make the (valid) plan faster.
         for optimizer in optimizers {
             let before_schema = new_plan.schema();
@@ -3822,6 +3832,27 @@ fn is_allowed_field_change(old_field: &Field, new_field: &Field) -> Result<()> {
     }
 }
 
+/// Checks what the physical analyzer phase promises the optimizer: the plan is
+/// executable, and it satisfies every distribution and ordering requirement
+/// its operators declare, as [`SanityCheckPlan`] checks.
+#[cfg(debug_assertions)]
+fn check_analyzed_plan(
+    plan: &Arc<dyn ExecutionPlan>,
+    config: &ConfigOptions,
+) -> Result<()> {
+    InvariantChecker(InvariantLevel::Executable)
+        .check(plan)
+        .map_err(|e| e.context("Plan is not executable after the physical analyzer"))?;
+    SanityCheckPlan::new()
+        .optimize(Arc::clone(plan), config)
+        .map_err(|e| {
+            e.context(
+                "The physical analyzer left a distribution or ordering requirement unmet",
+            )
+        })?;
+    Ok(())
+}
+
 /// Check [`ExecutionPlan`] invariants per [`InvariantLevel`].
 struct InvariantChecker(InvariantLevel);
 
@@ -4045,6 +4076,41 @@ mod tests {
         assert!(
             invoked.load(AtomicOrdering::Relaxed),
             "custom physical analyzer rule was not invoked"
+        );
+        Ok(())
+    }
+
+    /// Debug builds check the analyzer phase's result: with an analyzer list
+    /// that enforces nothing, a group-by over two partitions is left without
+    /// its repartition, and planning fails where the phase ends.
+    #[cfg(debug_assertions)]
+    #[tokio::test]
+    async fn analyzer_that_leaves_a_requirement_unmet_fails_in_debug() -> Result<()> {
+        let state = SessionStateBuilder::new()
+            .with_config(SessionConfig::new().with_target_partitions(4))
+            .with_default_features()
+            .with_physical_analyzer_rules(vec![Arc::new(RecordingAnalyzerRule {
+                invoked: Arc::new(AtomicBool::new(false)),
+            })])
+            .build();
+        let ctx = SessionContext::new_with_state(state);
+        let schema = Arc::new(Schema::new(vec![Field::new("a", DataType::Int32, true)]));
+        let batch = RecordBatch::try_new(
+            Arc::clone(&schema),
+            vec![Arc::new(Int32Array::from(vec![1, 2]))],
+        )?;
+        let table = MemTable::try_new(schema, vec![vec![batch.clone()], vec![batch]])?;
+        ctx.register_table("t", Arc::new(table))?;
+
+        let err = ctx
+            .sql("SELECT a, count(*) FROM t GROUP BY a")
+            .await?
+            .create_physical_plan()
+            .await
+            .unwrap_err();
+        assert_contains!(
+            err.to_string(),
+            "The physical analyzer left a distribution or ordering requirement unmet"
         );
         Ok(())
     }
