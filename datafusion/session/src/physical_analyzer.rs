@@ -13,68 +13,65 @@ use datafusion_physical_plan::ExecutionPlan;
 
 use crate::physical_optimizer::PhysicalOptimizerContext;
 
-/// A `PhysicalAnalyzerRule` transforms an [`ExecutionPlan`] to make the plan
-/// *valid* prior to the rest of the DataFusion physical optimization process.
+/// A `PhysicalAnalyzerRule` runs before requirements are enforced. The
+/// analyzer phase runs the rules that must see the plan while each
+/// operator's [`ExecutionPlan::required_input_distribution`] and
+/// [`ExecutionPlan::required_input_ordering`] are only declared, then
+/// `EnsureRequirements`, which repartitions and sorts the inputs to meet them.
+/// Every [`PhysicalOptimizerRule`] after it receives a plan that meets its
+/// requirements and must return one.
 ///
-/// `PhysicalAnalyzerRule`s are different from [`PhysicalOptimizerRule`]s: an
-/// optimizer rule must preserve the semantics of an already-valid plan while
-/// computing the same results in a more efficient way, whereas an analyzer
-/// rule is what *establishes* those semantics by satisfying the invariants
-/// every operator declares.
+/// A rule belongs in the analyzer when `EnsureRequirements` reads what the
+/// rule changes (a requirement, an ordering, or statistics), as with the join
+/// mode `join_selection` picks, or when the rule needs the plan before
+/// enforcement adds repartitions and sorts, as with `WindowTopN`. A rule that
+/// reads what enforcement produced, such as `LimitPushdown`, is a
+/// [`PhysicalOptimizerRule`]. Both phases hold
+/// performance rules; what differs is the plan each one receives. A rule is
+/// one or the other: moving it to the other phase means implementing the
+/// other trait.
 ///
-/// For example, an analyzer rule may repartition an [`ExecutionPlan`]'s input
-/// to match [`ExecutionPlan::required_input_distribution`] or insert a
-/// `SortExec` to match [`ExecutionPlan::required_input_ordering`].
+/// An analyzer rule must:
 ///
-/// This mirrors the logical layer's split between [`AnalyzerRule`] (make the
-/// plan valid) and [`OptimizerRule`] (make the plan faster).
+/// - Keep the query's results unchanged. It may leave a distribution or
+///   ordering requirement unmet; `EnsureRequirements` at the end of the phase
+///   meets it.
+/// - Stay correct when the plan already contains repartitions, sorts, or
+///   operators it does not know, as happens when a plan is optimized again.
+///   It may skip its rewrite there, and decides what is safe around an
+///   operator only from what the operator declares.
 ///
-/// # Ordering
+/// # Where analyzer rules run
 ///
-/// Analyzer rules run as their own phase, before the optimizer rules, in
-/// [`DefaultPhysicalPlanner::optimize_physical_plan`]: every analyzer rule runs,
-/// then every optimizer rule. The default analyzer list is the prefix of the
-/// former single optimizer list up to and including `EnsureRequirements`, in
-/// the same order, so the split changes no plan. The rules ahead of
-/// `EnsureRequirements` sit there because enforcement has to see their output
-/// (`join_selection` resolves `PartitionMode::Auto`, which declares no
-/// requirement); some of them are optimizations, and moving those into the
-/// optimizer phase is follow-up work. An optimizer rule can assume it receives
-/// a valid plan.
+/// [`DefaultPhysicalPlanner::optimize_physical_plan`] runs every analyzer rule,
+/// then every optimizer rule. A rule appended to the analyzer list runs after
+/// `EnsureRequirements`, so it must leave the plan valid.
 ///
 /// ```text
 /// ExecutionPlan  (every operator declares its distribution and ordering
 ///                 requirements; nothing satisfies them yet)
 ///                                │
 ///                                ▼
-/// ┌─ PhysicalAnalyzer phase ── make the plan VALID ──────────────┐
-/// │ 1. OutputRequirements (add)   establish the output boundary  │
-/// │ 2. aggregate_statistics       answer aggregates from stats   │
-/// │ 3. EliminateConstantJoin      join on a constant row → filter│
-/// │ 4. join_selection             resolve PartitionMode::Auto    │
-/// │ 5. LimitedDistinctAggregation push limit hints into aggs     │
-/// │ 6. FilterPushdown             push predicates into sources   │
-/// │ 7. WindowTopN                 window + filter into TopK      │
-/// │ 8. EnsureRequirements         enforce distribution, ordering │
+/// ┌─ PhysicalAnalyzer phase ── before enforcement ───────────────┐
+/// │ rules that must run before EnsureRequirements                │
+/// │ EnsureRequirements: enforce distribution, ordering           │
 /// └──────────────────────────────┬───────────────────────────────┘
-///                                │  invariant: the plan is valid
+///                                │  every requirement is met
 ///                                ▼
-/// ┌─ PhysicalOptimizer phase ── make the plan FASTER ────────────┐
-/// │ every rule receives a valid plan and leaves a valid plan     │
+/// ┌─ PhysicalOptimizer phase ── after enforcement ───────────────┐
+/// │ every rule: valid plan in, valid plan out                    │
 /// └──────────────────────────────┬───────────────────────────────┘
 ///                                ▼
 ///                   valid, optimized ExecutionPlan
 /// ```
 ///
 /// [`DefaultPhysicalPlanner::optimize_physical_plan`]: https://docs.rs/datafusion/latest/datafusion/physical_planner/struct.DefaultPhysicalPlanner.html#method.optimize_physical_plan
-/// [`AnalyzerRule`]: https://docs.rs/datafusion/latest/datafusion/optimizer/analyzer/trait.AnalyzerRule.html
-/// [`OptimizerRule`]: https://docs.rs/datafusion/latest/datafusion/optimizer/trait.OptimizerRule.html
 ///
 /// [`PhysicalOptimizerRule`]: crate::physical_optimizer::PhysicalOptimizerRule
 /// [`ExecutionPlan::required_input_distribution`]: datafusion_physical_plan::ExecutionPlan::required_input_distribution
 /// [`ExecutionPlan::required_input_ordering`]: datafusion_physical_plan::ExecutionPlan::required_input_ordering
 pub trait PhysicalAnalyzerRule: Debug + std::any::Any {
-    /// Rewrite `plan` so that it satisfies the invariants this rule enforces.
+    /// Rewrite `plan`. See the trait docs for what the result must keep.
     ///
     /// This is the primary method. Rules that need access to the statistics
     /// registry should override [`analyze_with_context`](Self::analyze_with_context)

@@ -40,25 +40,13 @@ Rule order matters. The default pipeline may change between releases.
   ExecutionPlan       every operator declares its required input distribution
         │             and ordering; nothing satisfies them yet
         │
-        │  PhysicalAnalyzer ... ends with enforcement, the plan is VALID
-        │    1. OutputRequirements (add)   establish the output boundary
-        │    2. aggregate_statistics
-        │    3. EliminateConstantJoin
-        │    4. join_selection             resolve each join's PartitionMode::Auto
-        │    5. LimitedDistinctAggregation
-        │    6. FilterPushdown             push predicates into sources
-        │    7. WindowTopN
-        │    8. EnsureRequirements         satisfy required_input_distribution
-        │                                  and required_input_ordering
+        │  PhysicalAnalyzer ... rules that must run before EnsureRequirements,
+        │                       then EnsureRequirements
         │
-        │  ==> from here on every PhysicalOptimizerRule receives a valid plan
-        │      and must leave a valid plan
+        │  ==> from here on every PhysicalOptimizerRule receives a plan that
+        │      meets its requirements and must return one
         │
-        │  PhysicalOptimizer .. make the plan FASTER
-        │    CombinePartialFinalAggregate
-        │    ... (full list in the table below)
-        │    OutputRequirements (remove)
-        │    SanityCheckPlan
+        │  PhysicalOptimizer .. valid plan in, valid plan out
         ▼
   valid, optimized ExecutionPlan
 ```
@@ -103,20 +91,18 @@ Rule order matters. The default pipeline may change between releases.
 
 ### Physical Analyzer Rules
 
-Analyzer rules run before the physical optimizer rules, as their own phase, and
-end with requirement enforcement, so every physical optimizer rule receives a
-valid plan. The default list is the prefix of the former single optimizer list
-up to and including `EnsureRequirements`, in the same order, so the split into
-two phases changes no plan. The rules ahead of `EnsureRequirements` run here
-because enforcement has to see their output: `join_selection` resolves each
-join's `PartitionMode::Auto`, which declares no requirement, and the others
-rewrite aggregates and windows that enforcement then repartitions and sorts.
-Some of them are optimizations; moving those into the optimizer phase is
-follow-up work.
+Physical analyzer rules run before requirements are enforced. They run as
+their own phase before the physical optimizer rules and end with
+`EnsureRequirements`, so every physical optimizer rule receives a valid plan. A
+rule runs in this phase when `EnsureRequirements` reads what it changes, such
+as the join mode `join_selection` picks, or when it needs the plan before
+enforcement adds repartitions and sorts, such as `WindowTopN`. Both phases hold
+performance rules. A rule is either a `PhysicalAnalyzerRule` or a
+`PhysicalOptimizerRule`, so each rule appears in one list only.
 
 | order | rule                         | summary                                                                                                 |
 | ----- | ---------------------------- | ------------------------------------------------------------------------------------------------------- |
-| 1     | `OutputRequirements`         | Adds helper nodes so output requirements survive enforcement and later physical rewrites.               |
+| 1     | `AddOutputRequirements`      | Adds helper nodes so output requirements survive enforcement and later physical rewrites.               |
 | 2     | `aggregate_statistics`       | Uses exact source statistics to answer some aggregates without scanning data.                           |
 | 3     | `EliminateConstantJoin`      | Replaces inner joins against a single row of literals with a filter that keeps the other input's order. |
 | 4     | `join_selection`             | Resolves each join's partition mode and build side, so enforcement sees its requirements.               |
@@ -127,26 +113,21 @@ follow-up work.
 
 ### Physical Optimizer Rules
 
-The same rule name may appear more than once when the default pipeline runs it
-in multiple phases.
+`ProjectionPushdown` runs twice: before and after the limit and TopK rewrites.
 
-The rules up to and including `EnsureRequirements` run in the analyzer phase
-(see above), so they do not appear in this list. The matching
-`OutputRequirements` remove phase still runs here, late, once planning is done.
-
-| order | rule                           | phase                   | summary                                                                                                      |
-| ----- | ------------------------------ | ----------------------- | ------------------------------------------------------------------------------------------------------------ |
-| 1     | `CombinePartialFinalAggregate` | -                       | Collapses adjacent partial and final aggregates when the distributed shape makes them redundant.             |
-| 2     | `OptimizeAggregateOrder`       | -                       | Updates aggregate expressions to use the best ordering once sort requirements are known.                     |
-| 3     | `ProjectionPushdown`           | early pass              | Pushes projections toward inputs before later physical rewrites add more limit and TopK structure.           |
-| 4     | `OutputRequirements`           | remove phase            | Removes the temporary output-requirement helper nodes after requirement-sensitive planning is done.          |
-| 5     | `LimitAggregation`             | -                       | Passes a limit hint into eligible aggregations so they can keep fewer accumulator buckets.                   |
-| 6     | `LimitPushPastWindows`         | -                       | Pushes fetch limits through bounded window operators when doing so keeps the result correct.                 |
-| 7     | `HashJoinBuffering`            | -                       | Adds buffering on the probe side of hash joins so probing can start before build completion.                 |
-| 8     | `LimitPushdown`                | -                       | Moves physical limits into child operators or fetch-enabled variants to cut data early.                      |
-| 9     | `TopKRepartition`              | -                       | Pushes TopK below hash repartition when the partition key is a prefix of the sort key.                       |
-| 10    | `ProjectionPushdown`           | late pass               | Runs projection pushdown again after limit and TopK rewrites expose new pruning opportunities.               |
-| 11    | `PushdownSort`                 | -                       | Pushes sort requirements into data sources that can already return sorted output.                            |
-| 12    | `EnsureCooperative`            | -                       | Wraps non-cooperative plan parts so long-running tasks yield fairly.                                         |
-| 13    | `FilterPushdown(Post)`         | post-optimization phase | Pushes dynamic filters at the end of optimization, after plan references stop moving.                        |
-| 14    | `SanityCheckPlan`              | -                       | Validates that the final physical plan meets ordering, distribution, and infinite-input safety requirements. |
+| order | rule                           | phase      | summary                                                                                                      |
+| ----- | ------------------------------ | ---------- | ------------------------------------------------------------------------------------------------------------ |
+| 1     | `CombinePartialFinalAggregate` | -          | Collapses adjacent partial and final aggregates when the distributed shape makes them redundant.             |
+| 2     | `OptimizeAggregateOrder`       | -          | Updates aggregate expressions to use the best ordering once sort requirements are known.                     |
+| 3     | `ProjectionPushdown`           | early pass | Pushes projections toward inputs before later physical rewrites add more limit and TopK structure.           |
+| 4     | `RemoveOutputRequirements`     | -          | Removes the temporary output-requirement helper nodes after requirement-sensitive planning is done.          |
+| 5     | `LimitAggregation`             | -          | Passes a limit hint into eligible aggregations so they can keep fewer accumulator buckets.                   |
+| 6     | `LimitPushPastWindows`         | -          | Pushes fetch limits through bounded window operators when doing so keeps the result correct.                 |
+| 7     | `HashJoinBuffering`            | -          | Adds buffering on the probe side of hash joins so probing can start before build completion.                 |
+| 8     | `LimitPushdown`                | -          | Moves physical limits into child operators or fetch-enabled variants to cut data early.                      |
+| 9     | `TopKRepartition`              | -          | Pushes TopK below hash repartition when the partition key is a prefix of the sort key.                       |
+| 10    | `ProjectionPushdown`           | late pass  | Runs projection pushdown again after limit and TopK rewrites expose new pruning opportunities.               |
+| 11    | `PushdownSort`                 | -          | Pushes sort requirements into data sources that can already return sorted output.                            |
+| 12    | `EnsureCooperative`            | -          | Wraps non-cooperative plan parts so long-running tasks yield fairly.                                         |
+| 13    | `DynamicFilterPushdown`        | -          | Pushes dynamic filters at the end of optimization, after plan references stop moving.                        |
+| 14    | `SanityCheckPlan`              | -          | Validates that the final physical plan meets ordering, distribution, and infinite-input safety requirements. |

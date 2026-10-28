@@ -163,8 +163,8 @@ struct SessionStateInner {
     type_planner: Option<Arc<dyn TypePlanner>>,
     /// Responsible for optimizing a logical plan
     optimizer: Optimizer,
-    /// Responsible for enforcing invariants on a physical execution plan
-    /// (distribution, ordering) before optimization
+    /// Rules that run before requirements are enforced, ending with
+    /// `EnsureRequirements`
     physical_analyzers: PhysicalAnalyzer,
     /// Responsible for optimizing a physical execution plan
     physical_optimizers: PhysicalOptimizer,
@@ -499,19 +499,6 @@ impl SessionState {
             .analyzer
             .rules
             .push(analyzer_rule);
-        self
-    }
-
-    /// Add `physical_analyzer_rule` to the end of the list of
-    /// [`PhysicalAnalyzerRule`]s run before physical optimization.
-    pub fn add_physical_analyzer_rule(
-        &mut self,
-        physical_analyzer_rule: Arc<dyn PhysicalAnalyzerRule + Send + Sync>,
-    ) -> &Self {
-        Arc::make_mut(&mut self.inner)
-            .physical_analyzers
-            .rules
-            .push(physical_analyzer_rule);
         self
     }
 
@@ -1268,7 +1255,6 @@ pub struct SessionStateBuilder {
     // fields to support convenience functions
     analyzer_rules: Option<Vec<Arc<dyn AnalyzerRule + Send + Sync>>>,
     optimizer_rules: Option<Vec<Arc<dyn OptimizerRule + Send + Sync>>>,
-    physical_analyzer_rules: Option<Vec<Arc<dyn PhysicalAnalyzerRule + Send + Sync>>>,
     physical_optimizer_rules: Option<Vec<Arc<dyn PhysicalOptimizerRule + Send + Sync>>>,
 }
 
@@ -1314,7 +1300,6 @@ impl SessionStateBuilder {
             // fields to support convenience functions
             analyzer_rules: None,
             optimizer_rules: None,
-            physical_analyzer_rules: None,
             physical_optimizer_rules: None,
         }
     }
@@ -1382,7 +1367,6 @@ impl SessionStateBuilder {
             // fields to support convenience functions
             analyzer_rules: None,
             optimizer_rules: None,
-            physical_analyzer_rules: None,
             physical_optimizer_rules: None,
         }
     }
@@ -1554,18 +1538,6 @@ impl SessionStateBuilder {
         physical_analyzers: Vec<Arc<dyn PhysicalAnalyzerRule + Send + Sync>>,
     ) -> Self {
         self.physical_analyzers = Some(PhysicalAnalyzer::with_rules(physical_analyzers));
-        self
-    }
-
-    /// Add `physical_analyzer_rule` to the end of the list of
-    /// [`PhysicalAnalyzerRule`]s run before physical optimization.
-    pub fn with_physical_analyzer_rule(
-        mut self,
-        physical_analyzer_rule: Arc<dyn PhysicalAnalyzerRule + Send + Sync>,
-    ) -> Self {
-        let mut rules = self.physical_analyzer_rules.unwrap_or_default();
-        rules.push(physical_analyzer_rule);
-        self.physical_analyzer_rules = Some(rules);
         self
     }
 
@@ -1839,7 +1811,6 @@ impl SessionStateBuilder {
             statistics_registry,
             analyzer_rules,
             optimizer_rules,
-            physical_analyzer_rules,
             physical_optimizer_rules,
         } = self;
 
@@ -2011,14 +1982,6 @@ impl SessionStateBuilder {
             }
         }
 
-        if let Some(physical_analyzer_rules) = physical_analyzer_rules {
-            let physical_analyzers =
-                &mut Arc::make_mut(&mut state.inner).physical_analyzers;
-            for physical_analyzer_rule in physical_analyzer_rules {
-                physical_analyzers.rules.push(physical_analyzer_rule);
-            }
-        }
-
         if let Some(physical_optimizer_rules) = physical_optimizer_rules {
             let physical_optimizers =
                 &mut Arc::make_mut(&mut state.inner).physical_optimizers;
@@ -2183,13 +2146,6 @@ impl SessionStateBuilder {
     ) -> &mut Option<Vec<Arc<dyn PhysicalOptimizerRule + Send + Sync>>> {
         &mut self.physical_optimizer_rules
     }
-
-    /// Returns the current physical_analyzer_rules value
-    pub fn physical_analyzer_rules(
-        &mut self,
-    ) -> &mut Option<Vec<Arc<dyn PhysicalAnalyzerRule + Send + Sync>>> {
-        &mut self.physical_analyzer_rules
-    }
 }
 
 impl Debug for SessionStateBuilder {
@@ -2218,7 +2174,6 @@ impl Debug for SessionStateBuilder {
             .field("analyzer", &self.analyzer)
             .field("optimizer_rules", &self.optimizer_rules)
             .field("optimizer", &self.optimizer)
-            .field("physical_analyzer_rules", &self.physical_analyzer_rules)
             .field("physical_analyzers", &self.physical_analyzers)
             .field("physical_optimizer_rules", &self.physical_optimizer_rules)
             .field("physical_optimizers", &self.physical_optimizers)

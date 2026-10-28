@@ -92,6 +92,7 @@ use datafusion_physical_expr::expressions::Literal;
 use datafusion_physical_expr::{
     LexOrdering, PhysicalSortExpr, create_physical_sort_exprs,
 };
+use datafusion_physical_optimizer::output_requirements::RemoveOutputRequirements;
 use datafusion_physical_plan::empty::EmptyExec;
 use datafusion_physical_plan::execution_plan::InvariantLevel;
 use datafusion_physical_plan::joins::PiecewiseMergeJoinExec;
@@ -3159,7 +3160,7 @@ impl DefaultPhysicalPlanner {
                 let optimized_plan = self.optimize_physical_plan(
                     physical_plan,
                     session_state,
-                    |_plan, _optimizer| {},
+                    |_plan, _rule_name| {},
                 )?;
 
                 stringified_plans.push(StringifiedPlan::new(
@@ -3446,6 +3447,12 @@ impl DefaultPhysicalPlanner {
             observer(new_plan.as_ref(), optimizer.name());
         }
 
+        // The default analyzer adds `OutputRequirementExec` markers and the
+        // default optimizer removes them. Remove any that a custom optimizer
+        // list left in place, so they never reach execution.
+        new_plan = RemoveOutputRequirements::new()
+            .optimize(new_plan, session_state.config_options())?;
+
         // This runs once after all optimizer runs are complete,
         // to verify that the plan is executable.
         InvariantChecker(InvariantLevel::Executable).check(&new_plan)?;
@@ -3696,6 +3703,8 @@ fn tuple_err<T, R>(value: (Result<T>, Result<R>)) -> Result<(T, R)> {
 }
 
 struct OptimizationInvariantChecker<'a> {
+    /// `PhysicalAnalyzer` or `PhysicalOptimizer`, for error messages.
+    phase: &'static str,
     /// Name of the rule being checked, for error messages.
     rule_name: &'a str,
     /// Whether the rule promised to preserve the schema.
@@ -3706,6 +3715,7 @@ impl<'a> OptimizationInvariantChecker<'a> {
     /// Create an [`OptimizationInvariantChecker`] for a [`PhysicalOptimizerRule`].
     pub fn new(rule: &'a Arc<dyn PhysicalOptimizerRule + Send + Sync>) -> Self {
         Self {
+            phase: "PhysicalOptimizer",
             rule_name: rule.name(),
             schema_check: rule.schema_check(),
         }
@@ -3716,6 +3726,7 @@ impl<'a> OptimizationInvariantChecker<'a> {
         rule: &'a Arc<dyn PhysicalAnalyzerRule + Send + Sync>,
     ) -> Self {
         Self {
+            phase: "PhysicalAnalyzer",
             rule_name: rule.name(),
             schema_check: rule.schema_check(),
         }
@@ -3736,8 +3747,8 @@ impl<'a> OptimizationInvariantChecker<'a> {
             is_allowed_schema_change(previous_schema.as_ref(), plan.schema().as_ref())
                 .map_err(|e| {
                     e.context(format!(
-                        "PhysicalOptimizer rule '{}' failed. Schema mismatch.",
-                        self.rule_name,
+                        "{} rule '{}' failed. Schema mismatch.",
+                        self.phase, self.rule_name,
                     ))
                 })?
         }
@@ -3747,9 +3758,14 @@ impl<'a> OptimizationInvariantChecker<'a> {
         plan.apply(|node| {
             // Checks for the more permissive `InvariantLevel::Always`.
             // Plans are not guaranteed to be executable after each physical optimizer run.
-            node.check_invariants(InvariantLevel::Always).map_err(|e|
-                e.context(format!("Invariant for ExecutionPlan node '{}' failed for PhysicalOptimizer rule '{}'", node.name(), self.rule_name))
-            )?;
+            node.check_invariants(InvariantLevel::Always).map_err(|e| {
+                e.context(format!(
+                    "Invariant for ExecutionPlan node '{}' failed for {} rule '{}'",
+                    node.name(),
+                    self.phase,
+                    self.rule_name
+                ))
+            })?;
             Ok(TreeNodeRecursion::Continue)
         })?;
 
@@ -3844,6 +3860,7 @@ mod tests {
     };
     use crate::prelude::{SessionConfig, SessionContext};
     use crate::test_util::{scan_empty, scan_empty_with_partitions};
+    use datafusion_physical_optimizer::analyzer::PhysicalAnalyzer;
 
     use crate::execution::context::SessionState;
     use crate::execution::session_state::SessionStateBuilder;
@@ -3874,7 +3891,6 @@ mod tests {
     use datafusion_functions_aggregate::count::{count_all, count_udaf};
     use datafusion_functions_aggregate::expr_fn::sum;
     use datafusion_physical_expr::EquivalenceProperties;
-    use datafusion_physical_optimizer::output_requirements::OutputRequirementExec;
     use datafusion_physical_plan::execution_plan::{Boundedness, EmissionType};
     use datafusion_physical_plan::operator_statistics::StatisticsRegistry;
     use datafusion_physical_plan::statistics::StatisticsArgs;
@@ -3945,9 +3961,8 @@ mod tests {
     }
 
     /// The default session state runs the former optimizer prefix, up to and
-    /// including `EnsureRequirements`, as the analyzer phase, and none of those
-    /// rules again in the optimizer phase (only the post-phase `FilterPushdown`,
-    /// which links dynamic filters, stays there).
+    /// including `EnsureRequirements`, as the analyzer phase, then the
+    /// optimizer rules.
     #[test]
     fn default_session_runs_the_analyzer_prefix_then_the_optimizer() {
         let state = make_session_state();
@@ -3960,7 +3975,7 @@ mod tests {
         assert_eq!(
             analyzer_names,
             vec![
-                "OutputRequirements",
+                "AddOutputRequirements",
                 "aggregate_statistics",
                 "EliminateConstantJoin",
                 "join_selection",
@@ -3969,7 +3984,6 @@ mod tests {
                 "WindowTopN",
                 "EnsureRequirements",
             ],
-            "unexpected analyzer phase: {analyzer_names:?}"
         );
 
         let optimizer_names: Vec<&str> = state
@@ -3977,21 +3991,25 @@ mod tests {
             .iter()
             .map(|r| r.name())
             .collect();
-        assert!(optimizer_names.contains(&"FilterPushdown(Post)"));
-        for moved in [
-            "aggregate_statistics",
-            "EliminateConstantJoin",
-            "join_selection",
-            "LimitedDistinctAggregation",
-            "FilterPushdown",
-            "WindowTopN",
-            "EnsureRequirements",
-        ] {
-            assert!(
-                !optimizer_names.contains(&moved),
-                "{moved} runs in the analyzer and must not repeat in the optimizer, got {optimizer_names:?}"
-            );
-        }
+        assert_eq!(
+            optimizer_names,
+            vec![
+                "CombinePartialFinalAggregate",
+                "OptimizeAggregateOrder",
+                "ProjectionPushdown",
+                "RemoveOutputRequirements",
+                "LimitAggregation",
+                "LimitPushPastWindows",
+                "HashJoinBuffering",
+                "LimitPushdown",
+                "TopKRepartition",
+                "ProjectionPushdown",
+                "PushdownSort",
+                "EnsureCooperative",
+                "DynamicFilterPushdown",
+                "SanityCheckPlan",
+            ],
+        );
     }
 
     #[tokio::test]
@@ -3999,13 +4017,18 @@ mod tests {
         let invoked = Arc::new(AtomicBool::new(false));
         let runtime = Arc::new(RuntimeEnv::default());
         let config = SessionConfig::new().with_target_partitions(4);
+        // The custom rule goes in front of the default analyzer rules, so it
+        // runs before `EnsureRequirements`.
+        let mut analyzer_rules: Vec<Arc<dyn PhysicalAnalyzerRule + Send + Sync>> =
+            vec![Arc::new(RecordingAnalyzerRule {
+                invoked: Arc::clone(&invoked),
+            })];
+        analyzer_rules.extend(PhysicalAnalyzer::new().rules);
         let state = SessionStateBuilder::new()
             .with_config(config)
             .with_runtime_env(runtime)
             .with_default_features()
-            .with_physical_analyzer_rule(Arc::new(RecordingAnalyzerRule {
-                invoked: Arc::clone(&invoked),
-            }))
+            .with_physical_analyzer_rules(analyzer_rules)
             .build();
 
         // A group-by forces a repartition, so `EnsureRequirements`, the last
@@ -4268,16 +4291,7 @@ mod tests {
 
         let logical_plan = LogicalPlanBuilder::empty(false).build()?;
         let physical_plan = session.create_physical_plan(&logical_plan).await?;
-        // The default physical analyzer wraps the root in an
-        // `OutputRequirementExec` (add phase). This custom session replaces the
-        // optimizer rules, so the matching remove phase never runs and the
-        // marker survives; descend through it to reach the planned leaf.
-        let leaf = if physical_plan.is::<OutputRequirementExec>() {
-            Arc::clone(physical_plan.children()[0])
-        } else {
-            Arc::clone(&physical_plan)
-        };
-        assert!(leaf.is::<EmptyExec>());
+        assert!(physical_plan.is::<EmptyExec>());
         assert!(query_planner_invoked.load(AtomicOrdering::Relaxed));
         assert_eq!(recorded.lock().len(), 1);
         Ok(())
@@ -5272,22 +5286,7 @@ mod tests {
         .aggregate(vec![col("d1")], vec![sum(col("d2"))])?
         .build()?;
 
-        // Force the tiny input to be partitioned (a `batch_size` of 1 makes the
-        // 6-row scan exceed a batch, so it is parallelized) so this test still
-        // exercises the partitioned-aggregation path. Distribution enforcement
-        // now parallelizes purely on estimated row count, so a table smaller
-        // than one batch would otherwise run single-partition (`Final`).
-        let config = SessionConfig::new()
-            .with_target_partitions(4)
-            .with_batch_size(1);
-        let session_state = SessionStateBuilder::new()
-            .with_config(config)
-            .with_default_features()
-            .build();
-        let logical_plan = session_state.optimize(&logical_plan)?;
-        let execution_plan = DefaultPhysicalPlanner::default()
-            .create_physical_plan(&logical_plan, &session_state)
-            .await?;
+        let execution_plan = plan(&logical_plan).await?;
         let formatted = format!("{execution_plan:?}");
 
         // Make sure the plan contains a FinalPartitioned, which means it will not use the Final

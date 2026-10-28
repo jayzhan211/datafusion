@@ -19,7 +19,6 @@ use datafusion_physical_plan::udaf::{
 use datafusion_physical_plan::{ExecutionPlan, expressions};
 use std::sync::Arc;
 
-use crate::PhysicalOptimizerRule;
 use crate::analyzer::PhysicalAnalyzerRule;
 use crate::optimizer::{ConfigOnlyContext, PhysicalOptimizerContext};
 
@@ -34,17 +33,17 @@ impl AggregateStatistics {
     }
 }
 
-impl PhysicalOptimizerRule for AggregateStatistics {
-    fn optimize(
+impl PhysicalAnalyzerRule for AggregateStatistics {
+    fn analyze(
         &self,
         plan: Arc<dyn ExecutionPlan>,
         config: &ConfigOptions,
     ) -> Result<Arc<dyn ExecutionPlan>> {
-        self.optimize_with_context(plan, &ConfigOnlyContext::new(config))
+        self.analyze_with_context(plan, &ConfigOnlyContext::new(config))
     }
 
     #[cfg_attr(feature = "recursive_protection", recursive::recursive)]
-    fn optimize_with_context(
+    fn analyze_with_context(
         &self,
         plan: Arc<dyn ExecutionPlan>,
         context: &dyn PhysicalOptimizerContext,
@@ -87,14 +86,14 @@ impl PhysicalOptimizerRule for AggregateStatistics {
                 )?))
             } else {
                 plan.map_children(|child| {
-                    self.optimize_with_context(child, context)
+                    self.analyze_with_context(child, context)
                         .map(Transformed::yes)
                 })
                 .data()
             }
         } else {
             plan.map_children(|child| {
-                self.optimize_with_context(child, context)
+                self.analyze_with_context(child, context)
                     .map(Transformed::yes)
             })
             .data()
@@ -108,27 +107,6 @@ impl PhysicalOptimizerRule for AggregateStatistics {
     /// This rule will change the nullable properties of the schema, disable the schema check.
     fn schema_check(&self) -> bool {
         false
-    }
-}
-
-/// The same rewrite as the [`PhysicalOptimizerRule`] impl. The default
-/// analyzer registers this rule in the position it held in the optimizer list
-/// before the analyzer phase existed, ahead of `EnsureRequirements`.
-impl PhysicalAnalyzerRule for AggregateStatistics {
-    fn analyze(
-        &self,
-        plan: Arc<dyn ExecutionPlan>,
-        config: &ConfigOptions,
-    ) -> Result<Arc<dyn ExecutionPlan>> {
-        PhysicalOptimizerRule::optimize(self, plan, config)
-    }
-
-    fn name(&self) -> &str {
-        PhysicalOptimizerRule::name(self)
-    }
-
-    fn schema_check(&self) -> bool {
-        PhysicalOptimizerRule::schema_check(self)
     }
 }
 

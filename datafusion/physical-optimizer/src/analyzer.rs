@@ -12,7 +12,7 @@ use crate::ensure_requirements::EnsureRequirements;
 use crate::filter_pushdown::FilterPushdown;
 use crate::join_selection::JoinSelection;
 use crate::limited_distinct_aggregation::LimitedDistinctAggregation;
-use crate::output_requirements::OutputRequirements;
+use crate::output_requirements::AddOutputRequirements;
 use crate::window_topn::WindowTopN;
 
 // Re-export from this module for convenience.
@@ -20,10 +20,11 @@ pub use datafusion_session::PhysicalAnalyzerRule;
 
 /// A rule-based physical analyzer.
 ///
-/// The analyzer phase runs before the
-/// [`PhysicalOptimizer`](crate::optimizer::PhysicalOptimizer) phase and ends
-/// with requirement enforcement, so every optimizer rule receives a valid plan.
-/// See [`PhysicalAnalyzerRule`] for details.
+/// The analyzer phase runs the rules that must see the plan before its
+/// distribution and ordering requirements are enforced, then
+/// `EnsureRequirements`, so every rule of the
+/// [`PhysicalOptimizer`](crate::optimizer::PhysicalOptimizer) phase receives a
+/// plan that meets them. See [`PhysicalAnalyzerRule`] for details.
 #[derive(Clone, Debug)]
 pub struct PhysicalAnalyzer {
     /// All rules to apply
@@ -39,22 +40,19 @@ impl Default for PhysicalAnalyzer {
 impl PhysicalAnalyzer {
     /// Create a new analyzer using the recommended list of rules
     pub fn new() -> Self {
-        // This is the prefix of the former single optimizer list, up to and
-        // including `EnsureRequirements`, in the same order, so the split into
-        // two phases changes no plan. The rules ahead of `EnsureRequirements`
-        // run here because enforcement has to see their output: `JoinSelection`
-        // resolves `PartitionMode::Auto`, which declares no requirement; the
-        // others rewrite aggregates and windows that enforcement then
-        // repartitions and sorts. Moving the ones that are optimizations into
-        // the optimizer phase is follow-up work.
+        // `AddOutputRequirements` records the query's output ordering and
+        // distribution for `EnsureRequirements`, which meets every requirement.
+        // The others are performance rules whose results `EnsureRequirements`
+        // reads, or that need the plan before enforcement changes it.
         let rules: Vec<Arc<dyn PhysicalAnalyzerRule + Send + Sync>> = vec![
             // If there is a output requirement of the query, make sure that
             // this information is not lost across different rules during optimization.
-            Arc::new(OutputRequirements::new_add_mode()),
+            Arc::new(AddOutputRequirements::new()),
             Arc::new(AggregateStatistics::new()),
             // Runs after AggregateStatistics, which can fold a scalar subquery into a
             // row of literals, and before EnsureRequirements, so that the filter
             // replacing a join against such a row keeps the other input's ordering.
+            // Also runs before FilterPushdown, which pushes that filter into the scan.
             Arc::new(EliminateConstantJoin::new()),
             // Statistics-based join selection will change the Auto mode to a real join implementation,
             // like collect left, or hash join, or future sort merge join, which will influence the
@@ -69,7 +67,7 @@ impl PhysicalAnalyzer {
             // The FilterPushdown rule tries to push down filters as far as it can.
             // For example, it will push down filtering from a `FilterExec` to `DataSourceExec`.
             // Note that this does not push down dynamic filters (such as those created by a `SortExec` operator in TopK mode),
-            // those are handled by the later `FilterPushdown` rule.
+            // those are handled by `DynamicFilterPushdown` in the optimizer list.
             // See `FilterPushdownPhase` for more details.
             Arc::new(FilterPushdown::new()),
             // WindowTopN: replaces Filter(rn<=K) → Window(ROW_NUMBER) with
@@ -112,7 +110,6 @@ impl PhysicalAnalyzer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::optimizer::PhysicalOptimizer;
 
     /// The default analyzer is the former optimizer prefix, in the same order,
     /// ending with enforcement.
@@ -123,7 +120,7 @@ mod tests {
         assert_eq!(
             names,
             vec![
-                "OutputRequirements",
+                "AddOutputRequirements",
                 "aggregate_statistics",
                 "EliminateConstantJoin",
                 "join_selection",
@@ -133,29 +130,5 @@ mod tests {
                 "EnsureRequirements",
             ]
         );
-    }
-
-    /// The rules that moved to the analyzer are not run a second time by the
-    /// default optimizer. `OutputRequirements` is the exception by design: its
-    /// add mode runs in the analyzer and its remove mode in the optimizer.
-    #[test]
-    fn default_optimizer_does_not_repeat_analyzer_rules() {
-        let analyzer_names: Vec<String> = PhysicalAnalyzer::new()
-            .rules
-            .iter()
-            .map(|r| r.name().to_string())
-            .filter(|n| n != "OutputRequirements")
-            .collect();
-        let optimizer_names: Vec<String> = PhysicalOptimizer::new()
-            .rules
-            .iter()
-            .map(|r| r.name().to_string())
-            .collect();
-        for name in analyzer_names {
-            assert!(
-                !optimizer_names.contains(&name),
-                "{name} runs in the analyzer and must not repeat in the optimizer, got {optimizer_names:?}"
-            );
-        }
     }
 }

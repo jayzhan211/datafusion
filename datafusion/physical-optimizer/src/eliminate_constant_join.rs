@@ -20,7 +20,6 @@ use datafusion_physical_plan::placeholder_row::PlaceholderRowExec;
 use datafusion_physical_plan::projection::{ProjectionExec, ProjectionExpr};
 use datafusion_physical_plan::{ExecutionPlan, ExecutionPlanProperties};
 
-use crate::PhysicalOptimizerRule;
 use crate::analyzer::PhysicalAnalyzerRule;
 
 /// Rewrites an inner [`NestedLoopJoinExec`] or a [`CrossJoinExec`] whose input
@@ -52,8 +51,8 @@ impl EliminateConstantJoin {
     }
 }
 
-impl PhysicalOptimizerRule for EliminateConstantJoin {
-    fn optimize(
+impl PhysicalAnalyzerRule for EliminateConstantJoin {
+    fn analyze(
         &self,
         plan: Arc<dyn ExecutionPlan>,
         _config: &ConfigOptions,
@@ -81,27 +80,6 @@ impl PhysicalOptimizerRule for EliminateConstantJoin {
 
     fn schema_check(&self) -> bool {
         true
-    }
-}
-
-/// The same rewrite as the [`PhysicalOptimizerRule`] impl. The default
-/// analyzer registers this rule in the position it held in the optimizer list
-/// before the analyzer phase existed, ahead of `EnsureRequirements`.
-impl PhysicalAnalyzerRule for EliminateConstantJoin {
-    fn analyze(
-        &self,
-        plan: Arc<dyn ExecutionPlan>,
-        config: &ConfigOptions,
-    ) -> Result<Arc<dyn ExecutionPlan>> {
-        PhysicalOptimizerRule::optimize(self, plan, config)
-    }
-
-    fn name(&self) -> &str {
-        PhysicalOptimizerRule::name(self)
-    }
-
-    fn schema_check(&self) -> bool {
-        PhysicalOptimizerRule::schema_check(self)
     }
 }
 

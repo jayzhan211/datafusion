@@ -11,9 +11,9 @@ use std::sync::Arc;
 
 use crate::combine_partial_final_agg::CombinePartialFinalAggregate;
 use crate::ensure_coop::EnsureCooperative;
-use crate::filter_pushdown::FilterPushdown;
+use crate::filter_pushdown::DynamicFilterPushdown;
 use crate::limit_pushdown::LimitPushdown;
-use crate::output_requirements::OutputRequirements;
+use crate::output_requirements::RemoveOutputRequirements;
 use crate::projection_pushdown::ProjectionPushdown;
 use crate::sanity_checker::SanityCheckPlan;
 use crate::topk_aggregation::TopKAggregation;
@@ -75,13 +75,24 @@ impl PhysicalOptimizerContext for ConfigOnlyContext<'_> {
 /// for projects that extend or reorder the default rule list and for
 /// contributors adding new built-in rules.
 ///
+/// The [`PhysicalAnalyzer`] phase runs before these rules and ends with
+/// [`EnsureRequirements`], so the first rule already receives a plan that
+/// meets every distribution and ordering requirement. Until
+/// [`RemoveOutputRequirements`] runs, the plan also holds the
+/// `OutputRequirementExec` markers that record the query's output ordering;
+/// they are not executable.
+///
+/// [`PhysicalAnalyzer`]: crate::analyzer::PhysicalAnalyzer
+/// [`EnsureRequirements`]: crate::ensure_requirements::EnsureRequirements
+///
 /// ## Invariants
 ///
 /// The following properties hold for all rules (built-in and custom):
 ///
 /// 1. **Correctness.** The returned plan must a) be valid (it can be executed
-///    without internal errors) and b) produce the same results as the input
-///    plan. A rule may change the operators in the plan, such as changing
+///    without internal errors, and it meets every distribution and ordering
+///    requirement its operators declare, as [`SanityCheckPlan`] checks) and
+///    b) produce the same results as the input plan. A rule may change the operators in the plan, such as changing
 ///    which operator implements a join, but it may never change the query's
 ///    semantics.
 ///
@@ -91,13 +102,11 @@ impl PhysicalOptimizerContext for ConfigOnlyContext<'_> {
 ///
 /// ### Exceptions
 ///
-/// Some built-in rules do not yet fully satisfy the invariants above because
-/// they are responsible for making an initial plan *executable* rather than for
-/// optimizing an existing plan:
+/// Some built-in rules do not yet fully satisfy the invariants above:
 ///
-/// - [`EnsureRequirements`] inserts the repartitioning and sorting needed to
-///   satisfy the distribution and ordering requirements.
-/// - [`OutputRequirements`] records output requirements.
+/// - [`RemoveOutputRequirements`] drops the markers that record the
+///   query's output requirements, so the rules after it no longer see them.
+///   Rules that must keep the query's output ordering run before it.
 /// - [`SanityCheckPlan`] rejects plans whose requirements are not satisfied.
 ///   It should run last.
 ///
@@ -145,6 +154,8 @@ impl PhysicalOptimizerContext for ConfigOnlyContext<'_> {
 ///
 /// If you do build a custom pipeline:
 ///
+/// - **End a custom analyzer list with [`EnsureRequirements`],** so the
+///   optimizer rules receive a valid plan.
 /// - **Reordering must still yield a valid plan.** Downstream projects are
 ///   encouraged to add tests that run their pipeline end to end and check
 ///   results, as DataFusion's own tests only cover the default order.
@@ -189,7 +200,7 @@ impl PhysicalOptimizer {
             Arc::new(ProjectionPushdown::new()),
             // Remove the ancillary output requirement operator since we are done with the planning
             // phase.
-            Arc::new(OutputRequirements::new_remove_mode()),
+            Arc::new(RemoveOutputRequirements::new()),
             // The aggregation limiter will try to find situations where the accumulator count
             // is not tied to the cardinality, i.e. when the output of the aggregation is passed
             // into an `order by max(x) limit y`. In this case it will copy the limit value down
@@ -225,7 +236,7 @@ impl PhysicalOptimizer {
             // This FilterPushdown handles dynamic filters that may have references to the source ExecutionPlan.
             // Therefore, it should be run at the end of the optimization process since any changes to the plan may break the dynamic filter's references.
             // See `FilterPushdownPhase` for more details.
-            Arc::new(FilterPushdown::new_post_optimization()),
+            Arc::new(DynamicFilterPushdown::new()),
             // The SanityCheckPlan rule checks whether the order and
             // distribution requirements of each node in the plan
             // is satisfied. It will also reject non-runnable query
