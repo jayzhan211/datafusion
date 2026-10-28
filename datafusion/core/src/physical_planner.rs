@@ -1795,6 +1795,18 @@ impl DefaultPhysicalPlanner {
                     )
                 };
 
+                // PoC: choose the join mode and build side when the join is created.
+                let join = if datafusion_physical_optimizer::poc_placement::enabled(
+                    "js_planner",
+                ) {
+                    datafusion_physical_optimizer::join_selection::select_join(
+                        join,
+                        &SessionOptimizerContext::new(session_state),
+                    )?
+                } else {
+                    join
+                };
+
                 // If plan was mutated previously then need to create the ExecutionPlan
                 // for the new Projection that was applied on top.
                 if let Some((input, expr)) = new_project {

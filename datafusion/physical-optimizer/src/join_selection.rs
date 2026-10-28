@@ -168,6 +168,90 @@ impl PhysicalOptimizerRule for JoinSelection {
     }
 }
 
+/// PoC: the runnability passes of [`JoinSelection`] (symmetric hash join for
+/// unbounded inputs, unbounded side probes) as their own rule.
+#[derive(Default, Debug)]
+pub struct JoinSelectionRunnability {}
+
+impl JoinSelectionRunnability {
+    pub fn new() -> Self {
+        Self {}
+    }
+}
+
+impl PhysicalOptimizerRule for JoinSelectionRunnability {
+    fn optimize(
+        &self,
+        plan: Arc<dyn ExecutionPlan>,
+        config: &ConfigOptions,
+    ) -> Result<Arc<dyn ExecutionPlan>> {
+        let subrules: Vec<Box<PipelineFixerSubrule>> = vec![
+            Box::new(hash_join_convert_symmetric_subrule),
+            Box::new(hash_join_swap_subrule),
+        ];
+        plan.transform_up(|p| apply_subrules(p, &subrules, config))
+            .data()
+    }
+
+    fn name(&self) -> &str {
+        "join_selection_runnability"
+    }
+
+    fn schema_check(&self) -> bool {
+        true
+    }
+}
+
+/// PoC: the statistics pass of [`JoinSelection`] as its own rule.
+#[derive(Default, Debug)]
+pub struct JoinSelectionStatistics {}
+
+impl JoinSelectionStatistics {
+    pub fn new() -> Self {
+        Self {}
+    }
+}
+
+impl PhysicalOptimizerRule for JoinSelectionStatistics {
+    fn optimize(
+        &self,
+        plan: Arc<dyn ExecutionPlan>,
+        config: &ConfigOptions,
+    ) -> Result<Arc<dyn ExecutionPlan>> {
+        self.optimize_with_context(plan, &ConfigOnlyContext::new(config))
+    }
+
+    fn optimize_with_context(
+        &self,
+        plan: Arc<dyn ExecutionPlan>,
+        context: &dyn PhysicalOptimizerContext,
+    ) -> Result<Arc<dyn ExecutionPlan>> {
+        plan.transform_up(|plan| statistical_join_selection_subrule(plan, context))
+            .data()
+    }
+
+    fn name(&self) -> &str {
+        "join_selection_statistics"
+    }
+
+    fn schema_check(&self) -> bool {
+        true
+    }
+}
+
+/// PoC: [`JoinSelection`] applied to one newly created join, for the planner.
+pub fn select_join(
+    plan: Arc<dyn ExecutionPlan>,
+    context: &dyn PhysicalOptimizerContext,
+) -> Result<Arc<dyn ExecutionPlan>> {
+    let subrules: Vec<Box<PipelineFixerSubrule>> = vec![
+        Box::new(hash_join_convert_symmetric_subrule),
+        Box::new(hash_join_swap_subrule),
+    ];
+    let plan = apply_subrules(plan, &subrules, context.config_options())?.data;
+    Ok(statistical_join_selection_subrule(plan, context)?.data)
+}
+
 /// Determines whether it is possible to swap inputs of a hash join. Of the
 /// null-aware joins only a `LeftAnti` can be swapped: the resulting `RightAnti`
 /// decides `NOT IN` per probe row, including multi-column and correlated

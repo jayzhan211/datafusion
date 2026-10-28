@@ -193,72 +193,8 @@ impl Default for PhysicalOptimizer {
 impl PhysicalOptimizer {
     /// Create a new optimizer using the recommended list of rules
     pub fn new() -> Self {
-        // NOTEs:
-        // - The order of rules in this list is important, as it determines the
-        //   order in which they are applied.
-        // - Adding a new rule here is expensive as it will be applied to all
-        //   queries, and will likely increase the optimization time. Please extend
-        //   existing rules when possible, rather than adding a new rule.
-        let rules: Vec<Arc<dyn PhysicalOptimizerRule + Send + Sync>> = vec![
-            // The rules up to and including `EnsureRequirements` run in the
-            // analyzer phase (see `PhysicalAnalyzer`), so every rule here
-            // receives a plan whose requirements are already enforced.
-            // The CombinePartialFinalAggregate rule should be applied after distribution enforcement
-            Arc::new(CombinePartialFinalAggregate::new()),
-            // Run once after the local sorting requirement is changed
-            Arc::new(OptimizeAggregateOrder::new()),
-            // TODO: `try_embed_to_hash_join` in the ProjectionPushdown rule would be block by the CoalesceBatches, so add it before CoalesceBatches. Maybe optimize it in the future.
-            Arc::new(ProjectionPushdown::new()),
-            // Remove the ancillary output requirement operator since we are done with the planning
-            // phase.
-            Arc::new(OutputRequirements::new_remove_mode()),
-            // The aggregation limiter will try to find situations where the accumulator count
-            // is not tied to the cardinality, i.e. when the output of the aggregation is passed
-            // into an `order by max(x) limit y`. In this case it will copy the limit value down
-            // to the aggregation, allowing it to use only y number of accumulators.
-            Arc::new(TopKAggregation::new()),
-            // Tries to push limits down through window functions, growing as appropriate
-            // This can possibly be combined with [LimitPushdown]
-            // It needs to come after [EnsureRequirements] (which handles sort enforcement)
-            Arc::new(LimitPushPastWindows::new()),
-            // The HashJoinBuffering rule adds a BufferExec node with the configured capacity
-            // in the prob side of hash joins. That way, the probe side gets eagerly polled before
-            // the build side is completely finished.
-            Arc::new(HashJoinBuffering::new()),
-            // The LimitPushdown rule tries to push limits down as far as possible,
-            // replacing operators with fetching variants, or adding limits
-            // past operators that support limit pushdown.
-            Arc::new(LimitPushdown::new()),
-            // TopKRepartition pushes TopK (Sort with fetch) below Hash
-            // repartition when the partition key is a prefix of the sort key.
-            // This reduces data volume before a hash shuffle. It must run
-            // after LimitPushdown so that the TopK already exists on the SortExec.
-            Arc::new(TopKRepartition::new()),
-            // The ProjectionPushdown rule tries to push projections towards
-            // the sources in the execution plan. As a result of this process,
-            // a projection can disappear if it reaches the source providers, and
-            // sequential projections can merge into one. Even if these two cases
-            // are not present, the load of executors such as join or union will be
-            // reduced by narrowing their input tables.
-            Arc::new(ProjectionPushdown::new()),
-            // PushdownSort: Detect sorts that can be pushed down to data sources.
-            Arc::new(PushdownSort::new()),
-            Arc::new(EnsureCooperative::new()),
-            // This FilterPushdown handles dynamic filters that may have references to the source ExecutionPlan.
-            // Therefore, it should be run at the end of the optimization process since any changes to the plan may break the dynamic filter's references.
-            // See `FilterPushdownPhase` for more details.
-            Arc::new(FilterPushdown::new_post_optimization()),
-            // The SanityCheckPlan rule checks whether the order and
-            // distribution requirements of each node in the plan
-            // is satisfied. It will also reject non-runnable query
-            // plans that use pipeline-breaking operators on infinite
-            // input(s). The rule generates a diagnostic error
-            // message for invalid plans. It makes no changes to the
-            // given query plan; i.e. it only acts as a final
-            // gatekeeping rule.
-            Arc::new(SanityCheckPlan::new()),
-        ];
-
+        // PoC: the lists come from `poc_placement`, which `DF_POC` rearranges.
+        let (_, rules) = crate::poc_placement::pipeline();
         Self::with_rules(rules)
     }
 
