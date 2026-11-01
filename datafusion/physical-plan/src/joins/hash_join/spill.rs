@@ -551,6 +551,10 @@ impl KeptMemory {
             .map(|pair| {
                 largest = largest.max(pair);
                 let mut piece = pair;
+                // PoC: DF_HJ_KEEP=all keeps everything held, up to the largest pair
+                if std::env::var("DF_HJ_KEEP").is_ok_and(|v| v == "all") {
+                    return pair;
+                }
                 while piece > held && piece >= BUCKETS {
                     piece = piece.div_ceil(BUCKETS);
                 }
@@ -882,12 +886,14 @@ fn join_pair(
         // Even split evenly at every level left, the pair's pieces would not
         // fit: ask the pool now instead of splitting into ever more files
         let pieces = BUCKETS.saturating_pow((MAX_LEVEL.saturating_sub(level)) as u32);
-        if need.div_ceil(pieces.max(1)) > kept.capacity() {
-            kept.grow_toward(need, need.div_ceil(pieces.max(1)));
+        let smallest_piece = need.div_ceil(pieces.max(1));
+        if smallest_piece > kept.capacity() {
+            // Only what one more split needs, like the memory kept at the
+            // first split: the whole pair would starve other operators
+            kept.grow_toward(need.div_ceil(BUCKETS).max(smallest_piece), smallest_piece);
         }
         // (The test knob keeps splitting, so forced runs still reach the rungs)
-        let splits_cannot_fit =
-            kept.trigger.cap.is_none() && need.div_ceil(pieces.max(1)) > kept.capacity();
+        let splits_cannot_fit = kept.trigger.cap.is_none() && smallest_piece > kept.capacity();
         let fits = need <= kept.capacity();
         if build.rows == 0 || fits || level >= MAX_LEVEL || splits_cannot_fit {
             let forced = if level >= MAX_LEVEL { forced_rung() } else { None };
