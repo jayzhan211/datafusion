@@ -1,0 +1,10 @@
+---
+source: datafusion/common/src/cast_properties.rs
+expression: report
+---
+is_lossless (0): 
+preserves_order (0): 
+supports_min_max_pruning (26): Int8 -> Boolean (order), Int8 -> Binary (order), Int8 -> LargeBinary (order), Int16 -> Boolean (order), Int16 -> Binary (order), Int16 -> LargeBinary (order), Int32 -> Boolean (order), Int32 -> Binary (order), Int32 -> LargeBinary (order), Int64 -> Boolean (order), Int64 -> Binary (order), Int64 -> LargeBinary (order), UInt16 -> Binary (order), UInt16 -> LargeBinary (order), UInt32 -> Binary (order), UInt32 -> LargeBinary (order), UInt64 -> Binary (order), UInt64 -> LargeBinary (order), Float32 -> Boolean (order), Float64 -> Boolean (order), Timestamp(s) -> Time32(s) (order), Timestamp(s) -> Time64(ns) (order), Timestamp(ns) -> Time32(s) (order), Timestamp(ns) -> Time64(ns) (order), Timestamp(ns, "UTC") -> Time32(s) (order), Timestamp(ns, "UTC") -> Time64(ns) (order)
+can_propagate_bounds_back (0): 
+is_exact_for_unwrap (0): 
+is_injective (0):

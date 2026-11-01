@@ -22,6 +22,7 @@ use arrow::datatypes::{
 use arrow::temporal_conversions::{
     MICROSECONDS, MILLISECONDS, MILLISECONDS_IN_DAY, NANOSECONDS,
 };
+use datafusion_common::cast_properties;
 use datafusion_common::{Result, ScalarValue};
 
 /// Source-domain preimage of `CAST(source_expr AS target_type) OP literal`.
@@ -164,9 +165,9 @@ pub fn exact_preimage_cast(
 
     // Apply a family-level gate: the source→target cast must normally preserve
     // the full source domain. Integer or decimal sources to a decimal target
-    // are admitted by scale instead (see `is_exact_cast_safe`), accepting
+    // are admitted by scale instead (see `is_exact_for_unwrap`), accepting
     // precision/width overflow as a boolean result for out-of-range rows.
-    if !is_exact_cast_safe(source_type, target_type) {
+    if !cast_properties::is_exact_for_unwrap(source_type, target_type) {
         return None;
     }
 
@@ -202,142 +203,6 @@ fn timestamp_cast_types<'a>(
     (matches!(source, DataType::Timestamp(_, _))
         && matches!(target, DataType::Timestamp(_, _)))
     .then_some((source, target))
-}
-
-/// Returns `true` when casting `source_type` to `target_type` is exact and
-/// order-preserving over the source values the cast succeeds on. Integer or
-/// decimal sources to a decimal target are admitted when the source scale is
-/// nonnegative and the target scale is at least the source scale: a successful
-/// cast only multiplies the unscaled value by an integral power of ten.
-/// Precision or width overflow is the explicit exception: `CAST` errors and
-/// `TRY_CAST` yields NULL for such source values, while the rewritten predicate
-/// compares the source value and returns TRUE/FALSE. This rule is type-based
-/// and does not distinguish implicit coercions from explicit casts.
-///
-/// This is a conservative gate used by [`exact_preimage_cast`] for the non
-/// timestamp cast families; timestamp casts are handled by
-/// [`timestamp_preimage`] instead.
-fn is_exact_cast_safe(source_type: &DataType, target_type: &DataType) -> bool {
-    // Unwrap at most one level of dictionary for family-level checking.
-    let (src, tgt) = match (source_type, target_type) {
-        (DataType::Dictionary(_, v_src), DataType::Dictionary(_, v_tgt)) => {
-            (v_src.as_ref(), v_tgt.as_ref())
-        }
-        (DataType::Dictionary(_, v_src), tgt) => (v_src.as_ref(), tgt),
-        (src, DataType::Dictionary(_, v_tgt)) => (src, v_tgt.as_ref()),
-        _ => (source_type, target_type),
-    };
-
-    // Integer or decimal sources to a decimal target are accepted when the
-    // source scale is nonnegative and the target only adds fractional digits.
-    // This precedes identity so negative-scale decimals are rejected by the
-    // scale check instead of reaching the scale arithmetic and panicking.
-    if is_decimal_type(tgt) && (is_decimal_type(src) || is_integer_type(src)) {
-        let s_src = if is_decimal_type(src) {
-            decimal_precision_scale(src).1
-        } else {
-            0
-        };
-        return s_src >= 0 && decimal_precision_scale(tgt).1 >= s_src;
-    }
-
-    if src == tgt {
-        return true;
-    }
-
-    // Whitelist of family-level safe casts.  Anything not listed here is
-    // considered potentially information-losing and blocked.
-    if is_integer_type(src) && is_integer_type(tgt) {
-        return is_safe_integer_cast(src, tgt);
-    }
-    if matches!(
-        (src, tgt),
-        (DataType::Date32, DataType::Int32)
-            | (DataType::Int32, DataType::Date32)
-            | (DataType::Date64, DataType::Int64)
-            | (DataType::Int64, DataType::Date64)
-    ) {
-        // Date32 ↔ Int32 and Date64 ↔ Int64 share the same internal
-        // representation.
-        return true;
-    }
-    if matches!((src, tgt), (DataType::Date32, DataType::Date64)) {
-        // Date32 → Date64 is injective: every source day maps to its midnight
-        // millisecond value. The literal conversion below enforces the exact
-        // day-boundary requirement in the reverse direction.
-        return true;
-    }
-    if is_supported_string_type(src) && is_supported_string_type(tgt) {
-        // String width casts among Utf8 / LargeUtf8 / Utf8View.
-        return true;
-    }
-    if matches!((src, tgt), (DataType::FixedSizeBinary(_), DataType::Binary)) {
-        // FixedSizeBinary(n) → Binary is always widening.
-        return true;
-    }
-    if matches!(
-        (src, tgt),
-        (DataType::FixedSizeBinary(n1), DataType::FixedSizeBinary(n2)) if n1 == n2
-    ) {
-        return true;
-    }
-    false
-}
-
-/// Returns `true` for integer types (signed and unsigned, excluding Date and
-/// Decimal).
-fn is_integer_type(dt: &DataType) -> bool {
-    matches!(
-        dt,
-        DataType::Int8
-            | DataType::Int16
-            | DataType::Int32
-            | DataType::Int64
-            | DataType::UInt8
-            | DataType::UInt16
-            | DataType::UInt32
-            | DataType::UInt64
-    )
-}
-
-/// Integer cast that is value-preserving over the full source domain.
-fn is_safe_integer_cast(src: &DataType, tgt: &DataType) -> bool {
-    use DataType::*;
-    match (src, tgt) {
-        // Signed → wider signed
-        (Int8, Int16 | Int32 | Int64) => true,
-        (Int16, Int32 | Int64) => true,
-        (Int32, Int64) => true,
-        // Unsigned → wider unsigned
-        (UInt8, UInt16 | UInt32 | UInt64) => true,
-        (UInt16, UInt32 | UInt64) => true,
-        (UInt32, UInt64) => true,
-        // Unsigned → wider signed (full source range fits in target)
-        (UInt8, Int16 | Int32 | Int64) => true,
-        (UInt16, Int32 | Int64) => true,
-        (UInt32, Int64) => true,
-        // Anything else is narrowing, partial, or crosses signedness
-        // without guaranteed domain containment.
-        _ => false,
-    }
-}
-
-fn is_decimal_type(dt: &DataType) -> bool {
-    matches!(
-        dt,
-        DataType::Decimal128(_, _)
-            | DataType::Decimal64(_, _)
-            | DataType::Decimal32(_, _)
-    )
-}
-
-fn decimal_precision_scale(dt: &DataType) -> (u8, i8) {
-    match dt {
-        DataType::Decimal128(p, s)
-        | DataType::Decimal64(p, s)
-        | DataType::Decimal32(p, s) => (*p, *s),
-        _ => unreachable!(),
-    }
 }
 
 /// Computes a singleton preimage for equality-like predicates over casts whose
@@ -617,7 +482,7 @@ fn is_lossy_temporal_cast(from_type: &DataType, to_type: &DataType) -> bool {
 /// may carry sub-day values the planner cannot see; the widening direction
 /// (`Date32 -> Date64`) is injective and stays allowed.
 ///
-/// This pair is already rejected by the `is_exact_cast_safe` allowlist
+/// This pair is already rejected by the `is_exact_for_unwrap` allowlist
 /// (including when wrapped in a `Dictionary`), so predicate rewrites do not need
 /// a separate `Date64 -> Date32` early return.
 #[deprecated(

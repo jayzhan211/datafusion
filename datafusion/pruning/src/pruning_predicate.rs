@@ -26,6 +26,7 @@ use datafusion_physical_expr::simplifier::PhysicalExprSimplifier;
 use datafusion_physical_plan::metrics::Count;
 use log::{debug, trace};
 
+use datafusion_common::cast_properties;
 use datafusion_common::error::Result;
 use datafusion_common::tree_node::{TransformedResult, TreeNodeRecursion};
 use datafusion_common::{_internal_datafusion_err, Column, assert_eq_or_internal_err};
@@ -1331,28 +1332,8 @@ fn is_compare_op(op: Operator) -> bool {
     )
 }
 
-// The pruning logic is based on the comparing the min/max bounds.
-// Must make sure the two type has order.
-// For example, casts from string to numbers is not correct.
-// Because the "13" is less than "3" with UTF8 comparison order.
 fn verify_support_type_for_prune(from_type: &DataType, to_type: &DataType) -> Result<()> {
-    // Dictionary casts are always supported as long as the value types are supported
-    let from_type = match from_type {
-        DataType::Dictionary(_, t) => {
-            return verify_support_type_for_prune(t.as_ref(), to_type);
-        }
-        _ => from_type,
-    };
-    let to_type = match to_type {
-        DataType::Dictionary(_, t) => {
-            return verify_support_type_for_prune(from_type, t.as_ref());
-        }
-        _ => to_type,
-    };
-    // If both types are strings or both are not strings (number, timestamp, etc)
-    // then we can compare them.
-    // PruningPredicate does not support casting of strings to numbers and such.
-    if from_type.is_string() == to_type.is_string() {
+    if cast_properties::supports_min_max_pruning(from_type, to_type) {
         Ok(())
     } else {
         plan_err!(

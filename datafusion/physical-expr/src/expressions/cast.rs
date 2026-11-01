@@ -9,10 +9,13 @@ use std::sync::Arc;
 use crate::physical_expr::PhysicalExpr;
 
 use arrow::compute::{CastOptions, can_cast_types};
-use arrow::datatypes::{DataType, DataType::*, Field, FieldRef, Metadata, Schema};
+#[cfg(test)]
+use arrow::datatypes::DataType::*;
+use arrow::datatypes::{DataType, Field, FieldRef, Metadata, Schema};
 use arrow::record_batch::RecordBatch;
 use arrow::util::display::{ArrayFormatterFactory, DurationFormat, FormatOptions};
 use arrow_schema::extension::{EXTENSION_TYPE_METADATA_KEY, EXTENSION_TYPE_NAME_KEY};
+use datafusion_common::cast_properties;
 use datafusion_common::datatype::DataTypeExt;
 use datafusion_common::format::DEFAULT_FORMAT_OPTIONS;
 use datafusion_common::nested_struct::{
@@ -345,73 +348,13 @@ impl CastExpr {
     /// as days since the epoch, or `Int64` to `Date64`, which interprets the same
     /// integer as milliseconds since the epoch.
     pub fn check_bigger_cast(cast_type: &DataType, src: &DataType) -> bool {
-        if cast_type.eq(src) {
-            return true;
-        }
-        matches!(
-            (src, cast_type),
-            (Int8, Int16 | Int32 | Int64)
-                | (Int16, Int32 | Int64)
-                | (Int32, Int64)
-                | (Int32, Date32)
-                | (Date32, Int32)
-                | (Int64, Date64)
-                | (Date64, Int64)
-                | (UInt8, UInt16 | UInt32 | UInt64 | Int16 | Int32 | Int64)
-                | (UInt16, UInt32 | UInt64 | Int32 | Int64)
-                | (UInt32, UInt64 | Int64)
-                | (Int8 | Int16 | UInt8 | UInt16, Float32)
-                | (Int8 | Int16 | Int32 | UInt8 | UInt16 | UInt32, Float64)
-                | (Utf8, LargeUtf8 | Utf8View)
-                | (Binary, LargeBinary | BinaryView)
-        )
+        cast_properties::is_lossless(src, cast_type)
     }
 
     /// Check if the cast is lossless and strictly order-preserving for all source
     /// values, preserving nulls. See [`Self::check_bigger_cast`].
     pub fn is_bigger_cast(&self, src: &DataType) -> bool {
         Self::check_bigger_cast(self.cast_type(), src)
-    }
-}
-
-/// UTC and fixed offsets have no timezone transitions.
-fn is_fixed_offset(tz: &str) -> bool {
-    tz == "UTC" || tz.starts_with(['+', '-'])
-}
-
-/// Whether successful casts preserve order when conversion failures return errors.
-/// Unlike `check_bigger_cast`, this allows precision loss and is not sufficient
-/// for propagating distinct counts or the ordering of subsequent sort keys.
-fn is_order_preserving_cast(source_type: &DataType, target_type: &DataType) -> bool {
-    use arrow::datatypes::TimeUnit::*;
-    if source_type == target_type
-        || (source_type.is_numeric() || *source_type == Boolean)
-            && target_type.is_numeric()
-    {
-        return true;
-    }
-    // Temporal casts are not generally monotonic: extracting time-of-day wraps
-    // at midnight, and timezone transitions can reverse the local date.
-    match (source_type, target_type) {
-        (Date32 | Date64, Date32 | Date64)
-        | (Date32 | Date64, Timestamp(_, None))
-        | (Timestamp(_, None), Date32) => true,
-        (Timestamp(_, Some(tz)), Date32) => is_fixed_offset(tz),
-        // Arrow converts timestamps to Date64 by scaling the epoch value,
-        // whereas Date32 extracts the date in the timestamp's timezone.
-        (Timestamp(_, _), Date64) => true,
-        // Only admit scaling that cannot wrap on overflow. Time64 widening
-        // and narrowing to Time32 do not currently check overflow in Arrow.
-        (Time32(Second | Millisecond), Time32(Second | Millisecond))
-        | (Time32(Second | Millisecond), Time64(Microsecond | Nanosecond))
-        | (Time64(Nanosecond), Time64(Microsecond))
-        | (Duration(_), Duration(_)) => true,
-        (Timestamp(_, from_tz), Timestamp(_, to_tz)) => {
-            // Adding a timezone to naive timestamps interprets local times;
-            // other timezone changes only change metadata on the epoch value.
-            from_tz.is_some() || to_tz.as_deref().is_none_or(is_fixed_offset)
-        }
-        _ => false,
     }
 }
 
@@ -429,7 +372,8 @@ pub(crate) fn cast_expr_properties(
     // New NULLs from failed conversions may violate NULLS FIRST/LAST, even
     // if the successfully converted values remain ordered.
     if bigger_cast
-        || (!null_on_failure && is_order_preserving_cast(&source_type, target_type))
+        || (!null_on_failure
+            && cast_properties::preserves_order(&source_type, target_type))
     {
         Ok(child
             .clone()
@@ -632,7 +576,7 @@ impl PhysicalExpr for CastExpr {
     ) -> Result<Option<Vec<Interval>>> {
         let source_type = children[0].data_type();
         let target_type = self.cast_type();
-        if !can_propagate_cast_constraints(&source_type, target_type) {
+        if !cast_properties::can_propagate_bounds_back(&source_type, target_type) {
             return Ok(Some(vec![]));
         }
         Ok(Some(vec![
@@ -685,41 +629,6 @@ impl PhysicalExpr for CastExpr {
                 },
             ))),
         }))
-    }
-}
-
-/// Whether output bounds can be cast back to `source` without excluding valid inputs.
-///
-/// Used for reverse constraint propagation through a cast from `source` to `target`.
-/// Many-to-one casts, such as Float64 to Int32, cannot generally be inverted this way:
-/// an output of 0 does not imply an input of 0.0.
-/// Returns false for unrecognized conversions so the input range remains unchanged.
-fn can_propagate_cast_constraints(source: &DataType, target: &DataType) -> bool {
-    CastExpr::check_bigger_cast(target, source)
-        || (source.is_integer() && target.is_integer())
-        // NaN bounds are unbounded; finite Float32 values widen exactly.
-        || (*source == Float32 && *target == Float64)
-        || is_decimal_widening(source, target)
-}
-
-/// Whether a decimal-to-decimal cast keeps every value exactly, i.e. the target
-/// has at least as many fractional and integer digits as the source. Casting
-/// bounds back to the source then rounds to a neighboring representable value,
-/// which never excludes a valid input.
-fn is_decimal_widening(source: &DataType, target: &DataType) -> bool {
-    fn precision_scale(data_type: &DataType) -> Option<(i16, i16)> {
-        match data_type {
-            Decimal32(p, s) | Decimal64(p, s) | Decimal128(p, s) | Decimal256(p, s) => {
-                Some((*p as i16, *s as i16))
-            }
-            _ => None,
-        }
-    }
-    match (precision_scale(source), precision_scale(target)) {
-        (Some((source_p, source_s)), Some((target_p, target_s))) => {
-            target_s >= source_s && target_p - target_s >= source_p - source_s
-        }
-        _ => false,
     }
 }
 

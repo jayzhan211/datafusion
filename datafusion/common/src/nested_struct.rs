@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: See the NOTICE file distributed with this work for additional information regarding copyright ownership
 // SPDX-FileContributor: Licensed to the Apache Software Foundation (ASF) under one or more contributor license agreements
 
+use crate::cast_properties;
 use crate::error::{_plan_err, Result};
 use arrow::{
     array::{
@@ -900,41 +901,10 @@ fn validate_map_key_data_type(
 }
 
 /// Returns true when casting from `source_type` to `target_type` is known to
-/// preserve value identity, so distinct source values stay distinct.
-///
-/// Keep this list conservative. Map keys and decorrelated equality keys depend
-/// on identity, so only representation widenings that cannot merge distinct
-/// source values belong here. Other Arrow-supported casts, including
-/// decimal/timestamp widening and dictionaries, should stay rejected until
-/// their identity semantics are deliberately reviewed.
+/// preserve value identity, so distinct source values stay distinct. See
+/// [`cast_properties::is_injective`].
 pub fn is_injective_cast(source_type: &DataType, target_type: &DataType) -> bool {
-    matches!(
-        (source_type, target_type),
-        (
-            DataType::Int8,
-            DataType::Int16 | DataType::Int32 | DataType::Int64
-        ) | (DataType::Int16, DataType::Int32 | DataType::Int64)
-            | (DataType::Int32, DataType::Int64)
-            | (
-                DataType::UInt8,
-                DataType::Int16
-                    | DataType::Int32
-                    | DataType::Int64
-                    | DataType::UInt16
-                    | DataType::UInt32
-                    | DataType::UInt64
-            )
-            | (
-                DataType::UInt16,
-                DataType::Int32 | DataType::Int64 | DataType::UInt32 | DataType::UInt64
-            )
-            | (DataType::UInt32, DataType::Int64 | DataType::UInt64)
-            | (DataType::Utf8, DataType::LargeUtf8 | DataType::Utf8View)
-            | (
-                DataType::Binary,
-                DataType::LargeBinary | DataType::BinaryView
-            )
-    )
+    cast_properties::is_injective(source_type, target_type)
 }
 
 fn validate_map_entries_field(entries: &Field) -> Result<(&FieldRef, &FieldRef)> {
