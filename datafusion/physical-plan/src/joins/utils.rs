@@ -1284,6 +1284,13 @@ impl<T> Clone for OnceFutState<T> {
 }
 
 impl<T: 'static> OnceFut<T> {
+    /// A [`OnceFut`] already resolved to `value`
+    pub(crate) fn ready(value: Arc<T>) -> Self {
+        Self {
+            state: OnceFutState::Ready(Ok(value)),
+        }
+    }
+
     /// Create a new [`OnceFut`] from a [`Future`]
     pub(crate) fn new<Fut>(fut: Fut) -> Self
     where
