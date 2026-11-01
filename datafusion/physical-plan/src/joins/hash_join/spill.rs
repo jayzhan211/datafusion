@@ -275,6 +275,7 @@ async fn split_build(
     let mut build = BucketedBuild::new(0);
     let mut collected = kept.buffers.size();
     for batch in batches {
+        let _timer = ctx.build.metrics.build_time.timer();
         build.push(ctx, &kept, &batch)?;
         let released = get_record_batch_memory_size(&batch).min(collected);
         kept.buffers.shrink(released);
@@ -282,11 +283,15 @@ async fn split_build(
     }
     kept.buffers.shrink(collected);
     while let Some(batch) = rest.try_next().await? {
+        let _timer = ctx.build.metrics.build_time.timer();
         build.push(ctx, &kept, &batch)?;
     }
     drop(rest);
 
-    let (mut resident, mut spilled) = build.finish(ctx, &kept)?;
+    let (mut resident, mut spilled) = {
+        let _timer = ctx.build.metrics.build_time.timer();
+        build.finish(ctx, &kept)?
+    };
     let mut reservation = kept.buffers.split(kept.buffers.size());
     let left_data = match ctx
         .build

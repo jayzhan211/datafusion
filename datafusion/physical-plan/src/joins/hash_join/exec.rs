@@ -34,7 +34,7 @@ use crate::joins::utils::{
     is_existence_join, reorder_output_after_swap, swap_join_projection, update_hash,
 };
 use crate::joins::{JoinOn, JoinOnRef, PartitionMode, ReservedMap, SharedBitmapBuilder};
-use crate::metrics::{Count, MetricBuilder, MetricCategory};
+use crate::metrics::{Count, Gauge, MetricBuilder, MetricCategory};
 use crate::projection::{
     EmbeddedProjection, JoinData, ProjectionExec, try_embed_projection,
     try_pushdown_through_join_with_column_indices,
@@ -3534,7 +3534,14 @@ impl BuildParams {
         let max_batch_rows = batches.iter().map(|b| b.num_rows()).max().unwrap_or(0);
         let mut counter = RecordBatchMemoryCounter::new();
         let input_bytes = batches.iter().map(|b| counter.count_batch(b)).sum();
-        build_in_memory(
+        let _timer = self.metrics.build_time.timer();
+        // A spilled partition builds one table after another: report the
+        // largest, not their sum. The gauge starts at the input, which the
+        // build may give back when it concatenates.
+        let mut metrics = self.metrics.clone();
+        metrics.build_mem_used = Gauge::new();
+        metrics.build_mem_used.add(input_bytes);
+        let built = build_in_memory(
             &self.random_state,
             &self.schema,
             batches,
@@ -3543,7 +3550,7 @@ impl BuildParams {
             input_bytes,
             0,
             &self.on_left,
-            &self.metrics,
+            &metrics,
             reservation,
             None,
             self.with_visited_indices_bitmap,
@@ -3554,7 +3561,11 @@ impl BuildParams {
             None,
             &self.array_map_created_count,
             false,
-        )
+        );
+        self.metrics
+            .build_mem_used
+            .set_max(metrics.build_mem_used.value());
+        built
     }
 }
 
