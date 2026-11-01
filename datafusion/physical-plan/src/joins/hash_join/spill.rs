@@ -336,12 +336,11 @@ async fn split_build(
     // Joining a spilled pair needs at most what its largest bucket takes:
     // keep that, and let the rest go back to the pool once the kept buckets
     // are joined, so operators that start later are not starved.
-    let largest = spilled
-        .iter()
-        .map(|(_, side)| join_bytes(side.rows, side.bytes))
-        .max()
-        .unwrap_or(0);
-    kept.keep_for_spilled_pairs(largest);
+    kept.keep_for_spilled_pairs(
+        spilled
+            .iter()
+            .map(|(_, side)| join_bytes(side.rows, side.bytes)),
+    );
 
     let mut buckets = [false; BUCKETS];
     for (bucket, _) in &spilled {
@@ -541,17 +540,58 @@ impl KeptMemory {
         granted
     }
 
-    /// Keeps at most `bytes` once the memory in use is released
-    fn keep_for_spilled_pairs(&self, bytes: usize) {
+    /// Keeps what joining the spilled pairs takes once the memory in use is
+    /// released. A pair larger than the memory held is split anyway, so it
+    /// only needs what its pieces take after the splits it needs: keeping
+    /// more would only starve other operators.
+    fn keep_for_spilled_pairs(&self, pairs: impl Iterator<Item = usize>) {
+        let held = self.pool.reserved();
+        let mut largest = 0;
+        let bytes = pairs
+            .map(|pair| {
+                largest = largest.max(pair);
+                let mut piece = pair;
+                while piece > held && piece >= BUCKETS {
+                    piece = piece.div_ceil(BUCKETS);
+                }
+                piece
+            })
+            .max()
+            .unwrap_or(0);
         if std::env::var_os("DF_HJ_RUNG_LOG").is_some() {
             eprintln!(
-                "HJ_KEEP for_spilled_pairs largest={bytes} reserved={}",
-                self.pool.reserved()
+                "HJ_KEEP for_spilled_pairs largest={largest} reserved={held} keep={}",
+                bytes.min(held)
             );
         }
-        let bytes = bytes.min(self.pool.reserved());
+        let bytes = bytes.min(held);
         self.pool.retain(bytes);
         self.for_spilled_pairs.store(bytes, Ordering::Relaxed);
+    }
+
+    /// Asks the pool for more kept memory, up to `want` bytes and at least
+    /// `useful`, halving the request on refusal. For a pair the splits left
+    /// cannot bring under the kept memory, as when the build side overflowed
+    /// holding almost nothing: splitting would only write more files.
+    fn grow_toward(&self, want: usize, useful: usize) {
+        let have = self.capacity();
+        if self.trigger.cap.is_some() || want <= have {
+            return;
+        }
+        let probe = self.buffers.new_empty();
+        let mut more = want - have;
+        while more > 0 && have + more >= useful {
+            if probe.try_grow(more).is_ok() {
+                let kept = have + more;
+                self.pool.retain(kept.min(self.pool.reserved()));
+                self.for_spilled_pairs.store(kept, Ordering::Relaxed);
+                if std::env::var_os("DF_HJ_RUNG_LOG").is_some() {
+                    eprintln!("HJ_KEEP grow from={have} to={kept}");
+                }
+                return;
+            }
+            more /= 2;
+        }
     }
 
     /// What joining one spilled pair may use without asking the execution pool
@@ -838,8 +878,18 @@ fn join_pair(
     level: usize,
 ) -> BoxFuture<'static, Result<SendableRecordBatchStream>> {
     async move {
-        let fits = join_bytes(build.rows, build.bytes) <= kept.capacity();
-        if build.rows == 0 || fits || level >= MAX_LEVEL {
+        let need = join_bytes(build.rows, build.bytes);
+        // Even split evenly at every level left, the pair's pieces would not
+        // fit: ask the pool now instead of splitting into ever more files
+        let pieces = BUCKETS.saturating_pow((MAX_LEVEL.saturating_sub(level)) as u32);
+        if need.div_ceil(pieces.max(1)) > kept.capacity() {
+            kept.grow_toward(need, need.div_ceil(pieces.max(1)));
+        }
+        // (The test knob keeps splitting, so forced runs still reach the rungs)
+        let splits_cannot_fit =
+            kept.trigger.cap.is_none() && need.div_ceil(pieces.max(1)) > kept.capacity();
+        let fits = need <= kept.capacity();
+        if build.rows == 0 || fits || level >= MAX_LEVEL || splits_cannot_fit {
             let forced = if level >= MAX_LEVEL { forced_rung() } else { None };
             let joined = match forced {
                 Some(_) => resources_err!("PoC: DF_HJ_RUNG skips the in-memory join"),
@@ -851,6 +901,7 @@ fn join_pair(
                 Err(e)
                     if build.rows > 0
                         && level < MAX_LEVEL
+                        && !splits_cannot_fit
                         && is_resources_exhausted(&e) => {}
                 // Splitting cannot shrink this pair any further: hash its
                 // probe rows instead if they fit, else hash it a chunk at a time
