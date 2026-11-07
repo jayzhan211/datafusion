@@ -16,15 +16,25 @@
 # under the License.
 
 # This file runs the post-optimization `FilterPushdown` before `JoinSelection`
-# (see `rule_order.rs`). `JoinSelection` leaves a join that carries a dynamic
-# filter unchanged, so the join's mode is still undecided when it reaches
-# enforcement.
+# (see `rule_order.rs`). A Parquet scan accepts the join's dynamic filter, and
+# `JoinSelection` leaves a join that carries one unchanged, so the join's mode is
+# still undecided when it reaches enforcement.
 
 statement ok
-CREATE TABLE l (a INT, b INT) AS VALUES (1, 10), (2, 20);
+COPY (SELECT column1 AS a, column2 AS b FROM (VALUES (1, 10), (2, 20)))
+TO 'test_files/scratch/rule_order_filter_pushdown_post/l.parquet' STORED AS PARQUET;
 
 statement ok
-CREATE TABLE r (a INT, c INT) AS VALUES (1, 100), (2, 200), (2, 201), (3, 300);
+COPY (SELECT column1 AS a, column2 AS c FROM (VALUES (1, 100), (2, 200), (2, 201), (3, 300)))
+TO 'test_files/scratch/rule_order_filter_pushdown_post/r.parquet' STORED AS PARQUET;
+
+statement ok
+CREATE EXTERNAL TABLE l
+STORED AS PARQUET LOCATION 'test_files/scratch/rule_order_filter_pushdown_post/l.parquet';
+
+statement ok
+CREATE EXTERNAL TABLE r
+STORED AS PARQUET LOCATION 'test_files/scratch/rule_order_filter_pushdown_post/r.parquet';
 
 query III
 SELECT l.a, b, c FROM l JOIN r ON l.a = r.a ORDER BY c;
