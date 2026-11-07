@@ -15,9 +15,10 @@
 # specific language governing permissions and limitations
 # under the License.
 
-# This file runs `WindowTopN` after `EnsureRequirements` (see `rule_order.rs`). The
-# rewrite must not break the requirements enforcement already met: nothing later
-# repairs them.
+# This file runs `WindowTopN` after `EnsureRequirements` and after the output
+# marker is removed (see `rule_order.rs`). `PartitionedTopKExec` orders by the
+# partition keys with default options, so it can't replace an order that a plan
+# with its requirements met may rely on.
 
 statement ok
 CREATE TABLE t (pk INT, v INT, id INT) AS VALUES
@@ -36,6 +37,16 @@ SELECT pk, rk, rn, id NOT IN (3, 6) FROM (
 ----
 1 1 1 true
 2 1 1 true
+
+# Enforcement sorts by `pk DESC` for both the window and the `ORDER BY`, then
+# removes the sort for the `ORDER BY`.
+query III
+SELECT pk, v, rn FROM (
+  SELECT pk, v, row_number() OVER (PARTITION BY pk ORDER BY v, id) AS rn FROM t
+) WHERE rn <= 1 ORDER BY pk DESC, v;
+----
+2 0 1
+1 0 1
 
 statement ok
 SET datafusion.optimizer.enable_window_topn = false;
