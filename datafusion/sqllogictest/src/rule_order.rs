@@ -58,6 +58,22 @@ fn spec_for_file(file_name: &str) -> Option<&'static str> {
         "rule_order_output_requirements.slt" => {
             Some("move:OutputRequirements#2:before:OutputRequirements")
         }
+        "rule_order_filter_past_fetch.slt" => {
+            Some("move:FilterPushdown:after:LimitPushdown")
+        }
+        "rule_order_window_limit.slt" => {
+            Some("move:LimitPushPastWindows:before:EnsureRequirements")
+        }
+        "rule_order_aggregate_order.slt" => {
+            Some("move:OptimizeAggregateOrder:before:join_selection")
+        }
+        "rule_order_sort_fetch.slt" => Some("move:EnsureRequirements:after:PushdownSort"),
+        "rule_order_symmetric_join_limit.slt" => {
+            Some("move:LimitPushdown:before:join_selection")
+        }
+        "rule_order_volatile_filter.slt" => {
+            Some("move:ProjectionPushdown:before:FilterPushdown")
+        }
         "rule_order_join_order.slt" => {
             Some("move:join_selection:after:OutputRequirements#2")
         }
