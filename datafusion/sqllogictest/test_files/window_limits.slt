@@ -1564,7 +1564,7 @@ logical_plan
 physical_plan
 01)GlobalLimitExec: skip=2, fetch=1
 02)--SortPreservingMergeExec: [a@0 ASC NULLS LAST], fetch=3
-03)----DataSourceExec: file_groups={4 groups: [[WORKSPACE_ROOT/datafusion/sqllogictest/test_files/scratch/window_limits/sorted_offset/first.csv:0..4], [WORKSPACE_ROOT/datafusion/sqllogictest/test_files/scratch/window_limits/sorted_offset/second.csv:0..4], [WORKSPACE_ROOT/datafusion/sqllogictest/test_files/scratch/window_limits/sorted_offset/first.csv:4..8], [WORKSPACE_ROOT/datafusion/sqllogictest/test_files/scratch/window_limits/sorted_offset/second.csv:4..8]]}, projection=[a], limit=3, output_ordering=[a@0 ASC NULLS LAST], file_type=csv, has_header=false
+03)----DataSourceExec: file_groups={2 groups: [[WORKSPACE_ROOT/datafusion/sqllogictest/test_files/scratch/window_limits/sorted_offset/first.csv], [WORKSPACE_ROOT/datafusion/sqllogictest/test_files/scratch/window_limits/sorted_offset/second.csv]]}, projection=[a], limit=3, output_ordering=[a@0 ASC NULLS LAST], file_type=csv, has_header=false
 
 # Also cover the OFFSET-only shape from #26690.
 query I
