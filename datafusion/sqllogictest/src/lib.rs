@@ -32,6 +32,7 @@ pub use engines::Postgres;
 
 mod filters;
 mod memory_drift;
+mod rule_order;
 mod test_context;
 mod util;
 
