@@ -8,12 +8,14 @@
 use std::sync::Arc;
 
 use datafusion_common::error::Result;
-use datafusion_physical_plan::ExecutionPlan;
 use datafusion_physical_plan::aggregates::AggregateExec;
+use datafusion_physical_plan::{ExecutionPlan, ExecutionPlanProperties};
 
 use crate::PhysicalOptimizerRule;
+use crate::sanity_checker::check_input_requirements;
 use datafusion_common::config::ConfigOptions;
-use datafusion_common::tree_node::{TransformedResult, TreeNode};
+use datafusion_common::tree_node::{Transformed, TransformedResult, TreeNode};
+use datafusion_physical_expr_common::physical_expr::is_volatile;
 
 /// Combines adjacent partial and final `AggregateExec`s into a single aggregate
 /// when their grouping and aggregate expressions match.
@@ -72,10 +74,21 @@ impl PhysicalOptimizerRule for CombinePartialFinalAggregate {
     fn optimize(
         &self,
         plan: Arc<dyn ExecutionPlan>,
-        _config: &ConfigOptions,
+        config: &ConfigOptions,
     ) -> Result<Arc<dyn ExecutionPlan>> {
-        plan.transform_down(AggregateExec::try_combine_partial_final)
-            .data()
+        plan.transform_down(|plan| {
+            let combined = AggregateExec::try_combine_partial_final(Arc::clone(&plan))?;
+            if combined.transformed
+                && !enforcement_keeps_input(
+                    &combined.data,
+                    config.execution.target_partitions,
+                )
+            {
+                return Ok(Transformed::no(plan));
+            }
+            Ok(combined)
+        })
+        .data()
     }
 
     fn name(&self) -> &str {
@@ -85,6 +98,26 @@ impl PhysicalOptimizerRule for CombinePartialFinalAggregate {
     fn schema_check(&self) -> bool {
         true
     }
+}
+
+/// Whether `combined` can keep its input as it is, so enforcement won't add a
+/// repartition on its raw group keys. That is what combining assumes, and such a
+/// repartition evaluates a volatile key a second time.
+fn enforcement_keeps_input(
+    combined: &Arc<dyn ExecutionPlan>,
+    target_partitions: usize,
+) -> bool {
+    if check_input_requirements(combined).is_err() {
+        return false;
+    }
+    // Enforcement also hashes an input that meets the requirement but has few
+    // partitions, to add parallelism.
+    let Some(aggregate) = combined.downcast_ref::<AggregateExec>() else {
+        return true;
+    };
+    let few_partitions =
+        aggregate.input().output_partitioning().partition_count() < target_partitions;
+    !few_partitions || !aggregate.group_expr().input_exprs().iter().any(is_volatile)
 }
 
 // See tests in datafusion/core/tests/physical_optimizer
