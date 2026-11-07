@@ -1,0 +1,59 @@
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
+
+#   http://www.apache.org/licenses/LICENSE-2.0
+
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
+
+# This file runs `JoinSelection` after `EnsureRequirements` (see `rule_order.rs`).
+# Enforcement must settle the mode of a join still in `Auto` mode, and
+# `JoinSelection` must not then pick a mode or swap inputs in a way that breaks
+# the requirements enforcement already met.
+
+statement ok
+CREATE TABLE small (a INT, b INT) AS VALUES (1, 10), (2, 20);
+
+statement ok
+CREATE TABLE big (a INT, c INT) AS VALUES (1, 100), (2, 200), (2, 201), (3, 300);
+
+query III
+SELECT small.a, b, c FROM small JOIN big ON small.a = big.a ORDER BY c;
+----
+1 10 100
+2 20 200
+2 20 201
+
+query III
+SELECT big.a, b, c FROM big LEFT JOIN small ON small.a = big.a ORDER BY c;
+----
+1 10 100
+2 20 200
+2 20 201
+3 NULL 300
+
+query II
+SELECT a, c FROM big WHERE a NOT IN (SELECT a FROM small);
+----
+3 300
+
+query II
+SELECT small.a, big.a FROM small CROSS JOIN big ORDER BY small.a, big.c LIMIT 2;
+----
+1 1
+1 2
+
+statement ok
+DROP TABLE small;
+
+statement ok
+DROP TABLE big;

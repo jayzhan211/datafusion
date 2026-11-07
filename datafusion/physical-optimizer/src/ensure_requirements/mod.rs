@@ -187,8 +187,19 @@ impl PhysicalOptimizerRule for EnsureRequirements {
         // Interleaves are distribution artifacts of Phase 2, which re-derives
         // them from the children's final partitioning. Keeping them would
         // fail as soon as a child loses the partitioning they depend on.
-        use super::enforce_distribution::replace_interleave_with_union;
-        let plan = plan.transform_down(replace_interleave_with_union).data()?;
+        //
+        // A join still in `Auto` mode declares no distribution, so it would get
+        // no repartitioning. `JoinSelection` normally picks the mode earlier;
+        // when it hasn't, settle on the mode that is always valid to enforce.
+        use super::enforce_distribution::{
+            replace_interleave_with_union, resolve_auto_join_mode,
+        };
+        let plan = plan
+            .transform_down(|plan| {
+                replace_interleave_with_union(plan)?
+                    .transform_data(resolve_auto_join_mode)
+            })
+            .data()?;
 
         // Phase 1: Join key reordering (top-down, from EnforceDistribution)
         use super::enforce_distribution::{

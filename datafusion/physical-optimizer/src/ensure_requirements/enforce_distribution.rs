@@ -806,6 +806,27 @@ fn new_join_conditions(
         .collect()
 }
 
+/// Picks the mode of a join still in [`PartitionMode::Auto`]: `CollectLeft` for
+/// a null-aware join, which needs global probe-side state, and otherwise
+/// `Partitioned`.
+pub(crate) fn resolve_auto_join_mode(
+    plan: Arc<dyn ExecutionPlan>,
+) -> Result<Transformed<Arc<dyn ExecutionPlan>>> {
+    let Some(hash_join) = plan.downcast_ref::<HashJoinExec>() else {
+        return Ok(Transformed::no(plan));
+    };
+    if *hash_join.partition_mode() != PartitionMode::Auto {
+        return Ok(Transformed::no(plan));
+    }
+    let mode = if hash_join.null_aware {
+        PartitionMode::CollectLeft
+    } else {
+        PartitionMode::Partitioned
+    };
+    let resolved = hash_join.builder().with_partition_mode(mode).build()?;
+    Ok(Transformed::yes(Arc::new(resolved)))
+}
+
 /// Turns an [`InterleaveExec`] back into the equivalent [`UnionExec`], for
 /// use with `transform_down` before distribution is (re-)enforced.
 ///
