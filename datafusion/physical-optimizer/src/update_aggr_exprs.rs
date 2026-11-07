@@ -19,6 +19,7 @@ use datafusion_physical_plan::windows::get_ordered_partition_by_indices;
 use datafusion_physical_plan::{ExecutionPlan, ExecutionPlanProperties};
 
 use crate::PhysicalOptimizerRule;
+use crate::join_selection::has_auto_join;
 
 /// This optimizer rule checks ordering requirements of aggregate expressions.
 ///
@@ -75,6 +76,12 @@ impl PhysicalOptimizerRule for OptimizeAggregateOrder {
                 }
                 let input = aggr_exec.input();
                 let mut aggr_exprs = aggr_exec.aggr_expr().to_vec();
+
+                // Nothing records that the aggregate relies on this order, and a
+                // join in `Auto` mode can still swap its inputs and lose it.
+                if has_auto_join(input) {
+                    return Ok(Transformed::no(plan));
+                }
 
                 // If the existing ordering satisfies a prefix of the GROUP BY
                 // expressions, prefix requirements with this section. In this

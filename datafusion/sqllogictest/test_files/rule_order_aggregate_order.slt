@@ -1,0 +1,43 @@
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
+
+#   http://www.apache.org/licenses/LICENSE-2.0
+
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
+
+# This file runs `OptimizeAggregateOrder` before `JoinSelection` (see `rule_order.rs`).
+# `first_value` would rely on the order of the join's probe side, which nothing records,
+# and swapping the join's inputs loses it. The matches are s=2 and s=3, so the answer is 200.
+
+statement ok
+COPY (SELECT column1 AS s, column2 AS x, column3 AS k FROM (VALUES (1,100,1),(2,200,2),(3,300,3))) TO 'test_files/scratch/rule_order_aggregate_order/small.parquet' STORED AS PARQUET;
+
+statement ok
+CREATE EXTERNAL TABLE small (s BIGINT, x BIGINT, k BIGINT) STORED AS PARQUET WITH ORDER (s ASC) LOCATION 'test_files/scratch/rule_order_aggregate_order/small.parquet';
+
+statement ok
+COPY (SELECT (4 - (value % 3))::BIGINT AS k, value AS v FROM generate_series(1, 1000)) TO 'test_files/scratch/rule_order_aggregate_order/big.parquet' STORED AS PARQUET;
+
+statement ok
+CREATE EXTERNAL TABLE big (k BIGINT, v BIGINT) STORED AS PARQUET LOCATION 'test_files/scratch/rule_order_aggregate_order/big.parquet';
+
+query I
+SELECT first_value(small.x ORDER BY small.s) FROM big JOIN small ON big.k = small.k;
+----
+200
+
+statement ok
+DROP TABLE small;
+
+statement ok
+DROP TABLE big;
