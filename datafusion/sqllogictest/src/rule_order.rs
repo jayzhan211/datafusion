@@ -58,6 +58,14 @@ fn spec_for_file(file_name: &str) -> Option<&'static str> {
         "rule_order_output_requirements.slt" => {
             Some("move:OutputRequirements#2:before:OutputRequirements")
         }
+        "rule_order_limit_first.slt" => Some("first:LimitPushdown"),
+        "rule_order_reenforce.slt" => Some(
+            "move:FilterPushdown:after:EnsureRequirements,move:join_selection:after:FilterPushdown",
+        ),
+        "rule_order_enforce_last.slt" => Some("last:EnsureRequirements"),
+        "rule_order_late_enforcement.slt" => {
+            Some("move:EnsureRequirements:after:FilterPushdown(Post)")
+        }
         "rule_order_filter_past_fetch.slt" => {
             Some("move:FilterPushdown:after:LimitPushdown")
         }
