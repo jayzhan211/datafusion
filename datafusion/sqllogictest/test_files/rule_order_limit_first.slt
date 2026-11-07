@@ -1,0 +1,49 @@
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
+
+#   http://www.apache.org/licenses/LICENSE-2.0
+
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
+
+# This file runs `LimitPushdown` first (see `rule_order.rs`). The join and its input
+# both get a fetch of 3, and that doesn't mean the join forwards its input's fetch: the
+# join can output more rows than its input, and enforcement adds partitions below it.
+
+statement ok
+COPY (SELECT value%6 AS k, value AS v FROM generate_series(1,60)) TO 'test_files/scratch/rule_order_limit_first/l.parquet' STORED AS PARQUET;
+
+statement ok
+COPY (SELECT value AS k, value*10 AS w FROM generate_series(0,5)) TO 'test_files/scratch/rule_order_limit_first/r.parquet' STORED AS PARQUET;
+
+statement ok
+CREATE EXTERNAL TABLE l (k BIGINT, v BIGINT) STORED AS PARQUET LOCATION 'test_files/scratch/rule_order_limit_first/l.parquet';
+
+statement ok
+CREATE EXTERNAL TABLE r (k BIGINT, w BIGINT) STORED AS PARQUET LOCATION 'test_files/scratch/rule_order_limit_first/r.parquet';
+
+statement ok
+SET datafusion.execution.batch_size = 1;
+
+query I
+SELECT count(*) FROM (SELECT l.v FROM l JOIN (SELECT * FROM r LIMIT 3) r2 ON l.k = r2.k LIMIT 3);
+----
+3
+
+statement ok
+RESET datafusion.execution.batch_size;
+
+statement ok
+DROP TABLE l;
+
+statement ok
+DROP TABLE r;

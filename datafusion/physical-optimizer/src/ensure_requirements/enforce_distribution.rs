@@ -830,18 +830,19 @@ pub(crate) fn resolve_auto_join_mode(
 }
 
 /// Whether `plan`'s fetch bounds its total output only because it has one partition.
-/// Enforcement can add partitions below it, and a fetch applies per partition. That
-/// can't reach a node that merges its input, or one whose children all merge theirs.
-/// A node that forwards its child's fetch leaves this to that child, and a limit node
-/// states what it applies to.
+/// A fetch applies per partition, and enforcement can add partitions below a node.
+/// That can't reach a node that merges its input, or one whose children all merge
+/// theirs. A node that moves a limit to its input leaves this to that input, and a
+/// limit node states what it applies to.
 pub(crate) fn fetch_relies_on_one_partition(plan: &Arc<dyn ExecutionPlan>) -> bool {
-    let fetch = plan.fetch();
     let children = plan.children();
-    fetch.is_some()
+    plan.fetch().is_some()
         && plan.output_partitioning().partition_count() == 1
-        && !matches!(plan.limit_behavior(), LimitBehavior::Limit { .. })
+        && !matches!(
+            plan.limit_behavior(),
+            LimitBehavior::Limit { .. } | LimitBehavior::MoveToInput
+        )
         && !merges_partitions(plan)
-        && children.iter().all(|child| child.fetch() != fetch)
         && children.iter().any(|child| !merges_partitions(child))
         && !plan
             .input_distribution_requirements()
