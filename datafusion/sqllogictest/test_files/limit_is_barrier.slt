@@ -1,0 +1,82 @@
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
+
+#   http://www.apache.org/licenses/LICENSE-2.0
+
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
+
+# A limit that `LimitPushdown` absorbed into a scan or an operator as a fetch still
+# limits the rows at that point in the plan. Rules that run after it can't reorder the
+# input of that fetch, or move a filter below it. These run in the default rule order.
+
+# `PushdownSort` can't reverse a scan that has a limit: it would keep the last rows.
+statement ok
+COPY (SELECT column1 AS s, column2 AS x FROM (VALUES (1,10),(2,20),(3,30),(4,1),(5,2),(6,3),(7,100),(8,200),(9,300),(10,1000),(11,2000),(12,3000))) TO 'test_files/scratch/limit_is_barrier/t5.parquet' STORED AS PARQUET OPTIONS ('format.max_row_group_size' '3');
+
+statement ok
+CREATE EXTERNAL TABLE t5 (s BIGINT, x BIGINT) STORED AS PARQUET WITH ORDER (s ASC) LOCATION 'test_files/scratch/limit_is_barrier/t5.parquet';
+
+query I
+SELECT s FROM (SELECT * FROM t5 ORDER BY s LIMIT 3) ORDER BY s DESC;
+----
+3
+2
+1
+
+query I
+SELECT x FROM (SELECT * FROM t5 ORDER BY s LIMIT 5) ORDER BY x DESC LIMIT 2;
+----
+30
+20
+
+# A join's dynamic filter can't reach the scan's limit. The subquery holds s = 1, 2, 3
+# and b holds 7, 8, so the join is empty.
+statement ok
+COPY (SELECT value AS s FROM generate_series(1, 12)) TO 'test_files/scratch/limit_is_barrier/t6.parquet' STORED AS PARQUET OPTIONS ('format.max_row_group_size' '3');
+
+statement ok
+CREATE EXTERNAL TABLE t6 (s BIGINT) STORED AS PARQUET WITH ORDER (s ASC) LOCATION 'test_files/scratch/limit_is_barrier/t6.parquet';
+
+statement ok
+COPY (SELECT column1 AS k FROM (VALUES (7),(8))) TO 'test_files/scratch/limit_is_barrier/b.parquet' STORED AS PARQUET;
+
+statement ok
+CREATE EXTERNAL TABLE b (k BIGINT) STORED AS PARQUET LOCATION 'test_files/scratch/limit_is_barrier/b.parquet';
+
+query I rowsort
+SELECT i.s FROM b JOIN (SELECT s FROM t6 ORDER BY s LIMIT 3) i ON b.k = i.s;
+----
+
+query I rowsort
+SELECT s FROM (SELECT s FROM t6 ORDER BY s LIMIT 3) WHERE s IN (SELECT k FROM b);
+----
+
+# A filter from a join above can't reach a limit absorbed by `FilterExec` either.
+query I rowsort
+SELECT i.s FROM b JOIN (SELECT s FROM t5 WHERE x > 0 ORDER BY s LIMIT 3) i ON b.k = i.s;
+----
+
+# TopK's own dynamic filter can't reach the scan's limit: the subquery holds s = 1, 2, 3.
+query I
+SELECT s FROM (SELECT * FROM t5 ORDER BY s LIMIT 3) ORDER BY x DESC LIMIT 1;
+----
+3
+
+statement ok
+DROP TABLE t5;
+
+statement ok
+DROP TABLE t6;
+
+statement ok
+DROP TABLE b;
