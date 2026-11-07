@@ -180,9 +180,24 @@ impl EnforceSortingTest {
         }
         let input_plan_string = displayable(self.plan.as_ref()).indent(true).to_string();
 
-        // Run the actual optimizer
-        let optimized_physical_plan = EnsureRequirements::new()
-            .optimize(Arc::clone(&self.plan), &config)
+        // Run the actual optimizer. A plan without a marker states that nothing
+        // requires the order at its root, which is what an empty marker means.
+        let optimized_physical_plan =
+            if self.plan.downcast_ref::<OutputRequirementExec>().is_some() {
+                EnsureRequirements::new().optimize(Arc::clone(&self.plan), &config)
+            } else {
+                let plan = Arc::new(OutputRequirementExec::new(
+                    Arc::clone(&self.plan),
+                    None,
+                    Distribution::UnspecifiedDistribution,
+                    None,
+                ));
+                EnsureRequirements::new()
+                    .optimize(plan, &config)
+                    .and_then(|plan| {
+                        OutputRequirements::new_remove_mode().optimize(plan, &config)
+                    })
+            }
             .expect("ensure_requirements failed");
 
         // Get string representation of the plan
@@ -2462,8 +2477,8 @@ async fn test_remove_unnecessary_spm2() -> Result<()> {
       DataSourceExec: partitions=1, partition_sizes=[0]
 
     Optimized Plan:
-    LocalLimitExec: fetch=100
-      SortExec: expr=[non_nullable_col@1 ASC], preserve_partitioning=[false]
+    SortPreservingMergeExec: [non_nullable_col@1 ASC], fetch=100
+      SortExec: TopK(fetch=100), expr=[non_nullable_col@1 ASC], preserve_partitioning=[false]
         DataSourceExec: partitions=1, partition_sizes=[0]
     ");
 
