@@ -51,7 +51,7 @@ use datafusion_physical_plan::execution_plan::SchedulingType;
 use datafusion_physical_plan::{
     DisplayAs, DisplayFormatType,
     display::{ProjectSchemaDisplay, display_orderings},
-    filter_pushdown::FilterPushdownPropagation,
+    filter_pushdown::{FilterPushdownPropagation, PushedDown},
     metrics::ExecutionPlanMetricsSet,
 };
 use log::{debug, warn};
@@ -1091,6 +1091,13 @@ impl DataSource for FileScanConfig {
         } else {
             filters
         };
+        // Inlining a volatile expression evaluates it again, so the filter would test
+        // a different value than the one the scan outputs.
+        if filters_to_remap.iter().any(is_volatile) {
+            return Ok(FilterPushdownPropagation::with_parent_pushdown_result(
+                vec![PushedDown::No; filters_to_remap.len()],
+            ));
+        }
         // Now remap column indices to match the table schema.
         let remapped_filters = filters_to_remap
             .into_iter()
