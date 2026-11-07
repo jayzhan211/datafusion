@@ -61,6 +61,19 @@ fn spec_for_file(file_name: &str) -> Option<&'static str> {
         "rule_order_limit_statistics.slt" => {
             Some("move:LimitPushdown:before:aggregate_statistics")
         }
+        "rule_order_pushdown_sort.slt" => Some(
+            "move:OutputRequirements#2:before:EnsureRequirements,move:PushdownSort:before:EnsureRequirements",
+        ),
+        "rule_order_combine_aggregate.slt" => {
+            Some("move:CombinePartialFinalAggregate:before:EnsureRequirements")
+        }
+        "rule_order_topk_aggregation.slt" => {
+            Some("move:LimitAggregation:before:EnsureRequirements")
+        }
+        "rule_order_window_topn.slt" => Some("move:WindowTopN:after:EnsureRequirements"),
+        "rule_order_projection_pushdown.slt" => {
+            Some("move:ProjectionPushdown:before:EnsureRequirements")
+        }
         _ => None,
     }
 }

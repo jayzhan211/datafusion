@@ -150,6 +150,26 @@ impl PhysicalOptimizerRule for PushdownSort {
             // Each node type defines its own pushdown behavior via try_pushdown_sort()
             match sort_input.try_pushdown_sort(required_ordering)? {
                 SortOrderPushdownResult::Exact { inner } => {
+                    // Each input partition is now in order, but this sort also merged
+                    // them. Enforcement may not have run yet to do that, so keep the
+                    // merge. A fetch on the source only stops each partition early.
+                    if !sort_exec.preserve_partitioning()
+                        && inner.output_partitioning().partition_count() > 1
+                    {
+                        let fetch = sort_exec.fetch();
+                        let inner = inner.with_fetch(fetch).unwrap_or(inner);
+                        let merge = SortPreservingMergeExec::new(
+                            required_ordering.clone(),
+                            inner,
+                        )
+                        .with_fetch(fetch);
+                        return Ok(Transformed::new(
+                            Arc::new(merge),
+                            true,
+                            TreeNodeRecursion::Jump,
+                        ));
+                    }
+
                     // Data source guarantees perfect ordering - remove the Sort operator.
                     //
                     // If the SortExec carried a fetch (LIMIT), we must preserve it.

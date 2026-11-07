@@ -144,6 +144,7 @@ use crate::PhysicalOptimizerRule;
 use crate::optimizer::{
     ConfigOnlyContext, PhysicalOptimizerContext, with_statistics_context,
 };
+use crate::output_requirements::{OutputRequirementExec, OutputRequirements};
 
 use datafusion_common::Result;
 use datafusion_common::config::ConfigOptions;
@@ -183,6 +184,18 @@ impl PhysicalOptimizerRule for EnsureRequirements {
         context: &dyn PhysicalOptimizerContext,
     ) -> Result<Arc<dyn ExecutionPlan>> {
         let config = context.config_options();
+
+        // Enforcement treats a sort or merge that nothing requires as removable,
+        // so the query's output ordering must be visible as a requirement. It can
+        // run before the marker is added or after it is removed; use its own then.
+        let has_marker = plan
+            .exists(|node| Ok(node.downcast_ref::<OutputRequirementExec>().is_some()))?;
+        let plan = if has_marker {
+            plan
+        } else {
+            OutputRequirements::new_add_mode().optimize(plan, config)?
+        };
+
         // Phase 0: Normalize `InterleaveExec` back to `UnionExec` (top-down).
         // Interleaves are distribution artifacts of Phase 2, which re-derives
         // them from the children's final partitioning. Keeping them would
@@ -270,10 +283,16 @@ impl PhysicalOptimizerRule for EnsureRequirements {
         let adjusted = pushdown_sorts(sort_pushdown)?;
 
         // 3d: Partial sort
-        adjusted
+        let plan = adjusted
             .plan
             .transform_up(|p| Ok(Transformed::yes(replace_with_partial_sort(p)?)))
-            .data()
+            .data()?;
+
+        if has_marker {
+            Ok(plan)
+        } else {
+            OutputRequirements::new_remove_mode().optimize(plan, config)
+        }
     }
 
     fn name(&self) -> &str {
