@@ -12,6 +12,7 @@
 
 use crate::PhysicalOptimizerRule;
 use crate::optimizer::{ConfigOnlyContext, PhysicalOptimizerContext};
+use crate::sanity_checker::input_requirements_hold;
 use datafusion_common::Statistics;
 use datafusion_common::config::ConfigOptions;
 use datafusion_common::error::Result;
@@ -138,12 +139,22 @@ impl PhysicalOptimizerRule for JoinSelection {
             Box::new(hash_join_convert_symmetric_subrule),
             Box::new(hash_join_swap_subrule),
         ];
-        let new_plan = plan
+        let new_plan = Arc::clone(&plan)
             .transform_up(|p| apply_subrules(p, &subrules, context.config_options()))
             .data()?;
-        new_plan
+        let new_plan = new_plan
             .transform_up(|plan| statistical_join_selection_subrule(plan, context))
-            .data()
+            .data()?;
+
+        // Once requirements are enforced, nothing later repairs a join whose new
+        // mode or inputs break them, so keep the plan as it was.
+        if !Arc::ptr_eq(&plan, &new_plan)
+            && is_enforced(&plan)
+            && !input_requirements_hold(&new_plan)
+        {
+            return Ok(plan);
+        }
+        Ok(new_plan)
     }
 
     fn name(&self) -> &str {
@@ -153,6 +164,19 @@ impl PhysicalOptimizerRule for JoinSelection {
     fn schema_check(&self) -> bool {
         true
     }
+}
+
+/// Whether `plan` already meets its requirements. A join in `Auto` mode declares
+/// none, but enforcement has not seen it yet.
+fn is_enforced(plan: &Arc<dyn ExecutionPlan>) -> bool {
+    let has_auto_join = plan
+        .exists(|node| {
+            Ok(node
+                .downcast_ref::<HashJoinExec>()
+                .is_some_and(|join| *join.partition_mode() == PartitionMode::Auto))
+        })
+        .unwrap_or(true);
+    !has_auto_join && input_requirements_hold(plan)
 }
 
 /// Determines whether it is possible to swap inputs of a hash join. Of the
