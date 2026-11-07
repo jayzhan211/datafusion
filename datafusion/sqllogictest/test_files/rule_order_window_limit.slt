@@ -1,0 +1,36 @@
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
+
+#   http://www.apache.org/licenses/LICENSE-2.0
+
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
+
+# This file runs `LimitPushPastWindows` before `EnsureRequirements` (see
+# `rule_order.rs`). The window's own sort isn't there yet, so the first sort below it
+# belongs to the subquery, whose limit can't be lowered. Whichever rows the subquery
+# keeps, sum(x) over x DESC is fixed: 60->60, 50->110, 40->150, 30->180, 20->200, 10->210.
+
+statement ok
+COPY (SELECT column1 AS s, column2 AS x FROM (VALUES (1,10),(2,20),(3,30),(4,40),(5,50),(6,60))) TO 'test_files/scratch/rule_order_window_limit/t.parquet' STORED AS PARQUET;
+
+statement ok
+CREATE EXTERNAL TABLE t (s BIGINT, x BIGINT) STORED AS PARQUET LOCATION 'test_files/scratch/rule_order_window_limit/t.parquet';
+
+query II rowsort
+SELECT x, sum(x) OVER (ORDER BY x DESC ROWS UNBOUNDED PRECEDING) FROM (SELECT * FROM t ORDER BY s LIMIT 100) LIMIT 2;
+----
+50 110
+60 60
+
+statement ok
+DROP TABLE t;
