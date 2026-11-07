@@ -174,7 +174,12 @@ impl PhysicalOptimizerRule for JoinSelection {
             && is_enforced(&plan)
             && !input_requirements_hold(&new_plan)
         {
-            return EnsureRequirements::new().optimize(new_plan, config);
+            // Repair only. Added parallelism could lose an order that a limit below
+            // this point relies on, which nothing in the plan records.
+            let mut config = config.clone();
+            config.optimizer.enable_round_robin_repartition = false;
+            config.optimizer.repartition_file_scans = false;
+            return EnsureRequirements::new().optimize(new_plan, &config);
         }
         Ok(new_plan)
     }
