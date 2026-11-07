@@ -145,6 +145,7 @@ use crate::optimizer::{
     ConfigOnlyContext, PhysicalOptimizerContext, with_statistics_context,
 };
 use crate::output_requirements::{OutputRequirementExec, OutputRequirements};
+use crate::update_aggr_exprs::clear_unmet_aggregate_orders;
 
 use datafusion_common::Result;
 use datafusion_common::config::ConfigOptions;
@@ -174,7 +175,8 @@ impl EnsureRequirements {
 
 /// Adds the marker for a plan that has none. The sort that would have told the
 /// marker about the query's order may be gone already, so require the order the plan
-/// provides now: nothing shows whether the query relies on it.
+/// provides now: nothing shows whether the query relies on it. That can cost a sort
+/// the query didn't need, in a list that runs this rule before adding the marker.
 fn require_output_order(
     plan: Arc<dyn ExecutionPlan>,
     config: &ConfigOptions,
@@ -186,10 +188,16 @@ fn require_output_order(
     Ok(match plan.output_ordering() {
         Some(ordering) if !has_requirement => {
             let requirement = OrderingRequirements::from(ordering.clone());
+            // With one partition the order is global, so it has to stay merged.
+            let distribution = if plan.output_partitioning().partition_count() == 1 {
+                Distribution::SinglePartition
+            } else {
+                Distribution::UnspecifiedDistribution
+            };
             Arc::new(OutputRequirementExec::new(
                 plan,
                 Some(requirement),
-                Distribution::UnspecifiedDistribution,
+                distribution,
                 None,
             ))
         }
@@ -333,6 +341,10 @@ impl PhysicalOptimizerRule for EnsureRequirements {
             .plan
             .transform_up(|p| Ok(Transformed::yes(replace_with_partial_sort(p)?)))
             .data()?;
+
+        // This rule can lose an order an aggregate was told about, if it adds partitions
+        // below it.
+        let plan = clear_unmet_aggregate_orders(plan)?;
 
         if has_marker {
             Ok(plan)

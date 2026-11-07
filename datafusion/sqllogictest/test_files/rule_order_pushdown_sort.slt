@@ -78,3 +78,34 @@ SELECT s, s + 1 FROM t ORDER BY s LIMIT 2;
 
 statement ok
 DROP TABLE t;
+
+# The limit of an `ORDER BY` ends up on the scan, and splitting the scan would keep other
+# rows.
+statement ok
+set datafusion.execution.batch_size = 2;
+
+statement ok
+set datafusion.optimizer.repartition_file_min_size = 1;
+
+statement ok
+COPY (SELECT value AS s FROM generate_series(1, 60) ORDER BY s)
+TO 'test_files/scratch/rule_order_pushdown_sort/split.parquet'
+STORED AS PARQUET OPTIONS ('format.max_row_group_size' '6');
+
+statement ok
+CREATE EXTERNAL TABLE split (s BIGINT) STORED AS PARQUET WITH ORDER (s ASC)
+LOCATION 'test_files/scratch/rule_order_pushdown_sort/split.parquet';
+
+query II
+SELECT max(u), count(*) FROM (SELECT unnest(make_array(s, s + 1)) u FROM (SELECT s FROM split ORDER BY s LIMIT 4));
+----
+5 8
+
+statement ok
+DROP TABLE split;
+
+statement ok
+RESET datafusion.execution.batch_size;
+
+statement ok
+RESET datafusion.optimizer.repartition_file_min_size;
