@@ -41,3 +41,20 @@ SELECT date_bin('15 minutes', ts) as time_chunks
 
 statement ok
 DROP TABLE t;
+
+# The sort key is the group key under the alias m, and the second alias reuses the name g.
+statement ok
+COPY (SELECT column1 AS g, column2 AS x FROM (VALUES (1,100),(2,90),(3,10),(4,5))) TO 'test_files/scratch/rule_order_topk_aggregation/a.parquet' STORED AS PARQUET;
+
+statement ok
+CREATE EXTERNAL TABLE a (g BIGINT, x BIGINT) STORED AS PARQUET LOCATION 'test_files/scratch/rule_order_topk_aggregation/a.parquet';
+
+# ORDER BY the group key under the alias m, the second alias reuses the name g
+query II
+SELECT g AS m, min(x) AS g FROM a GROUP BY g ORDER BY m ASC LIMIT 2;
+----
+1 100
+2 90
+
+statement ok
+DROP TABLE a;

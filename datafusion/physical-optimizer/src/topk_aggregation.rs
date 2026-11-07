@@ -16,6 +16,7 @@ use datafusion_physical_plan::aggregates::AggregateExec;
 use datafusion_physical_plan::execution_plan::CardinalityEffect;
 use datafusion_physical_plan::projection::ProjectionExec;
 use datafusion_physical_plan::sorts::sort::SortExec;
+use datafusion_physical_plan::windows::{BoundedWindowAggExec, WindowAggExec};
 use itertools::Itertools;
 
 /// An optimizer rule that passes a `limit` hint to aggregations if the whole result is not needed
@@ -52,6 +53,7 @@ impl TopKAggregation {
         let sort_options = order.options;
         let order = order.expr.downcast_ref::<Column>()?;
         let mut sort_col_name = order.name().to_string();
+        let mut sort_col_index = order.index();
         let limit = sort.fetch()?;
 
         let mut cardinality_preserved = true;
@@ -68,15 +70,21 @@ impl TopKAggregation {
                     Some(aggr) => return Ok(Transformed::yes(Arc::new(aggr.data))),
                 }
             } else if let Some(proj) = plan.downcast_ref::<ProjectionExec>() {
-                // track renames due to successive projections
-                for proj_expr in proj.expr() {
-                    let Some(src_col) = proj_expr.expr.downcast_ref::<Column>() else {
-                        continue;
-                    };
-                    if proj_expr.alias == sort_col_name {
-                        sort_col_name = src_col.name().to_string();
-                    }
-                }
+                // Follow the sort key through the projection by position: names
+                // can repeat, and an alias can reuse a name from below it.
+                let src_col = proj
+                    .expr()
+                    .get(sort_col_index)
+                    .and_then(|proj_expr| proj_expr.expr.downcast_ref::<Column>());
+                let Some(src_col) = src_col else {
+                    cardinality_preserved = false;
+                    return Ok(Transformed::no(plan));
+                };
+                sort_col_name = src_col.name().to_string();
+                sort_col_index = src_col.index();
+            } else if plan.is::<WindowAggExec>() || plan.is::<BoundedWindowAggExec>() {
+                // A window reads rows beyond the ones the limit keeps.
+                cardinality_preserved = false;
             } else {
                 // or we continue down through types that don't reduce cardinality
                 match plan.cardinality_effect() {
