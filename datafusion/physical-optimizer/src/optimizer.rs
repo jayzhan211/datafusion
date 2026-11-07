@@ -96,6 +96,16 @@ impl PhysicalOptimizerContext for ConfigOnlyContext<'_> {
 ///    rules in any order yields a valid plan that produces the same results, as
 ///    long as the list contains [`EnsureRequirements`].
 ///
+/// Two consequences matter when writing a rule, because the plan doesn't record them
+/// and a rule can run anywhere in the list:
+///
+/// - A fetch selects rows. It keeps the first rows of its input as they arrive, so a
+///   rule can't reorder that input, move a filter below the fetch, or drop it.
+/// - An order is only relied on if the plan records it as a requirement. A rule can't
+///   assume an order it sees will last unless it makes it a requirement, and a rule
+///   that rewrites an operator of a plan whose requirements are met has to keep that
+///   operator's output order, because a sort above it may be gone.
+///
 /// [`EnsureRequirements`] is the rule that makes a plan executable, by inserting
 /// the repartitioning and sorting needed to satisfy the distribution and
 /// ordering requirements. It can run at any point in the list.
