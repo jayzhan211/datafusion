@@ -72,3 +72,48 @@ DROP TABLE l;
 
 statement ok
 DROP TABLE r;
+
+# The conversion to `SymmetricHashJoinExec` and the swap of an unbounded build side make
+# these joins runnable, so `JoinSelection` can't refuse them over the probe side's order.
+statement ok
+COPY (SELECT column1 AS a, column2 AS b FROM (VALUES (1,10),(2,20))) TO 'test_files/scratch/rule_order_join_selection/l.csv' STORED AS CSV OPTIONS ('format.has_header' 'true');
+
+statement ok
+COPY (SELECT column1 AS a, column2 AS c FROM (VALUES (1,100),(2,200))) TO 'test_files/scratch/rule_order_join_selection/r.csv' STORED AS CSV OPTIONS ('format.has_header' 'true');
+
+statement ok
+CREATE UNBOUNDED EXTERNAL TABLE ul (a INT, b INT) STORED AS CSV WITH ORDER (a ASC) LOCATION 'test_files/scratch/rule_order_join_selection/l.csv' OPTIONS ('format.has_header' 'true');
+
+statement ok
+CREATE UNBOUNDED EXTERNAL TABLE ur (a INT, c INT) STORED AS CSV WITH ORDER (a ASC) LOCATION 'test_files/scratch/rule_order_join_selection/r.csv' OPTIONS ('format.has_header' 'true');
+
+query III rowsort
+SELECT ul.a, b, c FROM ul JOIN ur ON ul.a=ur.a;
+----
+1 10 100
+2 20 200
+
+# Same veto, on the swap that moves the unbounded input off the build side
+statement ok
+CREATE EXTERNAL TABLE bo (a INT, c INT) STORED AS CSV WITH ORDER (a ASC) LOCATION 'test_files/scratch/rule_order_join_selection/r.csv' OPTIONS ('format.has_header' 'true');
+
+statement ok
+CREATE UNBOUNDED EXTERNAL TABLE un (a INT, b INT) STORED AS CSV LOCATION 'test_files/scratch/rule_order_join_selection/l.csv' OPTIONS ('format.has_header' 'true');
+
+query III rowsort
+SELECT un.a, b, c FROM un JOIN bo ON un.a=bo.a;
+----
+1 10 100
+2 20 200
+
+statement ok
+DROP TABLE ul;
+
+statement ok
+DROP TABLE ur;
+
+statement ok
+DROP TABLE bo;
+
+statement ok
+DROP TABLE un;

@@ -13,6 +13,7 @@
 use crate::PhysicalOptimizerRule;
 use crate::ensure_requirements::EnsureRequirements;
 use crate::optimizer::{ConfigOnlyContext, PhysicalOptimizerContext};
+use crate::output_requirements::OutputRequirementExec;
 use crate::sanity_checker::{input_requirements_hold, output_order_kept};
 use datafusion_common::Statistics;
 use datafusion_common::config::ConfigOptions;
@@ -29,6 +30,7 @@ use datafusion_physical_plan::joins::{
     CrossJoinExec, HashJoinExec, NestedLoopJoinExec, PartitionMode,
     StreamJoinPartitionMode, SymmetricHashJoinExec,
 };
+use datafusion_physical_plan::limit::{GlobalLimitExec, LocalLimitExec};
 use datafusion_physical_plan::projection::ProjectionExec;
 use datafusion_physical_plan::statistics::StatisticsArgs;
 use datafusion_physical_plan::{ExecutionPlan, ExecutionPlanProperties};
@@ -143,10 +145,19 @@ impl PhysicalOptimizerRule for JoinSelection {
             Box::new(hash_join_swap_subrule),
         ];
         let config = context.config_options();
+        // These rewrites make a join on unbounded input runnable, so they aren't
+        // optional. A marker records any order the query relies on, and without one
+        // the rewrite has to keep the order.
+        let has_marker = plan
+            .exists(|node| Ok(node.downcast_ref::<OutputRequirementExec>().is_some()))?;
         let new_plan = Arc::clone(&plan)
             .transform_up(|p| {
                 let rewritten = apply_subrules(Arc::clone(&p), &subrules, config)?;
-                keep_relied_order(p, rewritten)
+                if has_marker {
+                    Ok(rewritten)
+                } else {
+                    keep_relied_order(p, rewritten)
+                }
             })
             .data()?;
         let new_plan = new_plan
@@ -207,14 +218,18 @@ fn keep_relied_order(
 /// Whether `plan` already meets its requirements. A join in `Auto` mode declares
 /// none, but enforcement has not seen it yet.
 fn is_enforced(plan: &Arc<dyn ExecutionPlan>) -> bool {
-    let has_auto_join = plan
-        .exists(|node| {
-            Ok(node
-                .downcast_ref::<HashJoinExec>()
-                .is_some_and(|join| *join.partition_mode() == PartitionMode::Auto))
-        })
-        .unwrap_or(true);
-    !has_auto_join && input_requirements_hold(plan)
+    !has_auto_join(plan) && input_requirements_hold(plan)
+}
+
+/// Whether `plan` has a join that enforcement hasn't seen, because
+/// [`EnsureRequirements`] resolves [`PartitionMode::Auto`].
+pub(crate) fn has_auto_join(plan: &Arc<dyn ExecutionPlan>) -> bool {
+    plan.exists(|node| {
+        Ok(node
+            .downcast_ref::<HashJoinExec>()
+            .is_some_and(|join| *join.partition_mode() == PartitionMode::Auto))
+    })
+    .unwrap_or(true)
 }
 
 /// Determines whether it is possible to swap inputs of a hash join. Of the
@@ -526,18 +541,23 @@ fn hash_join_convert_symmetric_subrule(
                 right_order,
                 mode,
             )?);
-            // `SymmetricHashJoinExec` can't carry a projection, so keep the hash
-            // join's projection above it.
-            return match &hash_join.projection {
+            // `SymmetricHashJoinExec` can't carry a projection or a fetch, so keep
+            // the hash join's above it.
+            let join: Arc<dyn ExecutionPlan> = match &hash_join.projection {
                 Some(projection) => {
                     let exprs = ProjectionExprs::from_indices(projection, &join.schema());
-                    Ok(Arc::new(ProjectionExec::try_new(
-                        exprs.as_ref().to_vec(),
-                        join,
-                    )?))
+                    Arc::new(ProjectionExec::try_new(exprs.as_ref().to_vec(), join)?)
                 }
-                None => Ok(join),
+                None => join,
             };
+            return Ok(match input.fetch() {
+                // Enforcement can still add partitions to a join with one.
+                Some(fetch) if join.output_partitioning().partition_count() == 1 => {
+                    Arc::new(GlobalLimitExec::new(join, 0, Some(fetch)))
+                }
+                Some(fetch) => Arc::new(LocalLimitExec::new(join, fetch)),
+                None => join,
+            });
         }
     }
     Ok(input)
