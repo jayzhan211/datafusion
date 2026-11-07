@@ -95,6 +95,7 @@ use datafusion_physical_expr::{
     LexOrdering, PhysicalSortExpr, create_physical_sort_exprs,
 };
 use datafusion_physical_optimizer::ensure_requirements::EnsureRequirements;
+use datafusion_physical_optimizer::output_requirements::OutputRequirements;
 use datafusion_physical_optimizer::sanity_checker::{
     check_plan_tree_sanity, input_requirements_hold,
 };
@@ -3515,6 +3516,12 @@ impl DefaultPhysicalPlanner {
             );
             observer(new_plan.as_ref(), optimizer.as_ref())
         }
+
+        // `OutputRequirementExec` only carries requirements between rules and
+        // can't execute. A custom rule list may add it after the remove step, or
+        // never remove it, so drop whatever is left.
+        let new_plan = OutputRequirements::new_remove_mode()
+            .optimize(new_plan, session_state.config_options())?;
 
         // This runs once after all optimizer runs are complete, including
         // rules appended by the user, to verify that the plan is executable.

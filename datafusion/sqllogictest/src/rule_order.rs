@@ -28,6 +28,8 @@
 //! `KEY` is the rule's `name()`. A name that repeats in the default list gets
 //! `#2` on its second use, such as `OutputRequirements#2` (remove mode) and
 //! `ProjectionPushdown#2`.
+//!
+//! A test file can also pin its own order, see [`spec_for_file`].
 
 use std::collections::HashMap;
 use std::sync::{Arc, Once};
@@ -41,13 +43,44 @@ type Rule = Arc<dyn PhysicalOptimizerRule + Send + Sync>;
 
 static PRINT_ORDER: Once = Once::new();
 
-/// Whether a rule order was requested.
-pub(crate) fn is_set() -> bool {
-    std::env::var_os(ENV_VAR).is_some()
+/// The rule order a test file checks: the query results must not depend on it.
+fn spec_for_file(file_name: &str) -> Option<&'static str> {
+    match file_name {
+        "rule_order_output_requirements.slt" => {
+            Some("move:OutputRequirements#2:before:OutputRequirements")
+        }
+        _ => None,
+    }
+}
+
+/// The rule list for a test file, if it isn't the default one.
+pub(crate) fn rules_for_file(file_name: &str) -> Option<Vec<Rule>> {
+    if let Some(spec) = spec_for_file(file_name) {
+        return Some(rules_with(spec));
+    }
+    std::env::var_os(ENV_VAR).map(|_| rules())
 }
 
 /// The default rule list, rearranged by `DF_RULE_ORDER`.
 pub(crate) fn rules() -> Vec<Rule> {
+    let spec = std::env::var(ENV_VAR).unwrap_or_default();
+    let rules = keyed_rules(&spec);
+    PRINT_ORDER.call_once(|| {
+        let keys: Vec<&str> = rules.iter().map(|(key, _)| key.as_str()).collect();
+        eprintln!("RULE_ORDER [{spec}]: {}", keys.join(" > "));
+    });
+    rules.into_iter().map(|(_, rule)| rule).collect()
+}
+
+/// The default rule list, rearranged by `spec`.
+fn rules_with(spec: &str) -> Vec<Rule> {
+    keyed_rules(spec)
+        .into_iter()
+        .map(|(_, rule)| rule)
+        .collect()
+}
+
+fn keyed_rules(spec: &str) -> Vec<(String, Rule)> {
     let mut seen: HashMap<String, usize> = HashMap::new();
     let mut rules: Vec<(String, Rule)> = PhysicalOptimizer::new()
         .rules
@@ -62,17 +95,10 @@ pub(crate) fn rules() -> Vec<Rule> {
             (key, rule)
         })
         .collect();
-
-    let spec = std::env::var(ENV_VAR).unwrap_or_default();
     for directive in spec.split(',').map(str::trim).filter(|d| !d.is_empty()) {
         apply(&mut rules, directive);
     }
-
-    PRINT_ORDER.call_once(|| {
-        let keys: Vec<&str> = rules.iter().map(|(key, _)| key.as_str()).collect();
-        eprintln!("RULE_ORDER [{spec}]: {}", keys.join(" > "));
-    });
-    rules.into_iter().map(|(_, rule)| rule).collect()
+    rules
 }
 
 fn apply(rules: &mut Vec<(String, Rule)>, directive: &str) {

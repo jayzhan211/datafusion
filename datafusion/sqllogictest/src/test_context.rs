@@ -153,9 +153,10 @@ impl TestContext {
             state_builder = state_builder.with_statistics_registry(registry);
         }
 
-        if crate::rule_order::is_set() && file_name != "sort_pushdown.slt" {
-            state_builder =
-                state_builder.with_physical_optimizer_rules(crate::rule_order::rules());
+        if file_name != "sort_pushdown.slt"
+            && let Some(rules) = crate::rule_order::rules_for_file(file_name)
+        {
+            state_builder = state_builder.with_physical_optimizer_rules(rules);
         }
 
         if file_name == "sort_pushdown.slt" {
