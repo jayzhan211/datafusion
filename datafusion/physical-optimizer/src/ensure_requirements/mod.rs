@@ -149,7 +149,10 @@ use crate::output_requirements::{OutputRequirementExec, OutputRequirements};
 use datafusion_common::Result;
 use datafusion_common::config::ConfigOptions;
 use datafusion_common::tree_node::{Transformed, TransformedResult, TreeNode};
-use datafusion_physical_plan::ExecutionPlan;
+use datafusion_physical_expr::Distribution;
+use datafusion_physical_expr_common::sort_expr::OrderingRequirements;
+use datafusion_physical_plan::limit::GlobalLimitExec;
+use datafusion_physical_plan::{ExecutionPlan, ExecutionPlanProperties};
 
 /// Optimizer rule that enforces both distribution and sorting requirements.
 ///
@@ -167,6 +170,31 @@ impl EnsureRequirements {
     pub fn new() -> Self {
         Self {}
     }
+}
+
+/// Adds the marker for a plan that has none. The sort that would have told the
+/// marker about the query's order may be gone already, so require the order the plan
+/// provides now: nothing shows whether the query relies on it.
+fn require_output_order(
+    plan: Arc<dyn ExecutionPlan>,
+    config: &ConfigOptions,
+) -> Result<Arc<dyn ExecutionPlan>> {
+    let marked =
+        OutputRequirements::new_add_mode().optimize(Arc::clone(&plan), config)?;
+    let has_requirement = !marked.is::<OutputRequirementExec>()
+        || marked.required_input_ordering().swap_remove(0).is_some();
+    Ok(match plan.output_ordering() {
+        Some(ordering) if !has_requirement => {
+            let requirement = OrderingRequirements::from(ordering.clone());
+            Arc::new(OutputRequirementExec::new(
+                plan,
+                Some(requirement),
+                Distribution::UnspecifiedDistribution,
+                None,
+            ))
+        }
+        _ => marked,
+    })
 }
 
 impl PhysicalOptimizerRule for EnsureRequirements {
@@ -193,7 +221,7 @@ impl PhysicalOptimizerRule for EnsureRequirements {
         let plan = if has_marker {
             plan
         } else {
-            OutputRequirements::new_add_mode().optimize(plan, config)?
+            require_output_order(plan, config)?
         };
 
         // Phase 0: Normalize `InterleaveExec` back to `UnionExec` (top-down).
@@ -204,13 +232,31 @@ impl PhysicalOptimizerRule for EnsureRequirements {
         // A join still in `Auto` mode declares no distribution, so it would get
         // no repartitioning. `JoinSelection` normally picks the mode earlier;
         // when it hasn't, settle on the mode that is always valid to enforce.
+        //
+        // A node whose fetch relies on having one partition gets a limit above it,
+        // which keeps bounding its output if this rule adds partitions below it.
         use super::enforce_distribution::{
-            replace_interleave_with_union, resolve_auto_join_mode,
+            fetch_relies_on_one_partition, replace_interleave_with_union,
+            resolve_auto_join_mode,
         };
+        let mut under_limit = false;
         let plan = plan
             .transform_down(|plan| {
-                replace_interleave_with_union(plan)?
-                    .transform_data(|plan| resolve_auto_join_mode(plan, config))
+                let under_limit_now = std::mem::take(&mut under_limit);
+                let plan = replace_interleave_with_union(plan)?
+                    .transform_data(|plan| resolve_auto_join_mode(plan, config))?;
+                if plan.data.is::<GlobalLimitExec>() {
+                    under_limit = true;
+                    return Ok(plan);
+                }
+                if under_limit_now || !fetch_relies_on_one_partition(&plan.data) {
+                    return Ok(plan);
+                }
+                under_limit = true;
+                let fetch = plan.data.fetch();
+                Ok(Transformed::yes(
+                    Arc::new(GlobalLimitExec::new(plan.data, 0, fetch)) as _,
+                ))
             })
             .data()?;
 

@@ -61,3 +61,20 @@ DROP TABLE t;
 
 statement ok
 set datafusion.execution.target_partitions = 4;
+
+# With one partition `PushdownSort` removes the sort, then enforcement adds partitions
+# below the projection. The order the plan provides has to survive that.
+statement ok
+COPY (SELECT value AS s FROM generate_series(1,200000)) TO 'test_files/scratch/rule_order_pushdown_sort/t.parquet' STORED AS PARQUET OPTIONS ('format.max_row_group_size' '5');
+
+statement ok
+CREATE EXTERNAL TABLE t (s BIGINT) STORED AS PARQUET WITH ORDER (s ASC) LOCATION 'test_files/scratch/rule_order_pushdown_sort/t.parquet';
+
+query II
+SELECT s, s + 1 FROM t ORDER BY s LIMIT 2;
+----
+1 2
+2 3
+
+statement ok
+DROP TABLE t;

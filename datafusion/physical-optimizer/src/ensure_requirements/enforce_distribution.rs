@@ -39,6 +39,7 @@ use datafusion_physical_expr::{
     PhysicalSortExpr, physical_exprs_equal,
 };
 use datafusion_physical_plan::ExecutionPlanProperties;
+use datafusion_physical_plan::LimitBehavior;
 use datafusion_physical_plan::aggregates::{
     AggregateExec, AggregateMode, PhysicalGroupBy,
 };
@@ -826,6 +827,35 @@ pub(crate) fn resolve_auto_join_mode(
     };
     let resolved = hash_join.builder().with_partition_mode(mode).build()?;
     Ok(Transformed::yes(Arc::new(resolved)))
+}
+
+/// Whether `plan`'s fetch bounds its total output only because it has one partition.
+/// Enforcement can add partitions below it, and a fetch applies per partition. That
+/// can't reach a node that merges its input, or one whose children all merge theirs.
+/// A node that forwards its child's fetch leaves this to that child, and a limit node
+/// states what it applies to.
+pub(crate) fn fetch_relies_on_one_partition(plan: &Arc<dyn ExecutionPlan>) -> bool {
+    let fetch = plan.fetch();
+    let children = plan.children();
+    fetch.is_some()
+        && plan.output_partitioning().partition_count() == 1
+        && !matches!(plan.limit_behavior(), LimitBehavior::Limit { .. })
+        && !merges_partitions(plan)
+        && children.iter().all(|child| child.fetch() != fetch)
+        && children.iter().any(|child| !merges_partitions(child))
+        && !plan
+            .required_input_distribution()
+            .iter()
+            .all(|distribution| matches!(distribution, Distribution::SinglePartition))
+}
+
+/// Whether `plan` always has one output partition, whatever is below it.
+fn merges_partitions(plan: &Arc<dyn ExecutionPlan>) -> bool {
+    plan.is::<SortPreservingMergeExec>()
+        || plan.is::<CoalescePartitionsExec>()
+        || plan
+            .downcast_ref::<SortExec>()
+            .is_some_and(|sort| !sort.preserve_partitioning())
 }
 
 /// Turns an [`InterleaveExec`] back into the equivalent [`UnionExec`], for

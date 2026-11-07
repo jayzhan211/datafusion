@@ -63,3 +63,19 @@ DROP TABLE t;
 
 statement ok
 set datafusion.execution.target_partitions = 4;
+
+# The input has one partition when `FilterExec` absorbs the limit, and enforcement adds
+# partitions below it afterwards. A fetch applies per partition.
+statement ok
+COPY (SELECT value AS s, value%6 AS k FROM generate_series(1,2400)) TO 'test_files/scratch/rule_order_limit_pushdown/t.parquet' STORED AS PARQUET OPTIONS ('format.max_row_group_size' '50');
+
+statement ok
+CREATE EXTERNAL TABLE t (s BIGINT, k BIGINT) STORED AS PARQUET LOCATION 'test_files/scratch/rule_order_limit_pushdown/t.parquet';
+
+query I
+SELECT count(*) FROM (SELECT s FROM t WHERE s > 14 LIMIT 3);
+----
+3
+
+statement ok
+DROP TABLE t;
