@@ -1722,14 +1722,6 @@ impl DefaultPhysicalPlanner {
 
                 let prefer_hash_join =
                     session.config_options().optimizer.prefer_hash_join;
-                // Null-aware hash joins require CollectLeft for global NULL tracking,
-                // so they must not be hash-repartitioned.
-                // Supported null-aware LeftAnti joins can instead use the
-                // single-partition sort-merge path below.
-                let can_repartition_join = session.config().target_partitions() > 1
-                    && session.config().repartition_joins()
-                    && !*null_aware;
-
                 // Only `HashJoinExec` and the null-aware `LeftAnti` path in `SortMergeJoinExec`
                 // implements null-aware semantics, and those need equi-join keys to do so.
                 // Without them the join would be planned as a nested loop (or piecewise merge)
@@ -1914,14 +1906,6 @@ impl DefaultPhysicalPlanner {
                         *null_equality,
                     )?)
                 } else {
-                    // Remaining null-aware joins need global probe-side state, so keep
-                    // them in CollectLeft mode.
-                    let partition_mode = if can_repartition_join {
-                        PartitionMode::Auto
-                    } else {
-                        PartitionMode::CollectLeft
-                    };
-
                     Arc::new(
                         HashJoinExecBuilder::new(
                             physical_left,
@@ -1930,7 +1914,8 @@ impl DefaultPhysicalPlanner {
                             *join_type,
                         )
                         .with_filter(join_filter)
-                        .with_partition_mode(partition_mode)
+                        // `JoinSelection` or `EnsureRequirements` picks the mode.
+                        .with_partition_mode(PartitionMode::Auto)
                         .with_null_equality(*null_equality)
                         .with_null_aware(*null_aware)
                         .with_null_aware_value_keys(*null_aware_value_keys)

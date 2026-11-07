@@ -210,7 +210,7 @@ impl PhysicalOptimizerRule for EnsureRequirements {
         let plan = plan
             .transform_down(|plan| {
                 replace_interleave_with_union(plan)?
-                    .transform_data(resolve_auto_join_mode)
+                    .transform_data(|plan| resolve_auto_join_mode(plan, config))
             })
             .data()?;
 

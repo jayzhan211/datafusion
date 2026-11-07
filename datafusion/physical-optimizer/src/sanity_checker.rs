@@ -84,6 +84,26 @@ pub fn check_plan_tree_sanity(
     check_plan_sanity_recursive(plan, optimizer_options).map(|_| ())
 }
 
+/// Whether `new` still provides the output order of `old`, which it replaces.
+///
+/// A rule that rewrites an operator of a plan whose requirements hold needs
+/// this: [`EnsureRequirements`] may have removed a sort because `old` provides
+/// the order, and nothing in the plan records that an `ORDER BY` or a limit above
+/// relies on it.
+///
+/// [`EnsureRequirements`]: crate::ensure_requirements::EnsureRequirements
+pub(crate) fn output_order_kept(
+    old: &Arc<dyn ExecutionPlan>,
+    new: &Arc<dyn ExecutionPlan>,
+) -> Result<bool> {
+    match old.output_ordering() {
+        Some(ordering) => new
+            .equivalence_properties()
+            .ordering_satisfy(ordering.clone()),
+        None => Ok(true),
+    }
+}
+
 /// Returns whether every node of `plan` has its order and distribution
 /// requirements satisfied by its children, as checked by
 /// [`check_input_requirements`].

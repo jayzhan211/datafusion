@@ -43,6 +43,15 @@ type Rule = Arc<dyn PhysicalOptimizerRule + Send + Sync>;
 
 static PRINT_ORDER: Once = Once::new();
 
+/// The partition count for a run, from `DF_TARGET_PARTITIONS`. With one partition,
+/// joins keep their input order and enforcement removes more sorts.
+pub(crate) fn target_partitions() -> usize {
+    std::env::var("DF_TARGET_PARTITIONS")
+        .ok()
+        .and_then(|partitions| partitions.parse().ok())
+        .unwrap_or(4)
+}
+
 /// The rule order a test file checks: the query results must not depend on it.
 fn spec_for_file(file_name: &str) -> Option<&'static str> {
     match file_name {
@@ -51,6 +60,12 @@ fn spec_for_file(file_name: &str) -> Option<&'static str> {
         }
         "rule_order_join_selection.slt" => {
             Some("move:join_selection:after:EnsureRequirements")
+        }
+        "rule_order_join_order.slt" => {
+            Some("move:join_selection:after:OutputRequirements#2")
+        }
+        "rule_order_symmetric_join.slt" => {
+            Some("move:ProjectionPushdown:before:join_selection")
         }
         "rule_order_filter_pushdown_post.slt" => {
             Some("move:FilterPushdown(Post):before:join_selection")
@@ -70,7 +85,9 @@ fn spec_for_file(file_name: &str) -> Option<&'static str> {
         "rule_order_topk_aggregation.slt" => {
             Some("move:LimitAggregation:before:EnsureRequirements")
         }
-        "rule_order_window_topn.slt" => Some("move:WindowTopN:after:EnsureRequirements"),
+        "rule_order_window_topn.slt" => {
+            Some("move:WindowTopN:after:OutputRequirements#2")
+        }
         "rule_order_projection_pushdown.slt" => {
             Some("move:ProjectionPushdown:before:EnsureRequirements")
         }

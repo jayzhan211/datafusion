@@ -19,6 +19,7 @@ use std::any::Any;
 use std::fmt::Debug;
 use std::sync::Arc;
 
+use crate::join_selection::can_repartition_join;
 use crate::output_requirements::OutputRequirementExec;
 use crate::utils::{
     add_sort_above_with_check, is_coalesce_partitions, is_repartition,
@@ -806,11 +807,11 @@ fn new_join_conditions(
         .collect()
 }
 
-/// Picks the mode of a join still in [`PartitionMode::Auto`]: `CollectLeft` for
-/// a null-aware join, which needs global probe-side state, and otherwise
-/// `Partitioned`.
+/// Picks the mode of a join still in [`PartitionMode::Auto`], for a list where
+/// `JoinSelection` hasn't done it.
 pub(crate) fn resolve_auto_join_mode(
     plan: Arc<dyn ExecutionPlan>,
+    config: &ConfigOptions,
 ) -> Result<Transformed<Arc<dyn ExecutionPlan>>> {
     let Some(hash_join) = plan.downcast_ref::<HashJoinExec>() else {
         return Ok(Transformed::no(plan));
@@ -818,10 +819,10 @@ pub(crate) fn resolve_auto_join_mode(
     if *hash_join.partition_mode() != PartitionMode::Auto {
         return Ok(Transformed::no(plan));
     }
-    let mode = if hash_join.null_aware {
-        PartitionMode::CollectLeft
-    } else {
+    let mode = if can_repartition_join(hash_join, config) {
         PartitionMode::Partitioned
+    } else {
+        PartitionMode::CollectLeft
     };
     let resolved = hash_join.builder().with_partition_mode(mode).build()?;
     Ok(Transformed::yes(Arc::new(resolved)))

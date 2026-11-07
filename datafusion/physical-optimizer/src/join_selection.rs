@@ -11,8 +11,9 @@
 //! `PartitionMode` and the build side using the available statistics for hash joins.
 
 use crate::PhysicalOptimizerRule;
+use crate::ensure_requirements::EnsureRequirements;
 use crate::optimizer::{ConfigOnlyContext, PhysicalOptimizerContext};
-use crate::sanity_checker::input_requirements_hold;
+use crate::sanity_checker::{input_requirements_hold, output_order_kept};
 use datafusion_common::Statistics;
 use datafusion_common::config::ConfigOptions;
 use datafusion_common::error::Result;
@@ -21,12 +22,14 @@ use datafusion_common::{JoinSide, JoinType, internal_err};
 use datafusion_expr_common::sort_properties::SortProperties;
 use datafusion_physical_expr::LexOrdering;
 use datafusion_physical_expr::expressions::Column;
+use datafusion_physical_expr::projection::ProjectionExprs;
 use datafusion_physical_plan::execution_plan::EmissionType;
 use datafusion_physical_plan::joins::utils::ColumnIndex;
 use datafusion_physical_plan::joins::{
     CrossJoinExec, HashJoinExec, NestedLoopJoinExec, PartitionMode,
     StreamJoinPartitionMode, SymmetricHashJoinExec,
 };
+use datafusion_physical_plan::projection::ProjectionExec;
 use datafusion_physical_plan::statistics::StatisticsArgs;
 use datafusion_physical_plan::{ExecutionPlan, ExecutionPlanProperties};
 use std::sync::Arc;
@@ -139,20 +142,28 @@ impl PhysicalOptimizerRule for JoinSelection {
             Box::new(hash_join_convert_symmetric_subrule),
             Box::new(hash_join_swap_subrule),
         ];
+        let config = context.config_options();
         let new_plan = Arc::clone(&plan)
-            .transform_up(|p| apply_subrules(p, &subrules, context.config_options()))
+            .transform_up(|p| {
+                let rewritten = apply_subrules(Arc::clone(&p), &subrules, config)?;
+                keep_relied_order(p, rewritten)
+            })
             .data()?;
         let new_plan = new_plan
-            .transform_up(|plan| statistical_join_selection_subrule(plan, context))
+            .transform_up(|p| {
+                let rewritten =
+                    statistical_join_selection_subrule(Arc::clone(&p), context)?;
+                keep_relied_order(p, rewritten)
+            })
             .data()?;
 
-        // Once requirements are enforced, nothing later repairs a join whose new
-        // mode or inputs break them, so keep the plan as it was.
+        // A new mode or new inputs can break the requirements of a plan that met
+        // them. A rule that comes later can't be counted on to repair that.
         if !Arc::ptr_eq(&plan, &new_plan)
             && is_enforced(&plan)
             && !input_requirements_hold(&new_plan)
         {
-            return Ok(plan);
+            return EnsureRequirements::new().optimize(new_plan, config);
         }
         Ok(new_plan)
     }
@@ -164,6 +175,33 @@ impl PhysicalOptimizerRule for JoinSelection {
     fn schema_check(&self) -> bool {
         true
     }
+}
+
+/// Whether a hash join in [`PartitionMode::Auto`] may repartition its inputs. A
+/// null-aware join can't, because it needs global state for NULLs.
+pub(crate) fn can_repartition_join(
+    hash_join: &HashJoinExec,
+    config: &ConfigOptions,
+) -> bool {
+    config.execution.target_partitions > 1
+        && config.optimizer.repartition_joins
+        && !hash_join.null_aware
+}
+
+/// Keeps a join as it was if `rewritten` loses an output order that may be relied
+/// on. Only a join in `Auto` mode is known to come before enforcement, because
+/// [`EnsureRequirements`] resolves that mode.
+fn keep_relied_order(
+    join: Arc<dyn ExecutionPlan>,
+    rewritten: Transformed<Arc<dyn ExecutionPlan>>,
+) -> Result<Transformed<Arc<dyn ExecutionPlan>>> {
+    let is_auto = join
+        .downcast_ref::<HashJoinExec>()
+        .is_some_and(|join| *join.partition_mode() == PartitionMode::Auto);
+    if !rewritten.transformed || is_auto || output_order_kept(&join, &rewritten.data)? {
+        return Ok(rewritten);
+    }
+    Ok(Transformed::no(join))
 }
 
 /// Whether `plan` already meets its requirements. A join in `Auto` mode declares
@@ -314,11 +352,14 @@ fn statistical_join_selection_subrule(
             None
         } else {
             match hash_join.partition_mode() {
-                PartitionMode::Auto => try_collect_left(hash_join, false, context)?
-                    .map_or_else(
+                PartitionMode::Auto => {
+                    let collect_only =
+                        !can_repartition_join(hash_join, context.config_options());
+                    try_collect_left(hash_join, collect_only, context)?.map_or_else(
                         || partitioned_hash_join(hash_join, context).map(Some),
                         |v| Ok(Some(v)),
-                    )?,
+                    )?
+                }
                 PartitionMode::CollectLeft => try_collect_left(hash_join, true, context)?
                     .map_or_else(
                         || partitioned_hash_join(hash_join, context).map(Some),
@@ -474,7 +515,7 @@ fn hash_join_convert_symmetric_subrule(
             let left_order = determine_order(JoinSide::Left);
             let right_order = determine_order(JoinSide::Right);
 
-            return SymmetricHashJoinExec::try_new(
+            let join: Arc<dyn ExecutionPlan> = Arc::new(SymmetricHashJoinExec::try_new(
                 Arc::clone(hash_join.left()),
                 Arc::clone(hash_join.right()),
                 hash_join.on().to_vec(),
@@ -484,8 +525,19 @@ fn hash_join_convert_symmetric_subrule(
                 left_order,
                 right_order,
                 mode,
-            )
-            .map(|exec| Arc::new(exec) as _);
+            )?);
+            // `SymmetricHashJoinExec` can't carry a projection, so keep the hash
+            // join's projection above it.
+            return match &hash_join.projection {
+                Some(projection) => {
+                    let exprs = ProjectionExprs::from_indices(projection, &join.schema());
+                    Ok(Arc::new(ProjectionExec::try_new(
+                        exprs.as_ref().to_vec(),
+                        join,
+                    )?))
+                }
+                None => Ok(join),
+            };
         }
     }
     Ok(input)
@@ -533,7 +585,7 @@ fn hash_join_convert_symmetric_subrule(
 /// ```
 pub fn hash_join_swap_subrule(
     mut input: Arc<dyn ExecutionPlan>,
-    _config_options: &ConfigOptions,
+    config_options: &ConfigOptions,
 ) -> Result<Arc<dyn ExecutionPlan>> {
     if let Some(hash_join) = input.downcast_ref::<HashJoinExec>()
         && hash_join.dynamic_expressions_produced().is_empty()
@@ -545,7 +597,7 @@ pub fn hash_join_swap_subrule(
             JoinType::Inner | JoinType::Left | JoinType::LeftSemi | JoinType::LeftAnti
         )
     {
-        input = swap_join_according_to_unboundedness(hash_join)?;
+        input = swap_join_according_to_unboundedness(hash_join, config_options)?;
     }
     Ok(input)
 }
@@ -559,6 +611,7 @@ pub fn hash_join_swap_subrule(
 /// to implement, or experiment with, their own join selection rules.
 pub(crate) fn swap_join_according_to_unboundedness(
     hash_join: &HashJoinExec,
+    config_options: &ConfigOptions,
 ) -> Result<Arc<dyn ExecutionPlan>> {
     let partition_mode = hash_join.partition_mode();
     let join_type = hash_join.join_type();
@@ -578,8 +631,12 @@ pub(crate) fn swap_join_according_to_unboundedness(
             hash_join.swap_inputs(PartitionMode::CollectLeft)
         }
         (PartitionMode::Auto, _) => {
-            // Use `PartitionMode::Partitioned` as default if `Auto` is selected.
-            hash_join.swap_inputs(PartitionMode::Partitioned)
+            let mode = if can_repartition_join(hash_join, config_options) {
+                PartitionMode::Partitioned
+            } else {
+                PartitionMode::CollectLeft
+            };
+            hash_join.swap_inputs(mode)
         }
     }
 }

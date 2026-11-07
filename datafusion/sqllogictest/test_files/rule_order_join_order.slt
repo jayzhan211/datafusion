@@ -1,0 +1,86 @@
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
+
+#   http://www.apache.org/licenses/LICENSE-2.0
+
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
+
+# This file runs `JoinSelection` after `EnsureRequirements` and after the output
+# marker is removed (see `rule_order.rs`). With a single partition, the join
+# keeps the order of its right input, so enforcement removes the sort. Nothing in
+# the plan then records that the query relies on that order, so swapping the
+# inputs would return rows out of order, or the wrong rows under a limit.
+
+statement ok
+set datafusion.execution.target_partitions = 1;
+
+statement ok
+COPY (SELECT value AS k, value AS v FROM generate_series(1, 2000))
+TO 'test_files/scratch/rule_order_join_order/big.parquet' STORED AS PARQUET;
+
+statement ok
+COPY (SELECT value AS k, 100 - value AS s FROM generate_series(1, 5) ORDER BY s)
+TO 'test_files/scratch/rule_order_join_order/small.parquet' STORED AS PARQUET;
+
+statement ok
+CREATE EXTERNAL TABLE big
+STORED AS PARQUET LOCATION 'test_files/scratch/rule_order_join_order/big.parquet';
+
+statement ok
+CREATE EXTERNAL TABLE small_sorted (k BIGINT, s BIGINT)
+STORED AS PARQUET WITH ORDER (s ASC)
+LOCATION 'test_files/scratch/rule_order_join_order/small.parquet';
+
+query II
+SELECT b.v, s.s FROM big b JOIN small_sorted s ON b.k = s.k ORDER BY s.s;
+----
+5 95
+4 96
+3 97
+2 98
+1 99
+
+query II
+SELECT b.v, s.s FROM big b JOIN small_sorted s ON b.k = s.k ORDER BY s.s LIMIT 2;
+----
+5 95
+4 96
+
+query II
+SELECT * FROM (
+  SELECT b.v, s.s FROM big b JOIN small_sorted s ON b.k = s.k ORDER BY s.s LIMIT 2
+) t ORDER BY v;
+----
+4 96
+5 95
+
+query II
+SELECT b.k, s.s FROM big b CROSS JOIN small_sorted s WHERE b.k <= 2 ORDER BY s.s, b.k LIMIT 3;
+----
+1 95
+2 95
+1 96
+
+query II
+SELECT b.k, s.s FROM big b JOIN small_sorted s ON b.k < s.k ORDER BY s.s LIMIT 1;
+----
+1 95
+
+statement ok
+DROP TABLE big;
+
+statement ok
+DROP TABLE small_sorted;
+
+statement ok
+set datafusion.execution.target_partitions = 4;

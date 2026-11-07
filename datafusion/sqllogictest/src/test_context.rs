@@ -88,7 +88,7 @@ impl TestContext {
         let file_name = relative_path.file_name().unwrap().to_str().unwrap();
         let config = SessionConfig::new()
             // hardcode target partitions so plans are deterministic
-            .with_target_partitions(4)
+            .with_target_partitions(crate::rule_order::target_partitions())
             // The default `created_by` embeds the DataFusion version, which
             // changes the size of written parquet files (and thus metrics such
             // as `scan_efficiency_ratio` in EXPLAIN ANALYZE output) whenever

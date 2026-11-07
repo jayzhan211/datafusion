@@ -312,7 +312,7 @@ async fn test_join_with_swap_to_sort_preserving_merge_fetch_side() {
             None,
             &JoinType::Inner,
             None,
-            PartitionMode::Partitioned,
+            PartitionMode::Auto,
             NullEquality::NullEqualsNothing,
             false,
         )
