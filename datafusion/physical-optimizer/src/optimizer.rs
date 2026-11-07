@@ -84,29 +84,29 @@ impl PhysicalOptimizerContext for ConfigOnlyContext<'_> {
 ///
 /// The following properties hold for all rules (built-in and custom):
 ///
-/// 1. **Correctness.** The returned plan must a) be valid (it can be executed
-///    without internal errors) and b) produce the same results as the input
-///    plan. A rule may change the operators in the plan, such as changing
-///    which operator implements a join, but it may never change the query's
-///    semantics.
+/// 1. **Correctness.** A rule may change the operators in the plan, such as
+///    changing which operator implements a join, but it may never change the
+///    query's results. A plan can reach a rule before [`EnsureRequirements`]
+///    has run, when it can't be executed yet. The results of such a plan are the
+///    ones it produces after [`EnsureRequirements`] runs. A rule that receives a
+///    plan whose requirements are satisfied must return one whose requirements
+///    are satisfied.
 ///
 /// 2. **Reorderable.** Because each rule preserves correctness, running the
-///    rules in a different order must still yield a valid plan that produces
-///    the same results.
+///    rules in any order yields a valid plan that produces the same results, as
+///    long as the list contains [`EnsureRequirements`].
 ///
-/// ### Exceptions
+/// [`EnsureRequirements`] is the rule that makes a plan executable, by inserting
+/// the repartitioning and sorting needed to satisfy the distribution and
+/// ordering requirements. It can run at any point in the list.
+/// [`OutputRequirements`] is optional: [`EnsureRequirements`] records the output
+/// requirements itself if no rule has, and the physical planner removes a marker
+/// that no rule removed.
 ///
-/// Some built-in rules do not yet fully satisfy the invariants above because
-/// they are responsible for making an initial plan *executable* rather than for
-/// optimizing an existing plan:
-///
-/// - [`EnsureRequirements`] inserts the repartitioning and sorting needed to
-///   satisfy the distribution and ordering requirements.
-/// - [`OutputRequirements`] records output requirements.
-///
-/// Custom pipelines must keep these rules in a compatible relative order. We
-/// are working to remove these exceptions, so that all rules can be reordered
-/// freely.
+/// "The same results" leaves open what SQL leaves open. Between orders, the rows
+/// can come back in a different order when no `ORDER BY` fixes it, including
+/// between rows that tie on the `ORDER BY` or window ordering, and an approximate
+/// aggregate such as `approx_percentile_cont` can return a different estimate.
 ///
 /// After the last rule, including rules added by the user, the physical
 /// planner rejects the plan if its requirements are not satisfied (see
@@ -121,6 +121,11 @@ impl PhysicalOptimizerContext for ConfigOnlyContext<'_> {
 /// optimization that would apply in the default order. To keep their
 /// implementations simple, built-in rules typically only recognize shapes that
 /// the default pipeline produces.
+///
+/// A missed optimization can also change how much memory a query needs, so a query
+/// that fits in a memory limit in one order can exceed it in another. For example,
+/// [`JoinSelection`] doesn't swap the inputs of a join that has been through
+/// [`EnsureRequirements`] if the swap loses the join's output order.
 ///
 /// For example, [`CombinePartialFinalAggregate`] runs after
 /// [`EnsureRequirements`] and only merges a `Partial` aggregate that is the
@@ -152,9 +157,9 @@ impl PhysicalOptimizerContext for ConfigOnlyContext<'_> {
 ///
 /// If you do build a custom pipeline:
 ///
-/// - **Reordering must still yield a valid plan.** Downstream projects are
+/// - **Custom rules must follow the same invariants.** Downstream projects are
 ///   encouraged to add tests that run their pipeline end to end and check
-///   results, as DataFusion's own tests only cover the default order.
+///   results, as DataFusion's own tests don't cover custom rules.
 /// - **Test for reduced optimization coverage,** as described above, and verify
 ///   the plans you care about with `EXPLAIN`.
 /// - **Prefer adding a rule over extending a built-in one.** We discourage
