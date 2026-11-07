@@ -40,7 +40,7 @@
 use std::sync::Arc;
 
 use crate::PhysicalOptimizerRule;
-use crate::sanity_checker::input_requirements_hold;
+use crate::sanity_checker::{input_requirements_hold, output_order_kept};
 use arrow::datatypes::DataType;
 use datafusion_common::config::ConfigOptions;
 use datafusion_common::tree_node::{Transformed, TransformedResult, TreeNode};
@@ -318,28 +318,19 @@ impl PhysicalOptimizerRule for WindowTopN {
             return Ok(plan);
         }
 
-        let new_plan = Arc::clone(&plan)
-            .transform_down(|node| {
-                Ok(
-                    if let Some(transformed) = WindowTopN::try_transform(&node) {
-                        Transformed::yes(transformed)
-                    } else {
-                        Transformed::no(node)
-                    },
-                )
-            })
-            .data()?;
-
         // `PartitionedTopKExec` orders by the partition keys with default options,
-        // whatever order its input had. Once requirements are enforced, nothing
-        // later repairs that, so keep the plan as it was.
-        if !Arc::ptr_eq(&plan, &new_plan)
-            && input_requirements_hold(&plan)
-            && !input_requirements_hold(&new_plan)
-        {
-            return Ok(plan);
-        }
-        Ok(new_plan)
+        // whatever order its input had. That only matters if the plan has been
+        // enforced, because something may rely on the order it replaces.
+        let enforced = input_requirements_hold(&plan);
+        plan.transform_down(|node| {
+            if let Some(transformed) = WindowTopN::try_transform(&node)
+                && (!enforced || output_order_kept(&node, &transformed)?)
+            {
+                return Ok(Transformed::yes(transformed));
+            }
+            Ok(Transformed::no(node))
+        })
+        .data()
     }
 
     fn name(&self) -> &str {
