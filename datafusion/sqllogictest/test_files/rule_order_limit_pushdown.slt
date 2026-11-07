@@ -79,3 +79,34 @@ SELECT count(*) FROM (SELECT s FROM t WHERE s > 14 LIMIT 3);
 
 statement ok
 DROP TABLE t;
+
+# The scan absorbs the limit, and it can't be split afterwards: the limit would apply to
+# each part.
+statement ok
+set datafusion.execution.batch_size = 2;
+
+statement ok
+set datafusion.optimizer.repartition_file_min_size = 1;
+
+statement ok
+COPY (SELECT value AS s, value * 7 AS g FROM generate_series(1, 60))
+TO 'test_files/scratch/rule_order_limit_pushdown/split.parquet'
+STORED AS PARQUET OPTIONS ('format.max_row_group_size' '6');
+
+statement ok
+CREATE EXTERNAL TABLE split (s BIGINT, g BIGINT)
+STORED AS PARQUET LOCATION 'test_files/scratch/rule_order_limit_pushdown/split.parquet';
+
+query II
+SELECT count(*), count(DISTINCT s) FROM (SELECT s FROM split LIMIT 10);
+----
+10 10
+
+statement ok
+DROP TABLE split;
+
+statement ok
+RESET datafusion.execution.batch_size;
+
+statement ok
+RESET datafusion.optimizer.repartition_file_min_size;

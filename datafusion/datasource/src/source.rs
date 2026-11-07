@@ -428,6 +428,10 @@ impl ExecutionPlan for DataSourceExec {
         target_partitions: usize,
         config: &ConfigOptions,
     ) -> Result<Option<Arc<dyn ExecutionPlan>>> {
+        // A limit keeps the first rows the scan reads, and it would apply to each part.
+        if self.fetch().is_some() {
+            return Ok(None);
+        }
         let data_source = self.data_source.repartitioned(
             target_partitions,
             config.optimizer.repartition_file_min_size,
