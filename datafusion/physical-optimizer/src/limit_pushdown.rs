@@ -62,6 +62,7 @@ use datafusion_common::stats::Precision;
 use datafusion_common::tree_node::{Transformed, TreeNodeRecursion};
 use datafusion_physical_plan::empty::EmptyExec;
 use datafusion_physical_plan::execution_plan::replace_children_if_necessary;
+use datafusion_physical_plan::limit::GlobalLimitExec;
 use datafusion_physical_plan::placeholder_row::PlaceholderRowExec;
 use datafusion_physical_plan::projection::ProjectionExec;
 use datafusion_physical_plan::statistics::{StatisticsArgs, StatisticsContext};
@@ -245,6 +246,11 @@ fn fold_limit(
     let Step::Limit(limit) = step(plan) else {
         return Ok(None);
     };
+    // A fetch below applies to each partition, so it can't replace this limit
+    // while the partitions are still separate.
+    if combines_partitions(plan) {
+        return Ok(None);
+    }
     let input = Arc::clone(plan.children()[0]);
     let bound = above.bound().over(limit);
     // Exact statistics may prove the input already has few enough rows. The
@@ -263,6 +269,14 @@ fn apply_bound(
     plan: Arc<dyn ExecutionPlan>,
     above: Above,
 ) -> (Arc<dyn ExecutionPlan>, Above) {
+    // A limit that `fold_limit` kept, over partitions no merge combines yet. It
+    // enforces the bound, and enforcement adds the merge below it.
+    if let Some(limit) = RowBound::of_limit_node(&plan) {
+        let bound = above.bound().over(limit);
+        let input = Arc::clone(plan.children()[0]);
+        let limit = GlobalLimitExec::new(input, bound.skip, bound.fetch);
+        return (Arc::new(limit), Above::Enforced(bound.input_rows()));
+    }
     let above = match plan.fetch() {
         Some(fetch) => above.above_fetching_node(fetch),
         None => above,

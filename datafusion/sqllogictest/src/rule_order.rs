@@ -55,6 +55,12 @@ fn spec_for_file(file_name: &str) -> Option<&'static str> {
         "rule_order_filter_pushdown_post.slt" => {
             Some("move:FilterPushdown(Post):before:join_selection")
         }
+        "rule_order_limit_pushdown.slt" => {
+            Some("move:LimitPushdown:before:EnsureRequirements")
+        }
+        "rule_order_limit_statistics.slt" => {
+            Some("move:LimitPushdown:before:aggregate_statistics")
+        }
         _ => None,
     }
 }

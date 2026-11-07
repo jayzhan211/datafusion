@@ -38,6 +38,7 @@ use datafusion_physical_plan::StatisticsArgs;
 use datafusion_physical_plan::filter_pushdown::{
     ChildPushdownResult, FilterPushdownPhase, FilterPushdownPropagation, PushedDown,
 };
+use datafusion_physical_plan::statistics::with_per_partition_fetch;
 
 /// A source of data, typically a list of files or memory
 ///
@@ -494,7 +495,19 @@ impl ExecutionPlan for DataSourceExec {
         _input_stats: &[Arc<Statistics>],
         args: &StatisticsArgs,
     ) -> Result<Arc<Statistics>> {
-        self.data_source.partition_statistics(args.partition())
+        let statistics = self.data_source.partition_statistics(args.partition())?;
+        let Some(fetch) = self.data_source.fetch() else {
+            return Ok(statistics);
+        };
+        // The source stops each partition after `fetch` rows. A rule such as
+        // `AggregateStatistics` answers from these numbers without reading it.
+        let partitions = self.data_source.output_partitioning().partition_count();
+        Ok(Arc::new(with_per_partition_fetch(
+            Arc::unwrap_or_clone(statistics),
+            Some(fetch),
+            partitions,
+            args,
+        )?))
     }
 
     fn with_fetch(&self, limit: Option<usize>) -> Option<Arc<dyn ExecutionPlan>> {

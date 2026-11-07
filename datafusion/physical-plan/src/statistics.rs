@@ -104,7 +104,8 @@ impl StatisticsArgs {
 /// `fetch * n_partitions` rows, and never more than the input. How the input
 /// rows are spread over the partitions is unknown, so the result is inexact
 /// unless an exact input count shows that `fetch` cannot drop any row.
-pub(crate) fn with_per_partition_fetch(
+#[doc(hidden)]
+pub fn with_per_partition_fetch(
     input: Statistics,
     fetch: Option<usize>,
     n_partitions: usize,
