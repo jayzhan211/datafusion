@@ -12,11 +12,10 @@ use datafusion_common::config::ConfigOptions;
 use datafusion_common::tree_node::{Transformed, TransformedResult, TreeNode};
 use datafusion_physical_expr::expressions::Column;
 use datafusion_physical_plan::ExecutionPlan;
-use datafusion_physical_plan::aggregates::AggregateExec;
+use datafusion_physical_plan::aggregates::{AggregateExec, AggregateInputMode};
 use datafusion_physical_plan::execution_plan::CardinalityEffect;
 use datafusion_physical_plan::projection::ProjectionExec;
 use datafusion_physical_plan::sorts::sort::SortExec;
-use datafusion_physical_plan::windows::{BoundedWindowAggExec, WindowAggExec};
 use itertools::Itertools;
 
 /// An optimizer rule that passes a `limit` hint to aggregations if the whole result is not needed
@@ -53,7 +52,7 @@ impl TopKAggregation {
         let sort_options = order.options;
         let order = order.expr.downcast_ref::<Column>()?;
         let mut sort_col_name = order.name().to_string();
-        let mut sort_col_index = order.index();
+        let mut sort_col_index = Some(order.index());
         let limit = sort.fetch()?;
 
         let mut cardinality_preserved = true;
@@ -62,28 +61,35 @@ impl TopKAggregation {
                 return Ok(Transformed::no(plan));
             }
             if let Some(aggr) = plan.downcast_ref::<AggregateExec>() {
-                match aggr
-                    .clone()
-                    .try_optimize_topk(limit, &sort_col_name, sort_options)
+                let optimized =
+                    aggr.clone()
+                        .try_optimize_topk(limit, &sort_col_name, sort_options);
+                // A final stage and its partial stage are one aggregate, so the limit
+                // goes on both. Below the stage that reads raw input, the key is gone.
+                if optimized.is_none()
+                    || aggr.mode().input_mode() == AggregateInputMode::Raw
                 {
-                    None => cardinality_preserved = false,
-                    Some(aggr) => return Ok(Transformed::yes(Arc::new(aggr.data))),
+                    cardinality_preserved = false;
+                }
+                sort_col_index = None;
+                if let Some(aggr) = optimized {
+                    return Ok(Transformed::yes(Arc::new(aggr.data)));
                 }
             } else if let Some(proj) = plan.downcast_ref::<ProjectionExec>() {
                 // Follow the sort key through the projection by position: names
                 // can repeat, and an alias can reuse a name from below it.
-                let src_col = proj
-                    .expr()
-                    .get(sort_col_index)
+                let src_col = sort_col_index
+                    .and_then(|index| proj.expr().get(index))
                     .and_then(|proj_expr| proj_expr.expr.downcast_ref::<Column>());
                 let Some(src_col) = src_col else {
                     cardinality_preserved = false;
                     return Ok(Transformed::no(plan));
                 };
                 sort_col_name = src_col.name().to_string();
-                sort_col_index = src_col.index();
-            } else if plan.is::<WindowAggExec>() || plan.is::<BoundedWindowAggExec>() {
-                // A window reads rows beyond the ones the limit keeps.
+                sort_col_index = Some(src_col.index());
+            } else if !keeps_input_columns(&plan) {
+                // The key's position means nothing below here. This also stops at
+                // a window, which reads rows beyond the ones the limit keeps.
                 cardinality_preserved = false;
             } else {
                 // or we continue down through types that don't reduce cardinality
@@ -102,6 +108,11 @@ impl TopKAggregation {
             .with_preserve_partitioning(sort.preserve_partitioning());
         Some(Arc::new(sort))
     }
+}
+
+/// Whether `plan` has one input and outputs that input's columns, in the same positions.
+fn keeps_input_columns(plan: &Arc<dyn ExecutionPlan>) -> bool {
+    matches!(plan.children().as_slice(), [input] if input.schema().fields() == plan.schema().fields())
 }
 
 impl Default for TopKAggregation {
