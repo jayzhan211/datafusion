@@ -8,7 +8,9 @@ use datafusion_common::config::ConfigOptions;
 use datafusion_common::tree_node::{Transformed, TreeNode};
 use datafusion_physical_plan::sorts::sort::SortExec;
 use datafusion_physical_plan::sorts::sort_preserving_merge::SortPreservingMergeExec;
-use datafusion_physical_plan::{ExecutionPlan, LimitBehavior, WindowLookahead};
+use datafusion_physical_plan::{
+    ExecutionPlan, ExecutionPlanProperties, LimitBehavior, WindowLookahead,
+};
 use std::sync::Arc;
 
 /// This rule inspects [`ExecutionPlan`]'s attempting to find fetch limits that were not pushed
@@ -93,6 +95,12 @@ impl PhysicalOptimizerRule for LimitPushPastWindows {
 
             // grow the limit if we hit a window function
             if let LimitBehavior::Window(lookahead) = node.limit_behavior() {
+                // While the input doesn't provide the window's order, enforcement
+                // has yet to add the window's own sort, so a sort below belongs to
+                // something else, such as a subquery.
+                if !input_provides_window_order(&node)? {
+                    return reset(node, &mut ctx);
+                }
                 ctx.phase = Phase::Apply;
                 if !grow_limit(lookahead, &mut ctx) {
                     return reset(node, &mut ctx);
@@ -129,6 +137,17 @@ impl PhysicalOptimizerRule for LimitPushPastWindows {
     fn schema_check(&self) -> bool {
         false // we don't change the schema
     }
+}
+
+fn input_provides_window_order(
+    window: &Arc<dyn ExecutionPlan>,
+) -> datafusion_common::Result<bool> {
+    let Some(requirement) = window.required_input_ordering().swap_remove(0) else {
+        return Ok(true);
+    };
+    window.children()[0]
+        .equivalence_properties()
+        .ordering_satisfy_requirement(requirement.into_single())
 }
 
 fn grow_limit(lookahead: Option<WindowLookahead>, ctx: &mut TraverseState) -> bool {
