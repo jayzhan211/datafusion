@@ -155,8 +155,13 @@ impl TestContext {
             state_builder = state_builder.with_statistics_registry(registry);
         }
 
+        if crate::rule_order::is_set() && file_name != "sort_pushdown.slt" {
+            state_builder =
+                state_builder.with_physical_optimizer_rules(crate::rule_order::rules());
+        }
+
         if file_name == "sort_pushdown.slt" {
-            let mut rules = PhysicalOptimizer::new().rules;
+            let mut rules = crate::rule_order::rules();
             let ensure_requirements = rules
                 .iter()
                 .position(|rule| rule.name() == "EnsureRequirements")
