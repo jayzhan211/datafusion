@@ -1261,8 +1261,17 @@ fn build_join_column_index(plan: &HashJoinExec) -> Vec<ColumnIndex> {
                 .chain(map_fields(plan.right().schema(), JoinSide::Right))
                 .collect::<Vec<_>>()
         }
-        JoinType::RightSemi | JoinType::RightAnti | JoinType::RightMark => {
+        JoinType::RightSemi | JoinType::RightAnti => {
             map_fields(plan.right().schema(), JoinSide::Right)
+        }
+        // The right columns, then the mark column, which comes from neither input.
+        JoinType::RightMark => {
+            let mut indices = map_fields(plan.right().schema(), JoinSide::Right);
+            indices.push(ColumnIndex {
+                index: 0,
+                side: JoinSide::None,
+            });
+            indices
         }
         _ => unreachable!("unexpected join type: {}", plan.join_type()),
     }
