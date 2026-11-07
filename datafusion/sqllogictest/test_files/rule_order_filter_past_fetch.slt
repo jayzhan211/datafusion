@@ -1,0 +1,40 @@
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
+
+#   http://www.apache.org/licenses/LICENSE-2.0
+
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
+
+# This file runs `FilterPushdown` after `LimitPushdown` (see `rule_order.rs`). A limit
+# then sits in the scan or a `FilterExec` as a fetch, and a filter from above can't
+# move below it: the fetch picks its rows first.
+
+statement ok
+COPY (SELECT column1 AS s, column2 AS x, 1 AS y FROM (VALUES (1,1),(2,2),(3,3),(4,10),(5,11),(6,12))) TO 'test_files/scratch/rule_order_filter_past_fetch/t.parquet' STORED AS PARQUET OPTIONS ('format.max_row_group_size' '3');
+
+statement ok
+CREATE EXTERNAL TABLE t (s BIGINT, x BIGINT, y BIGINT) STORED AS PARQUET WITH ORDER (s ASC) LOCATION 'test_files/scratch/rule_order_filter_past_fetch/t.parquet';
+
+# DataSourceExec with a limit: the filter becomes a pruning predicate
+query III rowsort
+SELECT * FROM (SELECT * FROM t ORDER BY s LIMIT 3) WHERE x > 5;
+----
+
+# FilterExec with a fetch: the outer predicate merges into it
+query III rowsort
+SELECT * FROM (SELECT * FROM t WHERE y > 0 ORDER BY s LIMIT 3) WHERE x > 2;
+----
+3 3 1
+
+statement ok
+DROP TABLE t;
