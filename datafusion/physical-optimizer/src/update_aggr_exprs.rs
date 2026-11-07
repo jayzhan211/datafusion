@@ -19,7 +19,6 @@ use datafusion_physical_plan::windows::get_ordered_partition_by_indices;
 use datafusion_physical_plan::{ExecutionPlan, ExecutionPlanProperties};
 
 use crate::PhysicalOptimizerRule;
-use crate::join_selection::has_auto_join;
 
 /// This optimizer rule checks ordering requirements of aggregate expressions.
 ///
@@ -65,68 +64,7 @@ impl PhysicalOptimizerRule for OptimizeAggregateOrder {
         plan: Arc<dyn ExecutionPlan>,
         _config: &ConfigOptions,
     ) -> Result<Arc<dyn ExecutionPlan>> {
-        plan.transform_up(|plan| {
-            if let Some(aggr_exec) = plan.downcast_ref::<AggregateExec>() {
-                // Final stage implementations do not rely on ordering -- those
-                // ordering fields may be pruned out by first stage aggregates.
-                // Hence, necessary information for proper merge is added during
-                // the first stage to the state field, which the final stage uses.
-                if aggr_exec.mode().input_mode() == AggregateInputMode::Partial {
-                    return Ok(Transformed::no(plan));
-                }
-                let input = aggr_exec.input();
-                let mut aggr_exprs = aggr_exec.aggr_expr().to_vec();
-
-                // Nothing records that the aggregate relies on this order, and a
-                // join in `Auto` mode can still swap its inputs and lose it.
-                if has_auto_join(input) {
-                    return Ok(Transformed::no(plan));
-                }
-
-                // If the existing ordering satisfies a prefix of the GROUP BY
-                // expressions, prefix requirements with this section. In this
-                // case, aggregation will work more efficiently.
-                //
-                // Only do this for a single grouping set. With grouping sets
-                // (e.g. ROLLUP), the stream feeds the same rows once per
-                // grouping set, and within a coarser set's group the rows are
-                // ordered by the *full* group-by prefix, not by the
-                // aggregate's own ORDER BY. Proving the prefixed requirement
-                // there would mark first/last aggregates as pre-ordered when
-                // their groups are not, producing wrong results in positional
-                // paths. Without the prefix, a globally satisfied ORDER BY
-                // still holds within every group of every grouping set.
-                let requirement = if aggr_exec.group_expr().is_single() {
-                    let groupby_exprs = aggr_exec.group_expr().input_exprs();
-                    let indices =
-                        get_ordered_partition_by_indices(&groupby_exprs, input)?;
-                    indices
-                        .iter()
-                        .map(|&idx| {
-                            PhysicalSortRequirement::new(
-                                Arc::clone(&groupby_exprs[idx]),
-                                None,
-                            )
-                        })
-                        .collect::<Vec<_>>()
-                } else {
-                    vec![]
-                };
-
-                aggr_exprs = try_convert_aggregate_if_better(
-                    aggr_exprs,
-                    &requirement,
-                    input.equivalence_properties(),
-                )?;
-
-                let aggr_exec = aggr_exec.with_new_aggr_exprs(aggr_exprs);
-
-                Ok(Transformed::yes(Arc::new(aggr_exec) as _))
-            } else {
-                Ok(Transformed::no(plan))
-            }
-        })
-        .data()
+        update_aggregate_orders(plan, true)
     }
 
     fn name(&self) -> &str {
@@ -136,6 +74,85 @@ impl PhysicalOptimizerRule for OptimizeAggregateOrder {
     fn schema_check(&self) -> bool {
         true
     }
+}
+
+/// Tells aggregates whether their input provides the order they would benefit from.
+/// With `set_flags` false, this only takes that back from aggregates whose input no
+/// longer provides it.
+fn update_aggregate_orders(
+    plan: Arc<dyn ExecutionPlan>,
+    set_flags: bool,
+) -> Result<Arc<dyn ExecutionPlan>> {
+    plan.transform_up(|plan| {
+        if let Some(aggr_exec) = plan.downcast_ref::<AggregateExec>() {
+            // Final stage implementations do not rely on ordering -- those
+            // ordering fields may be pruned out by first stage aggregates.
+            // Hence, necessary information for proper merge is added during
+            // the first stage to the state field, which the final stage uses.
+            if aggr_exec.mode().input_mode() == AggregateInputMode::Partial {
+                return Ok(Transformed::no(plan));
+            }
+            let input = aggr_exec.input();
+            let mut aggr_exprs = aggr_exec.aggr_expr().to_vec();
+            if !aggr_exprs
+                .iter()
+                .any(|expr| expr.order_sensitivity().is_beneficial())
+            {
+                return Ok(Transformed::no(plan));
+            }
+
+            // If the existing ordering satisfies a prefix of the GROUP BY
+            // expressions, prefix requirements with this section. In this
+            // case, aggregation will work more efficiently.
+            //
+            // Only do this for a single grouping set. With grouping sets
+            // (e.g. ROLLUP), the stream feeds the same rows once per
+            // grouping set, and within a coarser set's group the rows are
+            // ordered by the *full* group-by prefix, not by the
+            // aggregate's own ORDER BY. Proving the prefixed requirement
+            // there would mark first/last aggregates as pre-ordered when
+            // their groups are not, producing wrong results in positional
+            // paths. Without the prefix, a globally satisfied ORDER BY
+            // still holds within every group of every grouping set.
+            let requirement = if aggr_exec.group_expr().is_single() {
+                let groupby_exprs = aggr_exec.group_expr().input_exprs();
+                let indices = get_ordered_partition_by_indices(&groupby_exprs, input)?;
+                indices
+                    .iter()
+                    .map(|&idx| {
+                        PhysicalSortRequirement::new(
+                            Arc::clone(&groupby_exprs[idx]),
+                            None,
+                        )
+                    })
+                    .collect::<Vec<_>>()
+            } else {
+                vec![]
+            };
+
+            aggr_exprs = try_convert_aggregate_if_better(
+                aggr_exprs,
+                &requirement,
+                input.equivalence_properties(),
+                set_flags,
+            )?;
+
+            let aggr_exec = aggr_exec.with_new_aggr_exprs(aggr_exprs);
+
+            Ok(Transformed::yes(Arc::new(aggr_exec) as _))
+        } else {
+            Ok(Transformed::no(plan))
+        }
+    })
+    .data()
+}
+
+/// Takes back what [`OptimizeAggregateOrder`] told an aggregate about its input, if a
+/// rule that ran after it lost that order. The aggregate then handles unordered input.
+pub(crate) fn clear_unmet_aggregate_orders(
+    plan: Arc<dyn ExecutionPlan>,
+) -> Result<Arc<dyn ExecutionPlan>> {
+    update_aggregate_orders(plan, false)
 }
 
 /// Tries to convert each aggregate expression to a potentially more efficient
@@ -159,6 +176,7 @@ fn try_convert_aggregate_if_better(
     aggr_exprs: Vec<Arc<AggregateFunctionExpr>>,
     prefix_requirement: &[PhysicalSortRequirement],
     eq_properties: &EquivalenceProperties,
+    set_flags: bool,
 ) -> Result<Vec<Arc<AggregateFunctionExpr>>> {
     aggr_exprs
         .into_iter()
@@ -171,16 +189,20 @@ fn try_convert_aggregate_if_better(
             if !aggr_expr.order_sensitivity().is_beneficial() {
                 Ok(aggr_expr)
             } else if !order_bys.is_empty() {
-                if eq_properties.ordering_satisfy_requirement(concat_slices(
+                let satisfied = eq_properties.ordering_satisfy_requirement(concat_slices(
                     prefix_requirement,
                     &order_bys
                         .iter()
                         .map(|e| e.clone().into())
                         .collect::<Vec<_>>(),
-                ))? {
+                ))?;
+                if satisfied && !set_flags {
+                    return Ok(aggr_expr);
+                }
+                if satisfied {
                     // Existing ordering satisfies the aggregator requirements:
                     aggr_expr.with_beneficial_ordering(true)?.map(Arc::new)
-                } else if eq_properties.ordering_satisfy_requirement(concat_slices(
+                } else if set_flags && eq_properties.ordering_satisfy_requirement(concat_slices(
                     prefix_requirement,
                     &order_bys
                         .iter()

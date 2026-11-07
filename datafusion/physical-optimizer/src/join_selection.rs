@@ -228,7 +228,7 @@ fn is_enforced(plan: &Arc<dyn ExecutionPlan>) -> bool {
 
 /// Whether `plan` has a join that enforcement hasn't seen, because
 /// [`EnsureRequirements`] resolves [`PartitionMode::Auto`].
-pub(crate) fn has_auto_join(plan: &Arc<dyn ExecutionPlan>) -> bool {
+fn has_auto_join(plan: &Arc<dyn ExecutionPlan>) -> bool {
     plan.exists(|node| {
         Ok(node
             .downcast_ref::<HashJoinExec>()
