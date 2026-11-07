@@ -452,10 +452,13 @@ impl AggregateExec {
         order_by: &str,
         options: SortOptions,
     ) -> Option<Transformed<Self>> {
+        // The priority map emits only at the end of input, which an unbounded
+        // input never reaches.
         if limit == 0
             || matches!(self.kind, AggregateKind::DistinctLimit { .. })
             || self.group_by().has_grouping_set()
             || self.filter_expr().iter().any(Option::is_some)
+            || self.input.boundedness().is_unbounded()
         {
             return None;
         }
