@@ -844,7 +844,8 @@ pub(crate) fn fetch_relies_on_one_partition(plan: &Arc<dyn ExecutionPlan>) -> bo
         && children.iter().all(|child| child.fetch() != fetch)
         && children.iter().any(|child| !merges_partitions(child))
         && !plan
-            .required_input_distribution()
+            .input_distribution_requirements()
+            .into_per_child()
             .iter()
             .all(|distribution| matches!(distribution, Distribution::SinglePartition))
 }
