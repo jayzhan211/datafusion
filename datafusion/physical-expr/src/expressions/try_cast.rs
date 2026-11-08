@@ -7,16 +7,18 @@ use std::hash::Hash;
 use std::sync::Arc;
 
 use crate::PhysicalExpr;
+use crate::expressions::cast::cast_source_field;
 use arrow::compute;
 use arrow::compute::CastOptions;
-use arrow::datatypes::{DataType, Field, FieldRef, Metadata, Schema};
+use arrow::datatypes::{DataType, FieldRef, Metadata, Schema};
 use arrow::record_batch::RecordBatch;
-use arrow_schema::extension::{EXTENSION_TYPE_METADATA_KEY, EXTENSION_TYPE_NAME_KEY};
+use arrow_schema::extension::EXTENSION_TYPE_NAME_KEY;
 use compute::can_cast_types;
 use datafusion_common::datatype::DataTypeExt;
 use datafusion_common::format::DEFAULT_FORMAT_OPTIONS;
 use datafusion_common::{Result, not_impl_err};
 use datafusion_expr::ColumnarValue;
+use datafusion_expr_common::field_rules;
 
 /// TRY_CAST expression casts an expression to a specific data type and returns NULL on invalid cast
 #[derive(Debug, Clone, Eq)]
@@ -131,14 +133,6 @@ impl fmt::Display for TryCastExpr {
 }
 
 impl PhysicalExpr for TryCastExpr {
-    fn data_type(&self, _input_schema: &Schema) -> Result<DataType> {
-        Ok(self.cast_type().clone())
-    }
-
-    fn nullable(&self, _input_schema: &Schema) -> Result<bool> {
-        Ok(true)
-    }
-
     fn evaluate(&self, batch: &RecordBatch) -> Result<ColumnarValue> {
         let value = self.expr.evaluate(batch)?;
         let options = CastOptions {
@@ -149,37 +143,22 @@ impl PhysicalExpr for TryCastExpr {
     }
 
     fn return_field(&self, input_schema: &Schema) -> Result<FieldRef> {
-        // If metadata is explicit, we can build the field without source
-        // (though we still try to get source for the name)
-        let source_result = self.expr.return_field(input_schema);
-
-        if let Some(metadata) = self.target_metadata() {
-            // Explicit metadata: use it exactly, TRY_CAST is always nullable
-            let name = source_result
-                .as_ref()
-                .map(|f| f.name().to_string())
-                .unwrap_or_default();
+        let Some(source) =
+            cast_source_field(&self.expr, input_schema, self.explicit_target)?
+        else {
             return Ok(Arc::new(
-                Field::new(name, self.cast_type().clone(), true)
-                    .with_metadata(metadata.clone()),
-            ));
-        }
-
-        // Pass-through metadata from source (stripping extension keys)
-        source_result.map(|source_field| {
-            let mut metadata = source_field.metadata().clone();
-            metadata.remove(EXTENSION_TYPE_NAME_KEY);
-            metadata.remove(EXTENSION_TYPE_METADATA_KEY);
-
-            Arc::new(
-                source_field
+                self.target_field
                     .as_ref()
                     .clone()
-                    .with_data_type(self.cast_type().clone())
-                    .with_nullable(true) // TRY_CAST is always nullable
-                    .with_metadata(metadata),
-            )
-        })
+                    .with_name("")
+                    .with_nullable(true),
+            ));
+        };
+        Ok(Arc::new(field_rules::try_cast(
+            &source,
+            &self.target_field,
+            self.explicit_target,
+        )))
     }
 
     fn children(&self) -> Vec<&Arc<dyn PhysicalExpr>> {
@@ -265,7 +244,7 @@ impl TryCastExpr {
         let target_field = target_field
             .as_ref()
             .map(|field| {
-                let field: Field = field.try_into()?;
+                let field: arrow::datatypes::Field = field.try_into()?;
                 if field.data_type() != &cast_type {
                     return internal_err!(
                         "TryCastExpr target_field type does not match arrow_type"
@@ -317,12 +296,7 @@ pub fn try_cast_with_target_field(
     let expr_type = expr.data_type(input_schema)?;
     let cast_type = target_field.data_type();
 
-    // Check if this is a "default" target field (type-only cast with no explicit
-    // metadata constraints). This is the field created by `into_nullable_field_ref()`
-    // when only a DataType is known.
-    let is_type_only = target_field.name().is_empty()
-        && target_field.is_nullable()
-        && target_field.metadata().is_empty();
+    let is_type_only = field_rules::is_type_only_cast(target_field);
 
     // For same-type casts, we can skip creating a TryCastExpr only if:
     // 1. The target is type-only (no explicit metadata)
@@ -371,6 +345,7 @@ mod tests {
         },
         datatypes::*,
     };
+    use arrow_schema::extension::EXTENSION_TYPE_METADATA_KEY;
     use datafusion_physical_expr_common::physical_expr::fmt_sql;
 
     // runs an end-to-end test of physical type cast

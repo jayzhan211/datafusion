@@ -8,7 +8,7 @@ use std::{fmt::Display, hash::Hash, sync::Arc};
 use tokio::sync::watch;
 
 use crate::PhysicalExpr;
-use arrow::datatypes::{DataType, Schema};
+use arrow::datatypes::{DataType, Field, FieldRef, Schema};
 #[cfg(feature = "proto")]
 use datafusion_common::internal_datafusion_err;
 use datafusion_common::{
@@ -541,6 +541,18 @@ impl PhysicalExpr for DynamicFilterPhysicalExpr {
             data_type: Arc::clone(&self.data_type),
             nullable: Arc::clone(&self.nullable),
         }))
+    }
+
+    // SKETCH: migrate. The old `return_field` default written out, because
+    // `data_type`/`nullable` below carry test-only checks that the current
+    // filter's type and nullability never change. Next step: one check on the
+    // field here, and delegate to `self.current()?.return_field(..)`.
+    fn return_field(&self, input_schema: &Schema) -> Result<FieldRef> {
+        Ok(Arc::new(Field::new(
+            "",
+            self.data_type(input_schema)?,
+            self.nullable(input_schema)?,
+        )))
     }
 
     fn data_type(&self, input_schema: &Schema) -> Result<DataType> {

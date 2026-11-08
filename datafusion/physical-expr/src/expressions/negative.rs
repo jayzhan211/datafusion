@@ -26,6 +26,7 @@ use datafusion_expr::{
     ColumnarValue,
     type_coercion::{is_interval, is_signed_numeric, is_timestamp},
 };
+use datafusion_expr_common::field_rules;
 
 /// Negative expression
 #[derive(Debug, Eq)]
@@ -66,14 +67,6 @@ impl std::fmt::Display for NegativeExpr {
 }
 
 impl PhysicalExpr for NegativeExpr {
-    fn data_type(&self, input_schema: &Schema) -> Result<DataType> {
-        self.arg.data_type(input_schema)
-    }
-
-    fn nullable(&self, input_schema: &Schema) -> Result<bool> {
-        self.arg.nullable(input_schema)
-    }
-
     fn evaluate(&self, batch: &RecordBatch) -> Result<ColumnarValue> {
         match self.arg.evaluate(batch)? {
             ColumnarValue::Array(array) => {
@@ -87,7 +80,9 @@ impl PhysicalExpr for NegativeExpr {
     }
 
     fn return_field(&self, input_schema: &Schema) -> Result<FieldRef> {
-        self.arg.return_field(input_schema)
+        Ok(Arc::new(field_rules::negative(
+            self.arg.return_field(input_schema)?.as_ref(),
+        )))
     }
 
     fn children(&self) -> Vec<&Arc<dyn PhysicalExpr>> {

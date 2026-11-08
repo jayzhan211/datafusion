@@ -9,10 +9,10 @@ use std::sync::Arc;
 use crate::physical_expr::PhysicalExpr;
 
 use arrow::compute::{CastOptions, can_cast_types};
-use arrow::datatypes::{DataType, DataType::*, Field, FieldRef, Metadata, Schema};
+use arrow::datatypes::{DataType, DataType::*, FieldRef, Metadata, Schema};
 use arrow::record_batch::RecordBatch;
 use arrow::util::display::{ArrayFormatterFactory, DurationFormat, FormatOptions};
-use arrow_schema::extension::{EXTENSION_TYPE_METADATA_KEY, EXTENSION_TYPE_NAME_KEY};
+use arrow_schema::extension::EXTENSION_TYPE_NAME_KEY;
 use datafusion_common::datatype::DataTypeExt;
 use datafusion_common::format::DEFAULT_FORMAT_OPTIONS;
 use datafusion_common::nested_struct::{
@@ -20,6 +20,7 @@ use datafusion_common::nested_struct::{
 };
 use datafusion_common::{Result, not_impl_err};
 use datafusion_expr_common::columnar_value::ColumnarValue;
+use datafusion_expr_common::field_rules;
 use datafusion_expr_common::interval_arithmetic::Interval;
 use datafusion_expr_common::sort_properties::ExprProperties;
 
@@ -299,45 +300,6 @@ impl CastExpr {
         self.explicit_target
     }
 
-    fn resolved_target_field(&self, input_schema: &Schema) -> Result<FieldRef> {
-        // Try to get the source field for the name. If the target field is
-        // explicit, we can fall back to an empty name if the source lookup fails
-        // (e.g., for virtual row-index columns appended at scan time).
-        let source_result = self.expr.return_field(input_schema);
-
-        if self.explicit_target {
-            // Metadata and nullability come from the target field verbatim
-            let name = source_result
-                .as_ref()
-                .map(|f| f.name().to_string())
-                .unwrap_or_default();
-            return Ok(Arc::new(
-                Field::new(
-                    name,
-                    self.cast_type().clone(),
-                    self.target_field.is_nullable(),
-                )
-                .with_metadata(self.target_field.metadata().clone()),
-            ));
-        }
-
-        // Type-only cast: pass through the source metadata and nullability,
-        // stripping extension type keys (the cast is to a plain storage type).
-        source_result.map(|source_field| {
-            let mut metadata = source_field.metadata().clone();
-            metadata.remove(EXTENSION_TYPE_NAME_KEY);
-            metadata.remove(EXTENSION_TYPE_METADATA_KEY);
-
-            Arc::new(
-                source_field
-                    .as_ref()
-                    .clone()
-                    .with_data_type(self.cast_type().clone())
-                    .with_metadata(metadata),
-            )
-        })
-    }
-
     /// Check if casting from the source type to the target type is known to be
     /// lossless and strictly order-preserving for all source values, preserving nulls.
     /// This includes widening casts (e.g. `Int8` or `UInt8` to `Int16`) and representation
@@ -371,6 +333,25 @@ impl CastExpr {
     /// values, preserving nulls. See [`Self::check_bigger_cast`].
     pub fn is_bigger_cast(&self, src: &DataType) -> bool {
         Self::check_bigger_cast(self.cast_type(), src)
+    }
+}
+
+/// The source field of a CAST or TRY_CAST, or `None` when the source is not
+/// in `input_schema` and an explicit target can answer alone.
+///
+/// UNKNOWN: #23169 kept answering for an explicit target whose source is not
+/// in `input_schema` ("virtual row-index columns appended at scan time"),
+/// with the target's field alone. Kept for both casts; not checked whether
+/// that case still happens.
+pub(crate) fn cast_source_field(
+    expr: &Arc<dyn PhysicalExpr>,
+    input_schema: &Schema,
+    explicit_target: bool,
+) -> Result<Option<FieldRef>> {
+    match expr.return_field(input_schema) {
+        Ok(source) => Ok(Some(source)),
+        Err(_) if explicit_target => Ok(None),
+        Err(e) => Err(e),
     }
 }
 
@@ -593,21 +574,6 @@ impl fmt::Display for CastExpr {
 }
 
 impl PhysicalExpr for CastExpr {
-    fn data_type(&self, _input_schema: &Schema) -> Result<DataType> {
-        Ok(self.cast_type().clone())
-    }
-
-    fn nullable(&self, input_schema: &Schema) -> Result<bool> {
-        // A cast is nullable if **either** the child is nullable or the
-        // target field allows nulls.  This conservative rule prevents
-        // optimizers from assuming a non-null result when a null input could
-        // still propagate.  `return_field()` continues to expose the exact
-        // target metadata separately.
-        let child_nullable = self.expr.nullable(input_schema)?;
-        let target_nullable = self.resolved_target_field(input_schema)?.is_nullable();
-        Ok(child_nullable || target_nullable)
-    }
-
     fn evaluate(&self, batch: &RecordBatch) -> Result<ColumnarValue> {
         let value = self.expr.evaluate(batch)?;
         let cast_options = self.cast_options();
@@ -630,7 +596,21 @@ impl PhysicalExpr for CastExpr {
     }
 
     fn return_field(&self, input_schema: &Schema) -> Result<FieldRef> {
-        self.resolved_target_field(input_schema)
+        let Some(source) =
+            cast_source_field(&self.expr, input_schema, self.explicit_target)?
+        else {
+            return Ok(Arc::new(self.target_field.as_ref().clone().with_name("")));
+        };
+        // BEHAVIOR CHANGE (the rule of #26752): for an explicit target this
+        // was the target's nullability alone while `nullable()` said source
+        // OR target; both now say source OR target. A `safe` cast is now
+        // always nullable (a failed value becomes NULL).
+        Ok(Arc::new(field_rules::cast(
+            &source,
+            &self.target_field,
+            self.explicit_target,
+            self.cast_options.safe,
+        )))
     }
 
     fn children(&self) -> Vec<&Arc<dyn PhysicalExpr>> {
@@ -766,7 +746,7 @@ impl CastExpr {
         let target_field = target_field
             .as_ref()
             .map(|field| {
-                let field: Field = field.try_into()?;
+                let field: arrow::datatypes::Field = field.try_into()?;
                 if field.data_type() != &cast_type {
                     return internal_err!(
                         "CastExpr target_field type does not match arrow_type"
@@ -836,12 +816,7 @@ pub fn cast_with_target_field(
     let expr_type = expr.data_type(input_schema)?;
     let cast_type = target_field.data_type();
 
-    // Check if this is a "default" target field (type-only cast with no explicit
-    // metadata or nullability constraints). This is the field created by
-    // `into_nullable_field_ref()` when only a DataType is known.
-    let is_type_only = target_field.name().is_empty()
-        && target_field.is_nullable()
-        && target_field.metadata().is_empty();
+    let is_type_only = field_rules::is_type_only_cast(target_field);
 
     // For same-type casts, we can skip creating a CastExpr only if:
     // 1. The target is type-only (no explicit metadata)
@@ -916,6 +891,7 @@ mod tests {
         },
         datatypes::*,
     };
+    use arrow_schema::extension::EXTENSION_TYPE_METADATA_KEY;
     use datafusion_common::ScalarValue;
     use datafusion_common::cast::{
         as_boolean_array, as_int64_array, as_string_array, as_struct_array,

@@ -35,7 +35,7 @@ use crate::{
 
 use arrow::array::{PrimitiveArray, RecordBatch, RecordBatchOptions, UInt64Array};
 use arrow::compute::take_arrays;
-use arrow::datatypes::{DataType, Schema, SchemaRef, UInt32Type};
+use arrow::datatypes::{DataType, Field, FieldRef, Schema, SchemaRef, UInt32Type};
 use arrow_schema::SortOptions;
 use datafusion_common::ScalarValue;
 use datafusion_common::config::ConfigOptions;
@@ -826,12 +826,8 @@ impl PhysicalExpr for RangeExpr {
         }))
     }
 
-    fn data_type(&self, _input_schema: &Schema) -> Result<DataType> {
-        Ok(DataType::UInt64)
-    }
-
-    fn nullable(&self, _input_schema: &Schema) -> Result<bool> {
-        Ok(false)
+    fn return_field(&self, _input_schema: &Schema) -> Result<FieldRef> {
+        Ok(Arc::new(Field::new("", DataType::UInt64, false)))
     }
 
     fn evaluate(&self, batch: &RecordBatch) -> Result<ColumnarValue> {

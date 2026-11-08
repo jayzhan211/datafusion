@@ -3,7 +3,7 @@
 // SPDX-FileContributor: Licensed to the Apache Software Foundation (ASF) under one or more contributor license agreements
 
 use crate::PhysicalExpr;
-use arrow::datatypes::{DataType, Schema};
+use arrow::datatypes::{DataType, Field, FieldRef, Schema};
 use arrow::record_batch::RecordBatch;
 use datafusion_common::{Result, assert_or_internal_err};
 use datafusion_expr::{ColumnarValue, Operator};
@@ -92,12 +92,10 @@ impl std::fmt::Display for LikeExpr {
 }
 
 impl PhysicalExpr for LikeExpr {
-    fn data_type(&self, _input_schema: &Schema) -> Result<DataType> {
-        Ok(DataType::Boolean)
-    }
-
-    fn nullable(&self, input_schema: &Schema) -> Result<bool> {
-        Ok(self.expr.nullable(input_schema)? || self.pattern.nullable(input_schema)?)
+    fn return_field(&self, input_schema: &Schema) -> Result<FieldRef> {
+        let nullable =
+            self.expr.nullable(input_schema)? || self.pattern.nullable(input_schema)?;
+        Ok(Arc::new(Field::new("", DataType::Boolean, nullable)))
     }
 
     fn evaluate(&self, batch: &RecordBatch) -> Result<ColumnarValue> {

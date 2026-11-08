@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use arrow::array::{Array, AsArray, BooleanArray};
 use arrow::compute::cast;
-use arrow::datatypes::{DataType, Schema};
+use arrow::datatypes::{DataType, Field, FieldRef, Schema};
 use arrow::record_batch::RecordBatch;
 use datafusion_common::{Result, assert_eq_or_internal_err};
 use datafusion_physical_expr::{PhysicalExpr, PhysicalExprRef};
@@ -143,12 +143,8 @@ macro_rules! define_byte_in_list_expr {
         }
 
         impl PhysicalExpr for $name {
-            fn data_type(&self, _input_schema: &Schema) -> Result<DataType> {
-                Ok(DataType::Boolean)
-            }
-
-            fn nullable(&self, _input_schema: &Schema) -> Result<bool> {
-                Ok(true)
+            fn return_field(&self, _input_schema: &Schema) -> Result<FieldRef> {
+                Ok(Arc::new(Field::new("", DataType::Boolean, true)))
             }
 
             fn evaluate(&self, batch: &RecordBatch) -> Result<ColumnarValue> {

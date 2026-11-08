@@ -25,6 +25,7 @@ use datafusion_common::{
     DFSchema, Result, ScalarValue, assert_or_internal_err, exec_err,
 };
 use datafusion_expr::{ColumnarValue, expr_vec_fmt};
+use datafusion_expr_common::field_rules;
 
 mod array_static_filter;
 mod branchless_filter;
@@ -308,25 +309,15 @@ impl std::fmt::Display for InListExpr {
 }
 
 impl PhysicalExpr for InListExpr {
-    fn data_type(&self, _input_schema: &Schema) -> Result<DataType> {
-        Ok(DataType::Boolean)
-    }
-
-    fn nullable(&self, input_schema: &Schema) -> Result<bool> {
-        if self.expr.nullable(input_schema)? {
-            return Ok(true);
-        }
-
-        if let Some(static_filter) = &self.static_filter {
-            Ok(static_filter.null_count() > 0)
-        } else {
-            for expr in &self.list {
-                if expr.nullable(input_schema)? {
-                    return Ok(true);
-                }
-            }
-            Ok(false)
-        }
+    fn return_field(&self, input_schema: &Schema) -> Result<FieldRef> {
+        // BEHAVIOR CHANGE: the logical cap applies here too, so a list of
+        // more than 5 items is nullable even when every input is NOT NULL
+        // (the logical layer already said so). The static-filter shortcut
+        // (`null_count() > 0`) is gone: the list holds the same literals.
+        Ok(Arc::new(field_rules::in_list(
+            self.expr.return_field(input_schema)?.as_ref(),
+            self.list.iter().map(|item| item.return_field(input_schema)),
+        )?))
     }
 
     fn evaluate(&self, batch: &RecordBatch) -> Result<ColumnarValue> {

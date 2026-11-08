@@ -18,6 +18,13 @@ pub(super) type StaticFilterRef = Arc<dyn StaticFilter>;
 ///
 /// Dictionary-encoded needles are unwrapped before the concrete filter is called.
 pub(super) trait StaticFilter: Send + Sync {
+    // SKETCH: InListExpr's field now comes from field_rules::in_list (its
+    // list holds the same literals), so this was its last non-test caller.
+    // Delete with its 7 impls in the follow-up.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "SKETCH: last caller removed, delete")
+    )]
     fn null_count(&self) -> usize;
 
     /// Checks if non-dictionary needles are contained in this filter's haystack.

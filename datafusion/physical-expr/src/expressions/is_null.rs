@@ -6,11 +6,12 @@
 
 use crate::PhysicalExpr;
 use arrow::{
-    datatypes::{DataType, Schema},
+    datatypes::{FieldRef, Schema},
     record_batch::RecordBatch,
 };
 use datafusion_common::{Result, ScalarValue};
 use datafusion_expr::ColumnarValue;
+use datafusion_expr_common::field_rules;
 use std::hash::Hash;
 use std::sync::Arc;
 
@@ -53,12 +54,8 @@ impl std::fmt::Display for IsNullExpr {
 }
 
 impl PhysicalExpr for IsNullExpr {
-    fn data_type(&self, _input_schema: &Schema) -> Result<DataType> {
-        Ok(DataType::Boolean)
-    }
-
-    fn nullable(&self, _input_schema: &Schema) -> Result<bool> {
-        Ok(false)
+    fn return_field(&self, _input_schema: &Schema) -> Result<FieldRef> {
+        Ok(Arc::new(field_rules::boolean_test()))
     }
 
     fn evaluate(&self, batch: &RecordBatch) -> Result<ColumnarValue> {

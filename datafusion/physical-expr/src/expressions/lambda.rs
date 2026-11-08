@@ -13,7 +13,7 @@ use crate::{
     physical_expr::PhysicalExpr,
 };
 use arrow::{
-    datatypes::{DataType, Schema},
+    datatypes::{DataType, Field, FieldRef, Schema},
     record_batch::RecordBatch,
 };
 use datafusion_common::{
@@ -248,12 +248,8 @@ impl std::fmt::Display for LambdaExpr {
 }
 
 impl PhysicalExpr for LambdaExpr {
-    fn data_type(&self, _input_schema: &Schema) -> Result<DataType> {
-        Ok(DataType::Null)
-    }
-
-    fn nullable(&self, _input_schema: &Schema) -> Result<bool> {
-        Ok(true)
+    fn return_field(&self, _input_schema: &Schema) -> Result<FieldRef> {
+        Ok(Arc::new(Field::new("", DataType::Null, true)))
     }
 
     fn evaluate(&self, _batch: &RecordBatch) -> Result<ColumnarValue> {

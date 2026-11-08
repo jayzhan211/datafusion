@@ -14,7 +14,7 @@ use arrow::compute::kernels::zip::zip;
 use arrow::compute::{
     FilterBuilder, FilterPredicate, is_not_null, not, nullif, prep_null_mask_filter,
 };
-use arrow::datatypes::{DataType, Schema, UInt32Type, UnionMode};
+use arrow::datatypes::{DataType, Field, FieldRef, Schema, UInt32Type, UnionMode};
 use arrow::error::ArrowError;
 use datafusion_common::cast::as_boolean_array;
 use datafusion_common::{
@@ -1244,6 +1244,18 @@ impl CaseExpr {
 }
 
 impl PhysicalExpr for CaseExpr {
+    // SKETCH: migrate. CASE is not a field rule (its nullability looks at the
+    // WHEN predicates), so this is the old `return_field` default written out:
+    // `data_type`/`nullable` below stay the overrides. Next step: move the
+    // nullability analysis into `CaseBody` and build the field once here.
+    fn return_field(&self, input_schema: &Schema) -> Result<FieldRef> {
+        Ok(Arc::new(Field::new(
+            "",
+            self.data_type(input_schema)?,
+            self.nullable(input_schema)?,
+        )))
+    }
+
     fn data_type(&self, input_schema: &Schema) -> Result<DataType> {
         self.body.data_type(input_schema)
     }
@@ -1615,12 +1627,8 @@ mod tests {
     }
 
     impl PhysicalExpr for CustomColumn {
-        fn data_type(&self, input_schema: &Schema) -> Result<DataType> {
-            self.inner.data_type(input_schema)
-        }
-
-        fn nullable(&self, input_schema: &Schema) -> Result<bool> {
-            self.inner.nullable(input_schema)
+        fn return_field(&self, input_schema: &Schema) -> Result<FieldRef> {
+            self.inner.return_field(input_schema)
         }
 
         fn evaluate(&self, batch: &RecordBatch) -> Result<ColumnarValue> {

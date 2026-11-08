@@ -8,7 +8,7 @@ use std::{fmt::Display, hash::Hash, sync::Arc};
 
 use arrow::{
     array::{ArrayRef, BooleanArray, BooleanBufferBuilder, UInt64Array},
-    datatypes::{DataType, Schema},
+    datatypes::{DataType, Field, FieldRef, Schema},
     record_batch::RecordBatch,
 };
 use datafusion_common::hash_utils::RandomState;
@@ -157,12 +157,8 @@ impl PhysicalExpr for HashExpr {
         )))
     }
 
-    fn data_type(&self, _input_schema: &Schema) -> Result<DataType> {
-        Ok(DataType::UInt64)
-    }
-
-    fn nullable(&self, _input_schema: &Schema) -> Result<bool> {
-        Ok(false)
+    fn return_field(&self, _input_schema: &Schema) -> Result<FieldRef> {
+        Ok(Arc::new(Field::new("", DataType::UInt64, false)))
     }
 
     fn evaluate(&self, batch: &RecordBatch) -> Result<ColumnarValue> {
@@ -568,12 +564,8 @@ impl PhysicalExpr for HashTableLookupExpr {
         }))
     }
 
-    fn data_type(&self, _input_schema: &Schema) -> Result<DataType> {
-        Ok(DataType::Boolean)
-    }
-
-    fn nullable(&self, _input_schema: &Schema) -> Result<bool> {
-        Ok(false)
+    fn return_field(&self, _input_schema: &Schema) -> Result<FieldRef> {
+        Ok(Arc::new(Field::new("", DataType::Boolean, false)))
     }
 
     fn evaluate(&self, batch: &RecordBatch) -> Result<ColumnarValue> {
@@ -1133,11 +1125,7 @@ mod tests {
 
     /// Probes `probe` against `expr`, one row per key of column `a`.
     fn lookup(expr: &HashTableLookupExpr, probe: &ArrayRef) -> Result<BooleanArray> {
-        let schema = Arc::new(Schema::new(vec![arrow::datatypes::Field::new(
-            "a",
-            DataType::Int32,
-            true,
-        )]));
+        let schema = Arc::new(Schema::new(vec![Field::new("a", DataType::Int32, true)]));
         let batch = RecordBatch::try_new(schema, vec![Arc::clone(probe)])?;
         let matched = expr.evaluate(&batch)?.into_array(batch.num_rows())?;
         Ok(arrow::array::AsArray::as_boolean(&matched).clone())
@@ -1176,11 +1164,7 @@ mod tests {
         );
 
         let column: PhysicalExprRef = Arc::new(Column::new("a", 0));
-        let schema = Arc::new(Schema::new(vec![arrow::datatypes::Field::new(
-            "a",
-            DataType::Int32,
-            false,
-        )]));
+        let schema = Arc::new(Schema::new(vec![Field::new("a", DataType::Int32, false)]));
         let build: ArrayRef = Arc::new(arrow::array::Int32Array::from(build));
         let probe: ArrayRef = Arc::new(arrow::array::Int32Array::from(probe));
         let random_state = SeededRandomState::with_seed(1);

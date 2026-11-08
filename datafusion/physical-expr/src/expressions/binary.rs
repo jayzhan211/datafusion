@@ -34,6 +34,7 @@ use datafusion_expr::statistics::{
     create_bernoulli_from_comparison, new_generic_from_binary_op,
 };
 use datafusion_expr::{ColumnarValue, Operator};
+use datafusion_expr_common::field_rules;
 use datafusion_physical_expr_common::datum::{apply, apply_cmp};
 
 use kernels::{
@@ -526,23 +527,20 @@ where
 }
 
 impl PhysicalExpr for BinaryExpr {
-    fn data_type(&self, input_schema: &Schema) -> Result<DataType> {
-        BinaryTypeCoercer::new(
-            &self.left.data_type(input_schema)?,
+    fn return_field(&self, input_schema: &Schema) -> Result<FieldRef> {
+        // `nullable()` now also runs the type coercer, and `data_type()` also
+        // asks the children for their nullability: both read this one field.
+        let left = self.left.return_field(input_schema)?;
+        let right = self.right.return_field(input_schema)?;
+        let result_type =
+            BinaryTypeCoercer::new(left.data_type(), &self.op, right.data_type())
+                .get_result_type()?;
+        Ok(Arc::new(field_rules::binary(
+            &left,
             &self.op,
-            &self.right.data_type(input_schema)?,
-        )
-        .get_result_type()
-    }
-
-    fn nullable(&self, input_schema: &Schema) -> Result<bool> {
-        match self.op {
-            Operator::IsDistinctFrom | Operator::IsNotDistinctFrom => Ok(false),
-            _ => {
-                Ok(self.left.nullable(input_schema)?
-                    || self.right.nullable(input_schema)?)
-            }
-        }
+            &right,
+            result_type,
+        )))
     }
 
     fn evaluate(&self, batch: &RecordBatch) -> Result<ColumnarValue> {
@@ -6594,12 +6592,8 @@ mod tests {
     }
 
     impl PhysicalExpr for RowCountRecorder {
-        fn data_type(&self, input_schema: &Schema) -> Result<DataType> {
-            self.inner.data_type(input_schema)
-        }
-
-        fn nullable(&self, input_schema: &Schema) -> Result<bool> {
-            self.inner.nullable(input_schema)
+        fn return_field(&self, input_schema: &Schema) -> Result<FieldRef> {
+            self.inner.return_field(input_schema)
         }
 
         fn evaluate(&self, batch: &RecordBatch) -> Result<ColumnarValue> {

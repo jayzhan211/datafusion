@@ -10,13 +10,14 @@ use std::sync::Arc;
 
 use crate::PhysicalExpr;
 
-use arrow::datatypes::{DataType, FieldRef, Schema};
+use arrow::datatypes::{FieldRef, Schema};
 use arrow::record_batch::RecordBatch;
 use datafusion_common::{Result, ScalarValue, cast::as_boolean_array, internal_err};
 use datafusion_expr::ColumnarValue;
 use datafusion_expr::interval_arithmetic::Interval;
 #[expect(deprecated)]
 use datafusion_expr::statistics::Distribution::{self, Bernoulli};
+use datafusion_expr_common::field_rules;
 
 /// Not expression
 #[derive(Debug, Eq)]
@@ -57,14 +58,6 @@ impl fmt::Display for NotExpr {
 }
 
 impl PhysicalExpr for NotExpr {
-    fn data_type(&self, _input_schema: &Schema) -> Result<DataType> {
-        Ok(DataType::Boolean)
-    }
-
-    fn nullable(&self, input_schema: &Schema) -> Result<bool> {
-        self.arg.nullable(input_schema)
-    }
-
     fn evaluate(&self, batch: &RecordBatch) -> Result<ColumnarValue> {
         match self.arg.evaluate(batch)? {
             ColumnarValue::Array(array) => {
@@ -84,7 +77,12 @@ impl PhysicalExpr for NotExpr {
     }
 
     fn return_field(&self, input_schema: &Schema) -> Result<FieldRef> {
-        self.arg.return_field(input_schema)
+        // BEHAVIOR CHANGE: was the child's whole field, name and metadata
+        // included, while the logical NOT dropped both; aggregates over
+        // `NOT with_metadata(b, ...)` failed the logical/physical schema check.
+        Ok(Arc::new(field_rules::not(
+            self.arg.return_field(input_schema)?.as_ref(),
+        )))
     }
 
     fn children(&self) -> Vec<&Arc<dyn PhysicalExpr>> {

@@ -12,7 +12,7 @@ use crate::utils::scatter;
 
 use arrow::array::{Array, ArrayRef, BooleanArray, new_empty_array};
 use arrow::compute::filter_record_batch;
-use arrow::datatypes::{DataType, Field, FieldRef, Schema};
+use arrow::datatypes::{DataType, FieldRef, Schema};
 use arrow::record_batch::RecordBatch;
 use datafusion_common::tree_node::{
     Transformed, TransformedResult, TreeNode, TreeNodeRecursion,
@@ -61,26 +61,47 @@ pub type PhysicalExprRef = Arc<dyn PhysicalExpr>;
 /// [`create_physical_expr`]: https://docs.rs/datafusion/latest/datafusion/physical_expr/fn.create_physical_expr.html
 /// [`Column`]: https://docs.rs/datafusion/latest/datafusion/physical_expr/expressions/struct.Column.html
 pub trait PhysicalExpr: Any + Send + Sync + Display + Debug + DynEq + DynHash {
-    /// Get the data type of this expression, given the schema of the input.
-    /// Returns an error if the data type cannot be determined, ex. if the
-    /// schema is missing a required field.
+    /// The data type of [`Self::return_field`].
+    ///
+    /// Do not override: implement [`Self::return_field`], so that the type,
+    /// the nullability and the field cannot disagree.
+    ///
+    /// SKETCH: Rust cannot forbid overriding a provided method, and a
+    /// `#[deprecated]` here would warn at every caller, not at overriders.
+    /// Column, Literal, ScalarFunctionExpr, AsyncFuncExpr, LambdaVariable,
+    /// SqlSimilarToPattern and the FFI wrapper still override it (consistently
+    /// with their `return_field`); CaseExpr and DynamicFilterPhysicalExpr still
+    /// derive their `return_field` from it.
     fn data_type(&self, input_schema: &Schema) -> Result<DataType> {
         Ok(self.return_field(input_schema)?.data_type().to_owned())
     }
-    /// Determine whether this expression is nullable, given the schema of the input
+    /// Whether [`Self::return_field`] is nullable.
+    ///
+    /// Do not override: implement [`Self::return_field`] (see
+    /// [`Self::data_type`]).
     fn nullable(&self, input_schema: &Schema) -> Result<bool> {
         Ok(self.return_field(input_schema)?.is_nullable())
     }
     /// Evaluate an expression against a RecordBatch
     fn evaluate(&self, batch: &RecordBatch) -> Result<ColumnarValue>;
-    /// The output field associated with this expression
-    fn return_field(&self, input_schema: &Schema) -> Result<FieldRef> {
-        Ok(Arc::new(Field::new(
-            format!("{self}"),
-            self.data_type(input_schema)?,
-            self.nullable(input_schema)?,
-        )))
-    }
+    /// The output field of this expression, given the schema of the input:
+    /// its data type, nullability and metadata.
+    ///
+    /// This is the one field method an implementation writes; `data_type`
+    /// and `nullable` read it. An expression kind that also exists as a
+    /// logical `Expr` computes it with the same rule as the logical layer, from
+    /// `datafusion_expr_common::field_rules`.
+    ///
+    /// The name is informational: operators name their output columns
+    /// themselves (`ProjectionExec` with its alias). An expression that makes
+    /// a new value returns an empty name, so that `data_type()` on a deep tree
+    /// does not format every subtree.
+    ///
+    /// Before, `return_field` defaulted to a field built from `data_type` and
+    /// `nullable`, which defaulted to reading `return_field`: an implementation
+    /// that wrote neither recursed forever, and one that wrote all three could
+    /// answer differently through each (CastExpr and NotExpr did).
+    fn return_field(&self, input_schema: &Schema) -> Result<FieldRef>;
     /// Evaluates this expression only for rows where `selection` is `true`.
     ///
     /// Rows where `selection` is `false` or null are skipped during evaluation and
@@ -1061,12 +1082,15 @@ mod test {
     struct TestExpr {}
 
     impl PhysicalExpr for TestExpr {
-        fn data_type(&self, _schema: &Schema) -> datafusion_common::Result<DataType> {
-            Ok(DataType::Int64)
-        }
-
-        fn nullable(&self, _schema: &Schema) -> datafusion_common::Result<bool> {
-            Ok(false)
+        fn return_field(
+            &self,
+            _input_schema: &Schema,
+        ) -> datafusion_common::Result<arrow::datatypes::FieldRef> {
+            Ok(Arc::new(arrow::datatypes::Field::new(
+                "",
+                DataType::Int64,
+                false,
+            )))
         }
 
         fn evaluate(

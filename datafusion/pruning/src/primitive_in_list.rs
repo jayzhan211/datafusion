@@ -11,11 +11,11 @@ use arrow::compute::cast;
 use arrow::datatypes::{
     ArrowPrimitiveType, DataType, Date32Type, Date64Type, Decimal32Type, Decimal64Type,
     Decimal128Type, Decimal256Type, DurationMicrosecondType, DurationMillisecondType,
-    DurationNanosecondType, DurationSecondType, Int8Type, Int16Type, Int32Type,
-    Int64Type, Schema, Time32MillisecondType, Time32SecondType, Time64MicrosecondType,
-    Time64NanosecondType, TimeUnit, TimestampMicrosecondType, TimestampMillisecondType,
-    TimestampNanosecondType, TimestampSecondType, UInt8Type, UInt16Type, UInt32Type,
-    UInt64Type,
+    DurationNanosecondType, DurationSecondType, Field, FieldRef, Int8Type, Int16Type,
+    Int32Type, Int64Type, Schema, Time32MillisecondType, Time32SecondType,
+    Time64MicrosecondType, Time64NanosecondType, TimeUnit, TimestampMicrosecondType,
+    TimestampMillisecondType, TimestampNanosecondType, TimestampSecondType, UInt8Type,
+    UInt16Type, UInt32Type, UInt64Type,
 };
 use arrow::record_batch::RecordBatch;
 use datafusion_common::{Result, ScalarValue, assert_eq_or_internal_err};
@@ -316,12 +316,8 @@ impl<T: ArrowPrimitiveType> PhysicalExpr for PrimitiveInListPruningExpr<T>
 where
     T::Native: Eq + Hash + Ord,
 {
-    fn data_type(&self, _input_schema: &Schema) -> Result<DataType> {
-        Ok(DataType::Boolean)
-    }
-
-    fn nullable(&self, _input_schema: &Schema) -> Result<bool> {
-        Ok(true)
+    fn return_field(&self, _input_schema: &Schema) -> Result<FieldRef> {
+        Ok(Arc::new(Field::new("", DataType::Boolean, true)))
     }
 
     fn evaluate(&self, batch: &RecordBatch) -> Result<ColumnarValue> {

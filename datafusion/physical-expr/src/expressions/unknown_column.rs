@@ -10,7 +10,7 @@ use std::sync::Arc;
 use crate::PhysicalExpr;
 
 use arrow::{
-    datatypes::{DataType, Schema},
+    datatypes::{DataType, Field, FieldRef, Schema},
     record_batch::RecordBatch,
 };
 use datafusion_common::{Result, internal_err};
@@ -43,14 +43,8 @@ impl std::fmt::Display for UnKnownColumn {
 }
 
 impl PhysicalExpr for UnKnownColumn {
-    /// Get the data type of this expression, given the schema of the input
-    fn data_type(&self, _input_schema: &Schema) -> Result<DataType> {
-        Ok(DataType::Null)
-    }
-
-    /// Decide whether this expression is nullable, given the schema of the input
-    fn nullable(&self, _input_schema: &Schema) -> Result<bool> {
-        Ok(true)
+    fn return_field(&self, _input_schema: &Schema) -> Result<FieldRef> {
+        Ok(Arc::new(Field::new("", DataType::Null, true)))
     }
 
     /// Evaluate the expression
