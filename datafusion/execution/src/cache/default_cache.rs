@@ -894,15 +894,11 @@ mod tests {
     }
 
     impl PhysicalExpr for MockExpr {
-        fn data_type(
+        fn return_field(
             &self,
             _input_schema: &Schema,
-        ) -> datafusion_common::Result<DataType> {
-            Ok(DataType::Int32)
-        }
-
-        fn nullable(&self, _input_schema: &Schema) -> datafusion_common::Result<bool> {
-            Ok(false)
+        ) -> datafusion_common::Result<arrow::datatypes::FieldRef> {
+            Ok(Arc::new(Field::new("", DataType::Int32, false)))
         }
 
         fn evaluate(

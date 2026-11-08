@@ -706,11 +706,11 @@ mod tests {
         }
 
         impl PhysicalExprTrait for OpaqueLeaf {
-            fn data_type(&self, _input_schema: &Schema) -> Result<DataType> {
-                Ok(DataType::Int32)
-            }
-            fn nullable(&self, _input_schema: &Schema) -> Result<bool> {
-                Ok(true)
+            fn return_field(
+                &self,
+                _input_schema: &Schema,
+            ) -> Result<arrow::datatypes::FieldRef> {
+                Ok(Arc::new(Field::new("", DataType::Int32, true)))
             }
             fn evaluate(&self, batch: &RecordBatch) -> Result<ColumnarValue> {
                 // Simulate the broken FFI Column path: when handed a dummy

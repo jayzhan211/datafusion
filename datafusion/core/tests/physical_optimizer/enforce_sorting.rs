@@ -3571,12 +3571,14 @@ impl std::fmt::Display for AssertNotNull {
 }
 
 impl PhysicalExpr for AssertNotNull {
-    fn data_type(&self, input_schema: &Schema) -> Result<DataType> {
-        self.inner.data_type(input_schema)
-    }
-
-    fn nullable(&self, _input_schema: &Schema) -> Result<bool> {
-        Ok(false)
+    fn return_field(&self, input_schema: &Schema) -> Result<arrow::datatypes::FieldRef> {
+        Ok(Arc::new(
+            self.inner
+                .return_field(input_schema)?
+                .as_ref()
+                .clone()
+                .with_nullable(false),
+        ))
     }
 
     fn evaluate(&self, batch: &RecordBatch) -> Result<ColumnarValue> {

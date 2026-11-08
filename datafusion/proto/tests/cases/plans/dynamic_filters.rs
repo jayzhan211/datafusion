@@ -960,11 +960,11 @@ impl std::hash::Hash for WrapperExpr {
 }
 
 impl PhysicalExpr for WrapperExpr {
-    fn data_type(&self, input_schema: &Schema) -> Result<DataType> {
-        self.inner.data_type(input_schema)
-    }
-    fn nullable(&self, input_schema: &Schema) -> Result<bool> {
-        self.inner.nullable(input_schema)
+    fn return_field(
+        &self,
+        input_schema: &Schema,
+    ) -> Result<datafusion::arrow::datatypes::FieldRef> {
+        self.inner.return_field(input_schema)
     }
     fn evaluate(&self, _batch: &RecordBatch) -> Result<ColumnarValue> {
         internal_err!("WrapperExpr is not executable in this test")

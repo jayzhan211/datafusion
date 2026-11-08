@@ -1747,6 +1747,10 @@ mod tests {
     }
 
     impl PhysicalExpr for ColumnAt {
+        fn return_field(&self, input_schema: &Schema) -> Result<FieldRef> {
+            Ok(Arc::new(input_schema.field(self.0).clone()))
+        }
+
         fn evaluate(&self, batch: &RecordBatch) -> Result<ColumnarValue> {
             Ok(ColumnarValue::Array(Arc::clone(batch.column(self.0))))
         }

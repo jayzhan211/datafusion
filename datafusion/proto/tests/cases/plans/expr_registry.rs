@@ -139,12 +139,8 @@ impl<K: TagKind> std::hash::Hash for TaggedExpr<K> {
 }
 
 impl<K: TagKind> PhysicalExpr for TaggedExpr<K> {
-    fn data_type(&self, input_schema: &Schema) -> Result<DataType> {
-        self.child.data_type(input_schema)
-    }
-
-    fn nullable(&self, input_schema: &Schema) -> Result<bool> {
-        self.child.nullable(input_schema)
+    fn return_field(&self, input_schema: &Schema) -> Result<arrow::datatypes::FieldRef> {
+        self.child.return_field(input_schema)
     }
 
     fn evaluate(&self, batch: &RecordBatch) -> Result<ColumnarValue> {
@@ -259,12 +255,8 @@ impl std::hash::Hash for FunctionRefExpr {
 }
 
 impl PhysicalExpr for FunctionRefExpr {
-    fn data_type(&self, input_schema: &Schema) -> Result<DataType> {
-        self.child.data_type(input_schema)
-    }
-
-    fn nullable(&self, input_schema: &Schema) -> Result<bool> {
-        self.child.nullable(input_schema)
+    fn return_field(&self, input_schema: &Schema) -> Result<arrow::datatypes::FieldRef> {
+        self.child.return_field(input_schema)
     }
 
     fn evaluate(&self, batch: &RecordBatch) -> Result<ColumnarValue> {
@@ -725,12 +717,8 @@ impl std::hash::Hash for IdentityExpr {
 }
 
 impl PhysicalExpr for IdentityExpr {
-    fn data_type(&self, input_schema: &Schema) -> Result<DataType> {
-        self.child.data_type(input_schema)
-    }
-
-    fn nullable(&self, input_schema: &Schema) -> Result<bool> {
-        self.child.nullable(input_schema)
+    fn return_field(&self, input_schema: &Schema) -> Result<arrow::datatypes::FieldRef> {
+        self.child.return_field(input_schema)
     }
 
     fn evaluate(&self, batch: &RecordBatch) -> Result<ColumnarValue> {

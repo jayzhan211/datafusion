@@ -689,11 +689,10 @@ fn roundtrip_parquet_exec_with_custom_predicate_expr() -> Result<()> {
     }
 
     impl PhysicalExpr for CustomPredicateExpr {
-        fn data_type(&self, _input_schema: &Schema) -> Result<DataType> {
-            unreachable!()
-        }
-
-        fn nullable(&self, _input_schema: &Schema) -> Result<bool> {
+        fn return_field(
+            &self,
+            _input_schema: &Schema,
+        ) -> Result<datafusion::arrow::datatypes::FieldRef> {
             unreachable!()
         }
 

@@ -1526,12 +1526,11 @@ mod tests {
     }
 
     impl PhysicalExpr for VolatileExpr {
-        fn data_type(&self, _input_schema: &Schema) -> Result<DataType> {
-            Ok(DataType::Int64)
-        }
-
-        fn nullable(&self, _input_schema: &Schema) -> Result<bool> {
-            Ok(false)
+        fn return_field(
+            &self,
+            _input_schema: &Schema,
+        ) -> Result<arrow::datatypes::FieldRef> {
+            Ok(Arc::new(Field::new("", DataType::Int64, false)))
         }
 
         fn evaluate(&self, _batch: &RecordBatch) -> Result<ColumnarValue> {
