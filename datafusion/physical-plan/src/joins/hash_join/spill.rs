@@ -161,22 +161,24 @@ pub(super) fn spillable_stream(
     accumulator: Option<Arc<SharedBuildAccumulator>>,
 ) -> SendableRecordBatchStream {
     let schema = Arc::clone(&ctx.stream.schema);
+    let report = PendingReport {
+        accumulator,
+        partition: ctx.stream.partition,
+    };
     let ctx = Arc::new(ctx);
     let output = stream::once(async move {
         let stream: SendableRecordBatchStream = match build.await? {
             BuildOutcome::InMemory(left_data) => Box::pin(ctx.stream.stream(
                 owned(left_data),
                 right,
-                accumulator,
+                report.take(),
                 ctx.right_side_ordered,
                 ctx.fetch,
             )),
             BuildOutcome::Overflow(overflow) => {
                 // The kept buckets cannot answer for the spilled ones: let every
                 // probe row of this partition through.
-                if let Some(accumulator) = &accumulator {
-                    accumulator.report_canceled_partition(ctx.stream.partition);
-                }
+                drop(report);
                 let left = split_build(&ctx, overflow, 1).await?;
                 let fetch = ctx.fetch;
                 limit(probe_spilled(ctx, Arc::new(left), right)?, fetch)
@@ -186,6 +188,33 @@ pub(super) fn spillable_stream(
     })
     .try_flatten();
     Box::pin(RecordBatchStreamAdapter::new(schema, output))
+}
+
+/// A `Partitioned` partition's place in the dynamic filter until its
+/// [`HashJoinStream`] takes it over. Today's stream exists from `execute` on
+/// and reports its partition canceled when dropped before reporting; the one
+/// here is created only once the build side is collected, so this reports
+/// for it when the partition is dropped earlier (for example unpolled, by a
+/// parent partition whose build side is empty) or spills. Otherwise the other
+/// partitions wait for its report forever.
+struct PendingReport {
+    accumulator: Option<Arc<SharedBuildAccumulator>>,
+    partition: usize,
+}
+
+impl PendingReport {
+    /// Hands the accumulator to the stream that reports for this partition
+    fn take(mut self) -> Option<Arc<SharedBuildAccumulator>> {
+        self.accumulator.take()
+    }
+}
+
+impl Drop for PendingReport {
+    fn drop(&mut self) {
+        if let Some(accumulator) = self.accumulator.take() {
+            accumulator.report_canceled_partition(self.partition);
+        }
+    }
 }
 
 /// The build side of a `CollectLeft` join that can spill, collected once for

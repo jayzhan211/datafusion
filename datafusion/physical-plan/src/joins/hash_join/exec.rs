@@ -9303,6 +9303,107 @@ mod tests {
         Ok(())
     }
 
+    /// A parent partition whose build side is empty finishes without polling
+    /// its probe side, so it drops that child partition unpolled. The child's
+    /// stream that can spill creates its join stream only once its build side
+    /// is collected; dropped before that, it must still report the partition
+    /// canceled to the dynamic filter, or the other child partitions wait for
+    /// it forever.
+    #[tokio::test]
+    async fn test_spillable_join_dropped_unpolled_cancels_dynamic_filter_partition()
+    -> Result<()> {
+        let mut session_config = SessionConfig::default();
+        session_config
+            .options_mut()
+            .execution
+            .enable_hash_join_spilling = true;
+        // Never refuses: nothing spills, but every join takes the stream that could
+        let runtime = RuntimeEnvBuilder::new()
+            .with_memory_limit(1 << 30, 1.0)
+            .build_arc()?;
+        let task_ctx = Arc::new(
+            TaskContext::default()
+                .with_session_config(session_config)
+                .with_runtime(runtime),
+        );
+
+        // The partitioned dynamic filter needs hash-partitioned inputs
+        let hashed = |batch: RecordBatch, key: &str| -> Result<Arc<dyn ExecutionPlan>> {
+            let schema = batch.schema();
+            let input =
+                TestMemoryExec::try_new_exec(&[vec![batch]], Arc::clone(&schema), None)?;
+            let key = Arc::new(Column::new_with_schema(key, &schema)?) as _;
+            Ok(Arc::new(RepartitionExec::try_new(
+                input,
+                Partitioning::Hash(vec![key], 4),
+            )?))
+        };
+        let keys = (0..8).collect::<Vec<i32>>();
+        let child_left = hashed(
+            build_table_i32(("l_a", &keys), ("l_key", &keys), ("l_c", &keys)),
+            "l_key",
+        )?;
+        let child_right = hashed(
+            build_table_i32(("r_a", &keys), ("r_key", &keys), ("r_c", &keys)),
+            "r_key",
+        )?;
+        // One row: the other parent partitions have empty build sides
+        let parent_left = hashed(
+            build_table_i32(("p_a", &vec![0]), ("p_key", &vec![0]), ("p_c", &vec![0])),
+            "p_key",
+        )?;
+
+        let child_on = vec![(
+            Arc::new(Column::new_with_schema("l_key", &child_left.schema())?) as _,
+            Arc::new(Column::new_with_schema("r_key", &child_right.schema())?) as _,
+        )];
+        let (child_join, child_dynamic_filter) = hash_join_with_dynamic_filter_and_mode(
+            child_left,
+            child_right,
+            child_on,
+            JoinType::Inner,
+            PartitionMode::Partitioned,
+        )?;
+        let child_join: Arc<dyn ExecutionPlan> = Arc::new(child_join);
+        let parent_on = vec![(
+            Arc::new(Column::new_with_schema("p_key", &parent_left.schema())?) as _,
+            Arc::new(Column::new_with_schema("l_key", &child_join.schema())?) as _,
+        )];
+        let parent_join = HashJoinExec::try_new(
+            parent_left,
+            Arc::clone(&child_join),
+            parent_on,
+            None,
+            &JoinType::RightSemi,
+            None,
+            PartitionMode::Partitioned,
+            NullEquality::NullEqualsNothing,
+            false,
+        )?;
+
+        let batches = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            crate::execution_plan::collect(Arc::new(parent_join), task_ctx),
+        )
+        .await
+        .expect("a child partition dropped unpolled must not block its siblings")?;
+
+        assert_batches_sorted_eq!(
+            [
+                "+-----+-------+-----+-----+-------+-----+",
+                "| l_a | l_key | l_c | r_a | r_key | r_c |",
+                "+-----+-------+-----+-----+-------+-----+",
+                "| 0   | 0     | 0   | 0   | 0     | 0   |",
+                "+-----+-------+-----+-----+-------+-----+",
+            ],
+            &batches
+        );
+        // The filter was really built: the partitions waited on each other
+        child_dynamic_filter.wait_complete().await;
+
+        Ok(())
+    }
+
     #[tokio::test]
     async fn test_hash_join_skips_probe_on_empty_build_after_partition_bounds_report()
     -> Result<()> {
