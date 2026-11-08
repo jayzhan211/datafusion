@@ -6,6 +6,7 @@
 
 use arrow::compute::can_cast_types;
 use datafusion_expr::binary::BinaryTypeCoercer;
+use datafusion_expr_common::field_rules;
 use itertools::Itertools as _;
 use std::sync::{Arc, LazyLock};
 
@@ -1711,14 +1712,12 @@ fn coerce_union_schema_with_schema(
             let datatype = coerce_union_type(
                 inputs.iter().map(|plan| plan.schema().field(i).as_ref()),
             )?;
-            let nullable = field.is_nullable()
-                || inputs
-                    .iter()
-                    .any(|plan| plan.schema().field(i).is_nullable());
-            let mut field = Field::new(field.name().clone(), datatype, nullable);
-            field.set_metadata(merge_metadata_for_union(
-                all_schemas.iter().map(|schema| schema.field(i).metadata()),
-            ));
+            // The base schema's field counts as one more input.
+            let field = field_rules::union_field(
+                datatype,
+                all_schemas.iter().map(|schema| schema.field(i).as_ref()),
+            )
+            .with_name(field.name());
             Ok((None, field.into()))
         })
         .collect::<Result<Vec<_>>>()?;

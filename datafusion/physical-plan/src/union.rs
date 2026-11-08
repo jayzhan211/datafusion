@@ -44,6 +44,7 @@ use datafusion_common::{
     Result, assert_or_internal_err, exec_err, internal_datafusion_err, plan_err,
 };
 use datafusion_execution::TaskContext;
+use datafusion_expr_common::field_rules;
 use datafusion_physical_expr::expressions::{CastExpr, Column};
 use datafusion_physical_expr::{
     EquivalenceProperties, PhysicalExpr, calculate_union, conjunction,
@@ -1006,24 +1007,25 @@ fn union_schema(inputs: &[Arc<dyn ExecutionPlan>]) -> Result<SchemaRef> {
     let schemas: Vec<SchemaRef> = inputs.iter().map(|input| input.schema()).collect();
     let fields = (0..first_field_count)
         .map(|i| {
-            // We take the name from the left side of the union to match how names are coerced during logical planning,
-            // which also uses the left side names.
-            let base_field = first_schema.field(i).clone();
-
-            // Take the first nullable field, or the first field if none are
-            // nullable.
-            let field = schemas
+            // The type of the first nullable input, or of the first input if
+            // none is nullable (see `field_rules::union_field` on why the type
+            // is not shared).
+            let data_type = schemas
                 .iter()
                 .find_or_first(|schema| schema.field(i).is_nullable())
                 // Empty inputs are rejected above.
                 .unwrap()
                 .field(i)
+                .data_type()
                 .clone();
 
-            let metadata = merge_metadata_for_union(
-                schemas.iter().map(|schema| schema.field(i).metadata()),
-            );
-            field.with_metadata(metadata).with_name(base_field.name())
+            // We take the name from the left side of the union to match how names are coerced during logical planning,
+            // which also uses the left side names.
+            field_rules::union_field(
+                data_type,
+                schemas.iter().map(|schema| schema.field(i)),
+            )
+            .with_name(first_schema.field(i).name())
         })
         .collect::<Vec<_>>();
 

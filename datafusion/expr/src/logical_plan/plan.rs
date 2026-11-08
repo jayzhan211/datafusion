@@ -42,6 +42,7 @@ use crate::{
     WindowFunctionDefinition, build_asof_join_schema, build_join_schema, expr_vec_fmt,
     requalify_sides_if_needed,
 };
+use datafusion_expr_common::field_rules;
 
 use crate::logical_plan::information_schema::ColumnsDetail;
 use crate::statistics::StatisticsRequest;
@@ -3644,7 +3645,8 @@ impl Union {
         }
 
         // The analyzer sees missing fields as NULL literals in the alignment
-        // projections. Include them so both passes infer the same type.
+        // projections. Include them so both passes infer the same type, and
+        // so they count as a nullable input without metadata.
         let null_field = Field::new("", DataType::Null, true);
         let union_fields = cols
             .into_iter()
@@ -3655,11 +3657,10 @@ impl Union {
                     .next()
                     .expect("column has at least one input field")
                     .data_type();
+                let inputs = fields.iter().map(|field| field.unwrap_or(&null_field));
                 let data_type = if loose_types {
-                    coerce_union_type(
-                        fields.iter().map(|field| field.unwrap_or(&null_field)),
-                    )
-                    .unwrap_or_else(|_| first_type.clone())
+                    coerce_union_type(inputs.clone())
+                        .unwrap_or_else(|_| first_type.clone())
                 } else {
                     if fields
                         .iter()
@@ -3670,17 +3671,9 @@ impl Union {
                     }
                     first_type.clone()
                 };
-                let nullable = fields
-                    .iter()
-                    .any(|field| field.is_none_or(|field| field.is_nullable()));
-                let metadata = merge_metadata_for_union(
-                    fields.iter().flatten().map(|field| field.metadata()),
-                );
                 Ok((
                     None,
-                    Arc::new(
-                        Field::new(name, data_type, nullable).with_metadata(metadata),
-                    ),
+                    Arc::new(field_rules::union_field(data_type, inputs).with_name(name)),
                 ))
             })
             .collect::<Result<Vec<(Option<TableReference>, _)>>>()?;
@@ -3743,8 +3736,6 @@ impl Union {
                         })?
                         .clone()
                 };
-                let nullable = fields.iter().any(|field| field.is_nullable());
-
                 // Generate unique field name
                 let name = if let Some(count) = name_counts.get_mut(&base_name) {
                     *count += 1;
@@ -3754,10 +3745,11 @@ impl Union {
                     base_name
                 };
 
-                let mut field = Field::new(&name, data_type, nullable);
-                let field_metadata =
-                    merge_metadata_for_union(fields.iter().map(|field| field.metadata()));
-                field.set_metadata(field_metadata);
+                let field = field_rules::union_field(
+                    data_type,
+                    fields.iter().map(|field| field.as_ref()),
+                )
+                .with_name(name);
                 Ok((None, Arc::new(field)))
             })
             .collect::<Result<_>>()?;
