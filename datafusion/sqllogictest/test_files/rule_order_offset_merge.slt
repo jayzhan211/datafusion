@@ -1,0 +1,50 @@
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
+
+#   http://www.apache.org/licenses/LICENSE-2.0
+
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
+
+# This file runs `PushdownSort` before `EnsureRequirements` (see `rule_order.rs`).
+# `PushdownSort` turns the sort under an OFFSET into a merge of sorted files. The
+# aggregate above needs no order, but the OFFSET picks rows by it, so enforcement
+# must keep the merge.
+
+statement ok
+set datafusion.execution.target_partitions = 4;
+
+statement ok
+COPY (SELECT column1 AS a FROM (VALUES (1), (3), (5), (7), (9), (11))) TO 'test_files/scratch/rule_order_offset_merge/1.parquet';
+
+statement ok
+COPY (SELECT column1 AS a FROM (VALUES (2), (4), (6), (8), (10), (12))) TO 'test_files/scratch/rule_order_offset_merge/2.parquet';
+
+statement ok
+CREATE EXTERNAL TABLE t (a INT)
+STORED AS PARQUET
+LOCATION 'test_files/scratch/rule_order_offset_merge/'
+WITH ORDER (a ASC);
+
+# The last three rows are 10, 11 and 12.
+query II
+SELECT count(*), sum(a) FROM (SELECT a FROM t ORDER BY a OFFSET 9);
+----
+3 33
+
+query II
+SELECT count(*), sum(a) FROM (SELECT a FROM t ORDER BY a LIMIT 3 OFFSET 2);
+----
+3 12
+
+statement ok
+DROP TABLE t;

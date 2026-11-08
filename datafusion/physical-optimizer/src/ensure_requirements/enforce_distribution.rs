@@ -21,7 +21,7 @@ use std::sync::Arc;
 
 use crate::output_requirements::OutputRequirementExec;
 use crate::utils::{
-    add_sort_above_with_check, is_coalesce_partitions, is_repartition,
+    add_sort_above_with_check, is_coalesce_partitions, is_limit, is_repartition,
     is_sort_preserving_merge,
 };
 
@@ -1114,6 +1114,17 @@ fn remove_dist_changing_operators(
 pub fn replace_order_preserving_variants(
     mut context: DistributionContext,
 ) -> Result<DistributionContext> {
+    // A limit picks rows by its input's order, so the merges below it stay even when
+    // nothing above needs that order. A sort with a fetch orders its own input.
+    let plan = &context.plan;
+    if is_limit(plan)
+        || (plan.fetch().is_some()
+            && !is_sort_preserving_merge(plan)
+            && !is_coalesce_partitions(plan)
+            && !plan.is::<SortExec>())
+    {
+        return Ok(context);
+    }
     context.children = context
         .children
         .into_iter()

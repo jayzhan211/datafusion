@@ -1350,6 +1350,22 @@ fn test_idempotent_nested_subqueries_sort_limit() {
     assert_idempotent(outer_limit);
 }
 
+/// Idempotency: an OFFSET under a sort on another column. The first pass merges the
+/// inner sort's partitions in order below the limit. The outer sort needs no input
+/// order, but the limit picks rows by it, so a second pass must keep that merge.
+#[test]
+fn test_idempotent_offset_under_unordered_sort() {
+    let source: Arc<dyn ExecutionPlan> = Arc::new(MockMultiPartitionExec::new(8));
+    let inner_sort: Arc<dyn ExecutionPlan> =
+        Arc::new(SortExec::new(sort_expr_on("a", 0, true, true), source));
+    let offset: Arc<dyn ExecutionPlan> =
+        Arc::new(GlobalLimitExec::new(inner_sort, 9, None));
+    let outer_sort: Arc<dyn ExecutionPlan> =
+        Arc::new(SortExec::new(sort_expr_on("b", 1, false, false), offset));
+
+    assert_idempotent(outer_sort);
+}
+
 /// Idempotency: RepartitionExec(Hash) + sort + limit.
 /// Tests that hash distribution + ordering enforcement is stable.
 #[test]
@@ -1584,7 +1600,7 @@ fn test_keep_sort_above_unordered_limit_with_skip() -> Result<()> {
     assert_snapshot!(plan_string(&optimized), @r"
     SortExec: expr=[a@0 DESC], preserve_partitioning=[false]
       GlobalLimitExec: skip=5, fetch=10
-        CoalescePartitionsExec
+        SortPreservingMergeExec: [a@0 ASC NULLS LAST]
           MockMultiPartitionExec
     ");
     Ok(())
@@ -1603,7 +1619,7 @@ fn test_keep_sort_above_limit_with_skip_only() -> Result<()> {
     assert_snapshot!(plan_string(&optimized), @r"
     SortExec: expr=[a@0 DESC], preserve_partitioning=[false]
       GlobalLimitExec: skip=5, fetch=None
-        CoalescePartitionsExec
+        SortPreservingMergeExec: [a@0 ASC NULLS LAST]
           MockMultiPartitionExec
     ");
     Ok(())
