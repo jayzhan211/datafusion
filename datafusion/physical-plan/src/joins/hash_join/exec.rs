@@ -1240,10 +1240,9 @@ impl HashJoinExec {
 
     /// Returns how this partition stops building in memory, if it can spill.
     ///
-    /// A `NOT IN` join needs facts about the whole build side, and a join
-    /// whose output keeps the probe side's order cannot emit spilled buckets
-    /// after the others: both fail as before instead. Without a memory limit
-    /// nothing is ever refused, so today's stream runs.
+    /// A join whose output keeps the probe side's order cannot emit spilled
+    /// buckets after the others: it fails as before instead. Without a memory
+    /// limit nothing is ever refused, so today's stream runs.
     fn spill_trigger(&self, context: &TaskContext) -> Option<SpillTrigger> {
         // PoC switches: DF_HJ_SPILL=0 disables spilling, DF_HJ_SPILL_FORCE=<bytes>
         // refuses every build above that many bytes even without a memory
@@ -1267,7 +1266,6 @@ impl HashJoinExec {
             && self.mode != PartitionMode::Auto
             && !ordered
             && self.prepared_build.is_none()
-            && !self.null_aware
             && context.runtime_env().disk_manager.tmp_files_enabled()
             && (cap.is_some()
                 || !matches!(
@@ -1297,6 +1295,7 @@ impl HashJoinExec {
         join_metrics: BuildProbeJoinMetrics,
         array_map_created_count: Count,
         trigger: SpillTrigger,
+        not_in: Option<NotIn>,
     ) -> SpillContext {
         let column_indices = match self.projection.as_ref() {
             Some(projection) => projection
@@ -1305,7 +1304,11 @@ impl HashJoinExec {
                 .collect(),
             None => self.column_indices.clone(),
         };
-        let on_right = self.on.iter().map(|(_, r)| Arc::clone(r)).collect();
+        let on_right: Vec<PhysicalExprRef> =
+            self.on.iter().map(|(_, r)| Arc::clone(r)).collect();
+        let first_routing_key = not_in.map_or(0, NotIn::first_routing_key);
+        let build_routing = on_left[first_routing_key..].to_vec();
+        let probe_routing = on_right[first_routing_key..].to_vec();
         let env = context.runtime_env();
         let compression = context.session_config().spill_compression();
         let spill_metrics = SpillMetrics::new(&self.metrics, partition);
@@ -1332,7 +1335,10 @@ impl HashJoinExec {
                 config: Arc::clone(context.session_config().options()),
                 null_equality: self.null_equality,
                 array_map_created_count,
+                not_in,
             },
+            build_routing,
+            probe_routing,
             build_spill: SpillManager::new(
                 Arc::clone(&env),
                 spill_metrics.clone(),
@@ -1846,6 +1852,7 @@ impl ExecutionPlan for HashJoinExec {
                     join_metrics.clone(),
                     array_map_created_count.clone(),
                     trigger,
+                    not_in,
                 )
             };
             let collect = |left_stream, reservation, probe_streams| {
@@ -3518,6 +3525,7 @@ pub(super) struct BuildParams {
     pub(super) config: Arc<ConfigOptions>,
     pub(super) null_equality: NullEquality,
     pub(super) array_map_created_count: Count,
+    pub(super) not_in: Option<NotIn>,
 }
 
 impl BuildParams {
@@ -3558,7 +3566,7 @@ impl BuildParams {
             false,
             &self.config,
             self.null_equality,
-            None,
+            self.not_in,
             &self.array_map_created_count,
             false,
         );

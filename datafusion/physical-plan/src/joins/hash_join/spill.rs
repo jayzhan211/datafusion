@@ -37,8 +37,8 @@
 //! more at a point where it could no longer react by spilling.
 
 use std::pin::Pin;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Weak};
 use std::task::{Context, Poll};
 
 use arrow::array::{
@@ -67,6 +67,7 @@ use super::exec::{
     BuildOutcome, BuildOverflow, BuildParams, JoinLeftData, SpillTrigger,
     build_table_bytes, is_resources_exhausted,
 };
+use super::not_in::{NotIn, NotInScope};
 use super::shared_bounds::SharedBuildAccumulator;
 use super::stream::{
     BuildSide, BuildSideInitialState, HashJoinStream, HashJoinStreamState,
@@ -144,12 +145,83 @@ impl StreamParams {
 pub(super) struct SpillContext {
     pub(super) stream: StreamParams,
     pub(super) build: BuildParams,
+    /// The keys rows are bucketed by, per side: the join keys, or only the
+    /// scope keys of a correlated `NOT IN` (see [`NotIn::first_routing_key`]).
+    /// Empty when no key can route: the whole join is then one pair.
+    pub(super) build_routing: Vec<PhysicalExprRef>,
+    pub(super) probe_routing: Vec<PhysicalExprRef>,
     pub(super) build_spill: SpillManager,
     pub(super) probe_spill: SpillManager,
     pub(super) pool: Arc<dyn MemoryPool>,
     pub(super) trigger: SpillTrigger,
     pub(super) fetch: Option<usize>,
     pub(super) right_side_ordered: bool,
+}
+
+impl SpillContext {
+    /// An uncorrelated `probe.key NOT IN (build.key)`, which no probe row
+    /// passes once a build key is NULL
+    fn probe_rows_not_in(&self) -> bool {
+        matches!(
+            self.build.not_in,
+            Some(NotIn::ProbeRows {
+                scope: NotInScope::Uncorrelated
+            })
+        )
+    }
+
+    /// An uncorrelated `build.key NOT IN (probe.key)`, whose build rows are
+    /// decided by whether the probe side had a row and a NULL key
+    fn build_rows_not_in(&self) -> bool {
+        matches!(
+            self.build.not_in,
+            Some(NotIn::BuildRows {
+                scope: NotInScope::Uncorrelated,
+                ..
+            })
+        )
+    }
+
+    /// A `NOT IN` deciding build rows, correlated or not: each must meet its
+    /// whole share of the probe side, so it is never joined with the roles
+    /// swapped
+    fn judges_build_rows(&self) -> bool {
+        matches!(self.build.not_in, Some(NotIn::BuildRows { .. }))
+    }
+}
+
+/// What the probe rows of every stream held, for an uncorrelated
+/// `build.key NOT IN (probe.key)` (see `NotInBuild::final_chunk`): a spilled
+/// pair's own probe rows are only part of the probe side
+#[derive(Debug, Default)]
+struct ProbeFacts {
+    has_row: AtomicBool,
+    has_null: AtomicBool,
+}
+
+impl ProbeFacts {
+    fn record(&self, has_null: bool) {
+        self.has_row.store(true, Ordering::Relaxed);
+        if has_null {
+            self.has_null.store(true, Ordering::Relaxed);
+        }
+    }
+
+    /// Records the whole probe side on the table of one spilled pair, whose
+    /// final stage then decides as if it had seen all of it. Spilled pairs are
+    /// joined only after every stream finished routing.
+    fn record_on(&self, left_data: &JoinLeftData) {
+        left_data.record_probe_batch(
+            self.has_row.load(Ordering::Relaxed),
+            self.has_null.load(Ordering::Relaxed),
+        );
+    }
+}
+
+/// Whether a row of `batch` has a NULL `NOT IN` value `key`
+fn has_null_key(key: &PhysicalExprRef, batch: &RecordBatch) -> Result<bool> {
+    let values = key.evaluate(batch)?.into_array(batch.num_rows())?;
+    Ok(values.logical_null_count() > 0)
 }
 
 /// The stream of a `Partitioned` partition that can spill: today's
@@ -283,6 +355,15 @@ pub(super) struct SpilledBuild {
     probe: Mutex<Vec<SpilledSide>>,
     /// Probe streams still routing
     routing: AtomicUsize,
+    /// An uncorrelated `probe.key NOT IN (build.key)` whose build side has a
+    /// NULL key: no probe row's `NOT IN` is TRUE, so nothing is emitted
+    no_rows: bool,
+    /// An uncorrelated `probe.key NOT IN (build.key)` whose build side has a
+    /// row: a probe row with a NULL key is never TRUE (it is when the build
+    /// side is empty, which can overflow too)
+    drop_null_probe_keys: bool,
+    /// For an uncorrelated `build.key NOT IN (probe.key)`, see [`ProbeFacts`]
+    probe_facts: Option<Arc<ProbeFacts>>,
 }
 
 /// Splits an overflowed build side into buckets, spills the largest until the
@@ -303,8 +384,19 @@ async fn split_build(
     // each one's share once its rows are copied into the buckets.
     let mut build = BucketedBuild::new(0);
     let mut collected = kept.buffers.size();
+    // Only an uncorrelated `probe.key NOT IN (build.key)` looks: one key
+    let mut build_has_row = false;
+    let mut build_has_null = false;
+    let mut look_for_null = |batch: &RecordBatch| -> Result<()> {
+        if ctx.probe_rows_not_in() && !build_has_null {
+            build_has_row |= batch.num_rows() > 0;
+            build_has_null = has_null_key(&ctx.build.on_left[0], batch)?;
+        }
+        Ok(())
+    };
     for batch in batches {
         let _timer = ctx.build.metrics.build_time.timer();
+        look_for_null(&batch)?;
         build.push(ctx, &kept, &batch)?;
         let released = get_record_batch_memory_size(&batch).min(collected);
         kept.buffers.shrink(released);
@@ -313,6 +405,7 @@ async fn split_build(
     kept.buffers.shrink(collected);
     while let Some(batch) = rest.try_next().await? {
         let _timer = ctx.build.metrics.build_time.timer();
+        look_for_null(&batch)?;
         build.push(ctx, &kept, &batch)?;
     }
     drop(rest);
@@ -335,7 +428,7 @@ async fn split_build(
             let mut sides: Vec<SpilledSide> =
                 (0..BUCKETS).map(|_| SpilledSide::default()).collect();
             for batch in std::mem::take(&mut resident) {
-                for (bucket, part) in split(&batch, &ctx.build.on_left, 0)? {
+                for (bucket, part) in split(&batch, &ctx.build_routing, 0)? {
                     let file = match &mut files[bucket] {
                         Some(file) => file,
                         slot => slot.insert(BucketFile::try_new(
@@ -386,6 +479,9 @@ async fn split_build(
         build: Mutex::new(spilled),
         probe: Mutex::new((0..BUCKETS).map(|_| SpilledSide::default()).collect()),
         routing: AtomicUsize::new(probe_streams),
+        no_rows: build_has_null,
+        drop_null_probe_keys: build_has_row,
+        probe_facts: ctx.build_rows_not_in().then(Default::default),
     })))
 }
 
@@ -399,6 +495,19 @@ fn probe_spilled(
 ) -> Result<SendableRecordBatchStream> {
     let spilled = Arc::clone(handle.spilled().expect("a spilled build side"));
     drop(handle);
+    if spilled.no_rows {
+        drop(right);
+        if spilled.routing.fetch_sub(1, Ordering::AcqRel) == 1 {
+            spilled.resident.lock().take();
+            spilled.kept.lock().take();
+            spilled.build.lock().clear();
+        }
+        let schema = Arc::clone(&ctx.stream.schema);
+        return Ok(Box::pin(RecordBatchStreamAdapter::new(
+            schema,
+            stream::empty(),
+        )));
+    }
     // Every stream starts before the last one finishes routing
     let (Some(left), Some(kept)) =
         (spilled.resident.lock().clone(), spilled.kept.lock().clone())
@@ -406,9 +515,23 @@ fn probe_spilled(
         return internal_err!("a probe stream started after the last one finished");
     };
     let routed = Arc::new(Mutex::new(empty_sides()));
+    let not_in = if spilled.drop_null_probe_keys {
+        RouterNotIn::DropNullKeys {
+            key: Arc::clone(&ctx.stream.on_right[0]),
+        }
+    } else if let Some(facts) = &spilled.probe_facts {
+        RouterNotIn::RecordFacts {
+            key: Arc::clone(&ctx.stream.on_right[0]),
+            resident: Arc::downgrade(&left),
+            facts: Arc::clone(facts),
+        }
+    } else {
+        RouterNotIn::None
+    };
     let router = SharedRouter(Arc::new(Mutex::new(ProbeRouter {
         input: right,
-        on_right: ctx.stream.on_right.clone(),
+        on_right: ctx.probe_routing.clone(),
+        not_in,
         spill: ctx.probe_spill.clone(),
         level: 0,
         spilled: spilled.buckets,
@@ -451,10 +574,18 @@ fn probe_spilled(
         } else {
             vec![]
         };
+        let facts = spilled.probe_facts.clone();
         let joins = stream::iter(build)
             .then(move |(bucket, build)| {
                 let probe = std::mem::take(&mut spilled.probe.lock()[bucket]);
-                join_pair(Arc::clone(&ctx), Arc::clone(&kept), build, probe, 0)
+                join_pair(
+                    Arc::clone(&ctx),
+                    Arc::clone(&kept),
+                    build,
+                    probe,
+                    0,
+                    facts.clone(),
+                )
             })
             .try_flatten();
         Ok::<_, datafusion_common::DataFusionError>(joins)
@@ -780,7 +911,7 @@ impl BucketedBuild {
         kept: &KeptMemory,
         batch: &RecordBatch,
     ) -> Result<()> {
-        for (bucket, part) in split(batch, &ctx.build.on_left, self.level)? {
+        for (bucket, part) in split(batch, &ctx.build_routing, self.level)? {
             let part_bytes = get_record_batch_memory_size(&part);
             loop {
                 match &mut self.buckets[bucket] {
@@ -909,12 +1040,19 @@ fn join_pair(
     build: SpilledSide,
     probe: SpilledSide,
     level: usize,
+    facts: Option<Arc<ProbeFacts>>,
 ) -> BoxFuture<'static, Result<SendableRecordBatchStream>> {
     async move {
         let need = join_bytes(build.rows, build.bytes);
+        // Without a key to route by, splitting cannot shrink the pair
+        let can_split = !ctx.build_routing.is_empty();
         // Even split evenly at every level left, the pair's pieces would not
         // fit: ask the pool now instead of splitting into ever more files
-        let pieces = BUCKETS.saturating_pow((MAX_LEVEL.saturating_sub(level)) as u32);
+        let pieces = if can_split {
+            BUCKETS.saturating_pow((MAX_LEVEL.saturating_sub(level)) as u32)
+        } else {
+            1
+        };
         let smallest_piece = need.div_ceil(pieces.max(1));
         if smallest_piece > kept.capacity() {
             // Only what one more split needs, like the memory kept at the
@@ -924,11 +1062,12 @@ fn join_pair(
         // (The test knob keeps splitting, so forced runs still reach the rungs)
         let splits_cannot_fit = kept.trigger.cap.is_none() && smallest_piece > kept.capacity();
         let fits = need <= kept.capacity();
-        if build.rows == 0 || fits || level >= MAX_LEVEL || splits_cannot_fit {
+        if build.rows == 0 || fits || level >= MAX_LEVEL || splits_cannot_fit || !can_split
+        {
             let forced = if level >= MAX_LEVEL { forced_rung() } else { None };
             let joined = match forced {
                 Some(_) => resources_err!("PoC: DF_HJ_RUNG skips the in-memory join"),
-                None => join_in_memory(&ctx, &kept, &build, &probe).await,
+                None => join_in_memory(&ctx, &kept, &build, &probe, facts.as_deref()).await,
             };
             match joined {
                 Ok(stream) => return Ok(stream),
@@ -937,14 +1076,16 @@ fn join_pair(
                     if build.rows > 0
                         && level < MAX_LEVEL
                         && !splits_cannot_fit
+                        && can_split
                         && is_resources_exhausted(&e) => {}
                 // Splitting cannot shrink this pair any further: hash its
                 // probe rows instead if they fit, else hash it a chunk at a time
                 Err(e) if is_resources_exhausted(&e) => {
-                    let reversed = match forced.as_deref() {
-                        Some(rung) => rung == "reversed",
-                        None => join_bytes(probe.rows, probe.bytes) <= kept.capacity(),
-                    };
+                    let reversed = !ctx.judges_build_rows()
+                        && match forced.as_deref() {
+                            Some(rung) => rung == "reversed",
+                            None => join_bytes(probe.rows, probe.bytes) <= kept.capacity(),
+                        };
                     if reversed {
                         rung_log("reversed", level, &build, &probe);
                         match join_reversed(&ctx, &kept, &build, &probe).await {
@@ -954,7 +1095,7 @@ fn join_pair(
                         }
                     }
                     rung_log("chunked", level, &build, &probe);
-                    return Ok(join_chunked(&ctx, &kept, &build, &probe));
+                    return Ok(join_chunked(&ctx, &kept, &build, &probe, facts));
                 }
                 Err(e) => {
                     return Err(e.context(format!(
@@ -974,7 +1115,7 @@ fn join_pair(
                 &ctx.build_spill,
                 batch_size,
                 &kept.buffers,
-                &ctx.build.on_left,
+                &ctx.build_routing,
                 build,
                 level,
             )
@@ -984,7 +1125,7 @@ fn join_pair(
                 &ctx.probe_spill,
                 batch_size,
                 &kept.buffers,
-                &ctx.stream.on_right,
+                &ctx.probe_routing,
                 probe,
                 level,
             )
@@ -999,7 +1140,14 @@ fn join_pair(
         });
         let joins = stream::iter(pairs)
             .then(move |(b, p, level)| {
-                join_pair(Arc::clone(&ctx), Arc::clone(&kept), b, p, level)
+                join_pair(
+                    Arc::clone(&ctx),
+                    Arc::clone(&kept),
+                    b,
+                    p,
+                    level,
+                    facts.clone(),
+                )
             })
             .try_flatten();
         Ok(Box::pin(RecordBatchStreamAdapter::new(schema, joins))
@@ -1013,8 +1161,12 @@ async fn join_in_memory(
     kept: &KeptMemory,
     build: &SpilledSide,
     probe: &SpilledSide,
+    facts: Option<&ProbeFacts>,
 ) -> Result<SendableRecordBatchStream> {
     let left_data = hash_side(&ctx.build_spill, build, &ctx.build, kept).await?;
+    if let Some(facts) = facts {
+        facts.record_on(&left_data);
+    }
     let probe_rows = read_side(&ctx.probe_spill, probe)?;
     Ok(Box::pin(ctx.stream.stream(
         owned(left_data),
@@ -1039,6 +1191,7 @@ fn mirrored(ctx: &SpillContext, join_type: JoinType) -> (BuildParams, StreamPara
         config: Arc::clone(&ctx.build.config),
         null_equality: ctx.build.null_equality,
         array_map_created_count: ctx.build.array_map_created_count.clone(),
+        not_in: ctx.build.not_in.and_then(NotIn::mirrored),
     };
     let stream = StreamParams {
         on_right: ctx.build.on_left.clone(),
@@ -1125,6 +1278,7 @@ fn join_chunked(
     kept: &Arc<KeptMemory>,
     build: &SpilledSide,
     probe: &SpilledSide,
+    facts: Option<Arc<ProbeFacts>>,
 ) -> SendableRecordBatchStream {
     let join_type = ctx.stream.join_type;
     let chunk = |params, stream, swapped| {
@@ -1141,6 +1295,8 @@ fn join_chunked(
             swapped,
             hashed.clone(),
             streamed.clone(),
+            // Facts about the probe side, for build rows chunked
+            if swapped { None } else { facts.clone() },
         )
     };
     match join_type {
@@ -1207,6 +1363,7 @@ fn join_chunked(
 
 /// One hash join per chunk of `hashed` that fits the kept memory, each reading
 /// all of `streamed`. With `swapped`, `hashed` is the probe side.
+#[expect(clippy::too_many_arguments)]
 fn chunks(
     ctx: &Arc<SpillContext>,
     kept: &Arc<KeptMemory>,
@@ -1215,6 +1372,7 @@ fn chunks(
     swapped: bool,
     hashed: SpilledSide,
     streamed: SpilledSide,
+    facts: Option<Arc<ProbeFacts>>,
 ) -> SendableRecordBatchStream {
     let schema = Arc::clone(&stream.schema);
     let (ctx, kept) = (Arc::clone(ctx), Arc::clone(kept));
@@ -1229,6 +1387,7 @@ fn chunks(
         let (ctx, kept) = (Arc::clone(&ctx), Arc::clone(&kept));
         let (params, stream) = (params.clone(), stream.clone());
         let (hashed, streamed) = (hashed.clone(), streamed.clone());
+        let facts = facts.clone();
         async move {
             let (hashed_spill, streamed_spill) = if swapped {
                 (&ctx.probe_spill, &ctx.build_spill)
@@ -1274,6 +1433,9 @@ fn chunks(
             let mut counter = RecordBatchMemoryCounter::new();
             reservation.try_grow(batches.iter().map(|b| counter.count_batch(b)).sum())?;
             let left_data = params.build(&mut batches, &mut reservation, 1)?;
+            if let Some(facts) = &facts {
+                facts.record_on(&left_data);
+            }
             if std::env::var_os("DF_HJ_RUNG_LOG").is_some() {
                 eprintln!("HJ_CHUNK rows={taken} swapped={swapped}");
             }
@@ -1364,6 +1526,10 @@ fn bucket_ids(
     on: &[PhysicalExprRef],
     level: usize,
 ) -> Result<Vec<usize>> {
+    // No key to route by: one bucket holds every row
+    if on.is_empty() {
+        return Ok(vec![0; batch.num_rows()]);
+    }
     let keys = evaluate_expressions_to_arrays(on, batch)?;
     let mut hashes = vec![0; batch.num_rows()];
     // Values SQL considers equal (e.g. +0.0 and -0.0) hash the same, so they
@@ -1405,6 +1571,7 @@ fn split(
 struct ProbeRouter {
     input: SendableRecordBatchStream,
     on_right: Vec<PhysicalExprRef>,
+    not_in: RouterNotIn,
     spill: SpillManager,
     level: usize,
     spilled: [bool; BUCKETS],
@@ -1418,11 +1585,64 @@ struct ProbeRouter {
     finished: bool,
 }
 
+/// What routing does for an uncorrelated `NOT IN`, whose answers depend on
+/// whole sides rather than on one bucket pair
+enum RouterNotIn {
+    None,
+    /// `probe.key NOT IN (build.key)` against a build side with rows and no
+    /// NULL key: a probe row with a NULL key is never TRUE, so it is dropped
+    /// here, before a bucket without build rows could emit it as
+    /// `NULL NOT IN (empty)`
+    DropNullKeys {
+        key: PhysicalExprRef,
+    },
+    /// `build.key NOT IN (probe.key)`: records what each batch held on the
+    /// kept buckets' table, whose final stage emits the kept build rows, and
+    /// in the facts the spilled pairs' tables start with
+    RecordFacts {
+        key: PhysicalExprRef,
+        resident: Weak<JoinLeftData>,
+        facts: Arc<ProbeFacts>,
+    },
+}
+
 impl ProbeRouter {
     fn route(&mut self, batch: RecordBatch) -> Result<Option<RecordBatch>> {
         if batch.num_rows() == 0 {
             return Ok(None);
         }
+        let batch = match &self.not_in {
+            RouterNotIn::None => batch,
+            RouterNotIn::DropNullKeys { key } => {
+                let values = key.evaluate(&batch)?.into_array(batch.num_rows())?;
+                match values
+                    .logical_nulls()
+                    .filter(|nulls| nulls.null_count() > 0)
+                {
+                    Some(nulls) => {
+                        let valid = BooleanArray::new(nulls.inner().clone(), None);
+                        let batch = filter_record_batch(&batch, &valid)?;
+                        if batch.num_rows() == 0 {
+                            return Ok(None);
+                        }
+                        batch
+                    }
+                    None => batch,
+                }
+            }
+            RouterNotIn::RecordFacts {
+                key,
+                resident,
+                facts,
+            } => {
+                let has_null = has_null_key(key, &batch)?;
+                facts.record(has_null);
+                if let Some(resident) = resident.upgrade() {
+                    resident.record_probe_batch(true, has_null);
+                }
+                batch
+            }
+        };
         let ids = bucket_ids(&batch, &self.on_right, self.level)?;
         if ids.iter().all(|b| !self.spilled[*b]) {
             return Ok(Some(batch));
@@ -1528,4 +1748,352 @@ fn limit(
         futures::future::ready(item)
     });
     Box::pin(RecordBatchStreamAdapter::new(schema, limited))
+}
+
+#[cfg(test)]
+mod tests {
+    //! `NOT IN` joins that spill must answer as in memory. Each case places
+    //! rows so that one bucket pair alone would decide wrongly: the fact it
+    //! misses sits in another bucket, or nowhere it can see.
+
+    use super::*;
+
+    use arrow::array::Int32Array;
+    use arrow::datatypes::{DataType, Field, Schema};
+    use arrow::util::pretty::pretty_format_batches;
+    use datafusion_common::JoinType;
+    use datafusion_execution::TaskContext;
+    use datafusion_execution::config::SessionConfig;
+    use datafusion_execution::runtime_env::RuntimeEnvBuilder;
+    use datafusion_physical_expr::expressions::Column;
+
+    use crate::ExecutionPlan;
+    use crate::joins::HashJoinExecBuilder;
+    use crate::test::TestMemoryExec;
+
+    /// Rows the spilled bucket gets, so that it is the largest and the pool
+    /// cannot hold it
+    const BIG: usize = 20_000;
+    const LIMIT: usize = 256 * 1024;
+
+    fn table(columns: &[(&str, Vec<Option<i32>>)]) -> Arc<dyn ExecutionPlan> {
+        let schema = Arc::new(Schema::new(
+            columns
+                .iter()
+                .map(|(name, _)| Field::new(*name, DataType::Int32, true))
+                .collect::<Vec<_>>(),
+        ));
+        let arrays = columns
+            .iter()
+            .map(|(_, values)| Arc::new(Int32Array::from(values.clone())) as _)
+            .collect();
+        let batch = RecordBatch::try_new(Arc::clone(&schema), arrays).unwrap();
+        TestMemoryExec::try_new_exec(&[vec![batch]], schema, None).unwrap()
+    }
+
+    /// The level-0 bucket of a key, as rows are routed when nothing else is a key
+    fn bucket_of(key: Option<i32>) -> usize {
+        let schema = Arc::new(Schema::new(vec![Field::new("k", DataType::Int32, true)]));
+        let batch = RecordBatch::try_new(
+            Arc::clone(&schema),
+            vec![Arc::new(Int32Array::from(vec![key]))],
+        )
+        .unwrap();
+        let on: Vec<PhysicalExprRef> = vec![Arc::new(Column::new("k", 0))];
+        bucket_ids(&batch, &on, 0).unwrap()[0]
+    }
+
+    /// `n` keys from 1 on, all in `bucket` and none in `except`
+    fn keys_in(bucket: usize, n: usize, except: &[i32]) -> Vec<i32> {
+        (1..)
+            .filter(|k| bucket_of(Some(*k)) == bucket && !except.contains(k))
+            .take(n)
+            .collect()
+    }
+
+    /// A key outside `bucket`
+    fn key_outside(bucket: usize, from: i32) -> i32 {
+        (from..).find(|k| bucket_of(Some(*k)) != bucket).unwrap()
+    }
+
+    /// Runs the null-aware join in memory and spilling under a small pool, and
+    /// checks it spilled and gave the same rows
+    async fn assert_spills_like_in_memory(
+        left: Arc<dyn ExecutionPlan>,
+        right: Arc<dyn ExecutionPlan>,
+        keys: &[(&str, &str)],
+        value_keys: usize,
+        join_type: JoinType,
+    ) {
+        let run = |spill: bool| {
+            let (left, right) = (Arc::clone(&left), Arc::clone(&right));
+            async move {
+                let on = keys
+                    .iter()
+                    .map(|(l, r)| {
+                        (
+                            Arc::new(Column::new_with_schema(l, &left.schema()).unwrap())
+                                as PhysicalExprRef,
+                            Arc::new(Column::new_with_schema(r, &right.schema()).unwrap())
+                                as PhysicalExprRef,
+                        )
+                    })
+                    .collect();
+                let join = HashJoinExecBuilder::new(left, right, on, join_type)
+                    .with_partition_mode(PartitionMode::CollectLeft)
+                    .with_null_aware(true)
+                    .with_null_aware_value_keys(value_keys)
+                    .build()
+                    .unwrap();
+                let mut config = SessionConfig::new().with_batch_size(1024);
+                config.options_mut().execution.enable_hash_join_spilling = spill;
+                let mut runtime = RuntimeEnvBuilder::new();
+                if spill {
+                    runtime = runtime.with_memory_limit(LIMIT, 1.0);
+                }
+                let ctx = Arc::new(
+                    TaskContext::default()
+                        .with_session_config(config)
+                        .with_runtime(runtime.build_arc().unwrap()),
+                );
+                let join = Arc::new(join);
+                let batches = crate::collect(Arc::clone(&join) as _, ctx).await.unwrap();
+                let spilled = join.metrics().and_then(|m| m.spill_count()).unwrap_or(0);
+                let text = pretty_format_batches(&batches).unwrap().to_string();
+                let mut rows: Vec<String> = text
+                    .lines()
+                    .filter(|line| line.starts_with('|'))
+                    .skip(1)
+                    .map(str::to_string)
+                    .collect();
+                rows.sort();
+                (rows, spilled)
+            }
+        };
+        let (expected, _) = run(false).await;
+        let (actual, spilled) = run(true).await;
+        assert!(
+            spilled > 0,
+            "the join must spill for the case to mean anything"
+        );
+        assert_eq!(actual, expected);
+    }
+
+    fn some(keys: &[i32]) -> Vec<Option<i32>> {
+        keys.iter().copied().map(Some).collect()
+    }
+
+    fn ids(n: usize) -> Vec<Option<i32>> {
+        (0..n as i32).map(Some).collect()
+    }
+
+    /// `build.k NOT IN (probe.k)`: the probe side's NULL is routed to a
+    /// spilled bucket, yet it makes the kept build rows' answer UNKNOWN
+    #[tokio::test]
+    async fn not_in_build_rows_see_a_probe_null_in_a_spilled_bucket() {
+        let null_bucket = bucket_of(None);
+        let big = keys_in(null_bucket, BIG, &[]);
+        let kept_bucket = (null_bucket + 1) % BUCKETS;
+        let kept = keys_in(kept_bucket, 3, &[]);
+        let mut build_keys = some(&big);
+        build_keys.extend(some(&kept));
+        let left = table(&[("id", ids(build_keys.len())), ("k", build_keys)]);
+        // A NULL (in the big bucket) and a key that matches one big row
+        let right = table(&[("k", vec![None, Some(big[0])])]);
+        for join_type in [JoinType::LeftAnti, JoinType::LeftMark] {
+            assert_spills_like_in_memory(
+                Arc::clone(&left),
+                Arc::clone(&right),
+                &[("k", "k")],
+                1,
+                join_type,
+            )
+            .await;
+        }
+    }
+
+    /// `build.k NOT IN (probe.k)`: every probe row is routed to a spilled
+    /// bucket, yet the kept NULL build key's answer is UNKNOWN, not TRUE as
+    /// against an empty probe side
+    #[tokio::test]
+    async fn not_in_build_rows_see_probe_rows_in_spilled_buckets() {
+        let null_bucket = bucket_of(None);
+        let big_bucket = (null_bucket + 1) % BUCKETS;
+        let big = keys_in(big_bucket, BIG, &[]);
+        let mut build_keys = some(&big);
+        build_keys.push(None);
+        build_keys.push(Some(key_outside(big_bucket, 1)));
+        let left = table(&[("id", ids(build_keys.len())), ("k", build_keys)]);
+        let right = table(&[("k", some(&big[..2]))]);
+        for join_type in [JoinType::LeftAnti, JoinType::LeftMark] {
+            assert_spills_like_in_memory(
+                Arc::clone(&left),
+                Arc::clone(&right),
+                &[("k", "k")],
+                1,
+                join_type,
+            )
+            .await;
+        }
+    }
+
+    /// `build.k NOT IN (probe.k)`: a spilled pair whose own probe rows are
+    /// none still decides with the whole probe side, which has a NULL
+    #[tokio::test]
+    async fn not_in_build_rows_spilled_pairs_see_the_whole_probe_side() {
+        let null_bucket = bucket_of(None);
+        let other_bucket = (null_bucket + 1) % BUCKETS;
+        // Two buckets too big to keep: both spill
+        let mut build_keys = some(&keys_in(other_bucket, BIG, &[]));
+        build_keys.extend(some(&keys_in(null_bucket, BIG, &[])));
+        let left = table(&[("id", ids(build_keys.len())), ("k", build_keys)]);
+        let right = table(&[("k", vec![None])]);
+        for join_type in [JoinType::LeftAnti, JoinType::LeftMark] {
+            assert_spills_like_in_memory(
+                Arc::clone(&left),
+                Arc::clone(&right),
+                &[("k", "k")],
+                1,
+                join_type,
+            )
+            .await;
+        }
+    }
+
+    /// `probe.k NOT IN (build.k)`: the build side's NULL is in a spilled
+    /// bucket, yet no probe row of a kept bucket may be emitted
+    #[tokio::test]
+    async fn not_in_probe_rows_see_a_build_null_in_a_spilled_bucket() {
+        let null_bucket = bucket_of(None);
+        let big = keys_in(null_bucket, BIG, &[]);
+        let kept_bucket = (null_bucket + 1) % BUCKETS;
+        let kept = keys_in(kept_bucket, 4, &[]);
+        let mut build_keys = some(&big);
+        build_keys.push(None);
+        build_keys.extend(some(&kept[..2]));
+        let left = table(&[("k", build_keys)]);
+        let mut probe_keys = some(&kept[2..]);
+        probe_keys.push(Some(big[0]));
+        let right = table(&[("id", ids(probe_keys.len())), ("k", probe_keys)]);
+        assert_spills_like_in_memory(left, right, &[("k", "k")], 1, JoinType::RightAnti)
+            .await;
+    }
+
+    /// `probe.k NOT IN (build.k)`: every build row is spilled, so the kept
+    /// table is empty, yet a NULL probe key is not `NULL NOT IN (empty)`
+    #[tokio::test]
+    async fn not_in_probe_rows_drop_a_null_key_with_an_empty_kept_table() {
+        let null_bucket = bucket_of(None);
+        let big_bucket = (null_bucket + 1) % BUCKETS;
+        let big = keys_in(big_bucket, BIG, &[]);
+        let left = table(&[("k", some(&big))]);
+        let probe_keys = vec![
+            None,
+            Some(big[0]),
+            Some(key_outside(big_bucket, 1)),
+            Some(key_outside(null_bucket, 1)),
+        ];
+        let right = table(&[("id", ids(probe_keys.len())), ("k", probe_keys)]);
+        assert_spills_like_in_memory(left, right, &[("k", "k")], 1, JoinType::RightAnti)
+            .await;
+    }
+
+    /// Correlated `NOT IN`: a NULL value makes the answer UNKNOWN only within
+    /// its scope (`s`), so a scope's rows must stay in one bucket pair even
+    /// though their values differ
+    #[tokio::test]
+    async fn not_in_correlated_keeps_a_scope_in_one_pair() {
+        // The scope keys route; put the scope with the NULL value among the big rows
+        let big_bucket = bucket_of(Some(0));
+        let scopes = keys_in(big_bucket, BIG, &[]);
+        let other_scope = key_outside(big_bucket, 1);
+        // Subquery side: one row per scope, plus a NULL value in scopes[0]
+        let mut sub_v: Vec<Option<i32>> = (0..BIG as i32).map(Some).collect();
+        let mut sub_s = some(&scopes);
+        sub_v.push(None);
+        sub_s.push(Some(scopes[0]));
+        sub_v.push(Some(7));
+        sub_s.push(Some(other_scope));
+        // Outer side: values that match nothing, in the NULL's scope and
+        // others, and enough rows to spill when it is the build side
+        let mut outer_v = vec![Some(-1), Some(-2), Some(-3), None, Some(0)];
+        let mut outer_s = vec![
+            Some(scopes[0]),
+            Some(scopes[1]),
+            Some(other_scope),
+            Some(scopes[2]),
+            Some(scopes[0]),
+        ];
+        outer_v.extend((0..BIG as i32).map(|i| Some(-10 - i)));
+        outer_s.extend(scopes.iter().map(|s| Some(*s)));
+        let subquery = || table(&[("v", sub_v.clone()), ("s", sub_s.clone())]);
+        let outer = || {
+            table(&[
+                ("id", ids(outer_v.len())),
+                ("ov", outer_v.clone()),
+                ("os", outer_s.clone()),
+            ])
+        };
+        // `outer.ov NOT IN (subquery.v WHERE subquery.s = outer.os)`, decided
+        // for probe rows (RightAnti) and for build rows (LeftAnti, LeftMark)
+        assert_spills_like_in_memory(
+            subquery(),
+            outer(),
+            &[("v", "ov"), ("s", "os")],
+            1,
+            JoinType::RightAnti,
+        )
+        .await;
+        for join_type in [JoinType::LeftAnti, JoinType::LeftMark] {
+            assert_spills_like_in_memory(
+                outer(),
+                subquery(),
+                &[("ov", "v"), ("os", "s")],
+                1,
+                join_type,
+            )
+            .await;
+        }
+    }
+
+    /// A tuple `NOT IN` without correlation has no key to route by: the whole
+    /// join is one pair, joined a chunk at a time
+    #[tokio::test]
+    async fn not_in_tuple_without_correlation_is_one_pair() {
+        let mut sub_a: Vec<Option<i32>> = (0..BIG as i32).map(Some).collect();
+        let mut sub_b: Vec<Option<i32>> = (0..BIG as i32).map(Some).collect();
+        sub_a.push(None);
+        sub_b.push(Some(-5));
+        let mut outer_a = vec![Some(1), Some(1), Some(-7), Some(-8), None];
+        let mut outer_b = vec![Some(1), None, None, Some(-5), Some(3)];
+        // Enough rows to spill when the outer side is the build side
+        outer_a.extend((0..BIG as i32).map(|i| Some(-10 - i)));
+        outer_b.extend((0..BIG as i32).map(Some));
+        let subquery = || table(&[("a", sub_a.clone()), ("b", sub_b.clone())]);
+        let outer = || {
+            table(&[
+                ("id", ids(outer_a.len())),
+                ("oa", outer_a.clone()),
+                ("ob", outer_b.clone()),
+            ])
+        };
+        assert_spills_like_in_memory(
+            subquery(),
+            outer(),
+            &[("a", "oa"), ("b", "ob")],
+            2,
+            JoinType::RightAnti,
+        )
+        .await;
+        for join_type in [JoinType::LeftAnti, JoinType::LeftMark] {
+            assert_spills_like_in_memory(
+                outer(),
+                subquery(),
+                &[("oa", "a"), ("ob", "b")],
+                2,
+                join_type,
+            )
+            .await;
+        }
+    }
 }

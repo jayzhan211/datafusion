@@ -167,6 +167,32 @@ impl NotIn {
         }
     }
 
+    /// The first key a spilling join (`spill.rs`) may bucket rows by, so that
+    /// each bucket pair decides `NOT IN` on its own. A correlated form decides
+    /// a NULL-valued row from every row of its scope, whatever the value, so
+    /// only the scope keys (`on[value_keys..]`) keep a scope in one pair; when
+    /// there are none, no key can route.
+    pub(super) fn first_routing_key(self) -> usize {
+        match self.scope() {
+            NotInScope::Uncorrelated => 0,
+            NotInScope::Correlated { value_keys } => value_keys,
+        }
+    }
+
+    /// This `NOT IN` for a spilled pair joined with its probe rows hashed and
+    /// its build rows streaming through them: the hashed rows are still the
+    /// ones judged. `None` for the forms that judge build rows, which a
+    /// spilled pair never joins that way.
+    pub(super) fn mirrored(self) -> Option<Self> {
+        match self {
+            Self::ProbeRows { scope } => Some(Self::BuildRows {
+                scope,
+                output: NotInOutput::Rows,
+            }),
+            Self::BuildRows { .. } => None,
+        }
+    }
+
     /// Number of leading keys that are `NOT IN` value keys; the keys after
     /// them are correlation scope keys.
     pub(super) fn value_keys(self) -> usize {
