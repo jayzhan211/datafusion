@@ -1287,6 +1287,7 @@ impl HashJoinExec {
     }
 
     /// What a probe stream that may spill needs, see [`super::spill`]
+    #[expect(clippy::too_many_arguments)]
     fn spill_context(
         &self,
         partition: usize,

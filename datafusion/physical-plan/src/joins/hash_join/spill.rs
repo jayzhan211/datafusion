@@ -1095,7 +1095,7 @@ fn join_pair(
                         }
                     }
                     rung_log("chunked", level, &build, &probe);
-                    return Ok(join_chunked(&ctx, &kept, &build, &probe, facts));
+                    return Ok(join_chunked(&ctx, &kept, &build, &probe, facts.as_ref()));
                 }
                 Err(e) => {
                     return Err(e.context(format!(
@@ -1278,7 +1278,7 @@ fn join_chunked(
     kept: &Arc<KeptMemory>,
     build: &SpilledSide,
     probe: &SpilledSide,
-    facts: Option<Arc<ProbeFacts>>,
+    facts: Option<&Arc<ProbeFacts>>,
 ) -> SendableRecordBatchStream {
     let join_type = ctx.stream.join_type;
     let chunk = |params, stream, swapped| {
@@ -1296,7 +1296,7 @@ fn join_chunked(
             hashed.clone(),
             streamed.clone(),
             // Facts about the probe side, for build rows chunked
-            if swapped { None } else { facts.clone() },
+            if swapped { None } else { facts.cloned() },
         )
     };
     match join_type {
@@ -1793,6 +1793,10 @@ mod tests {
 
     /// The level-0 bucket of a key, as rows are routed when nothing else is a key
     fn bucket_of(key: Option<i32>) -> usize {
+        bucket_at(key, 0)
+    }
+
+    fn bucket_at(key: Option<i32>, level: usize) -> usize {
         let schema = Arc::new(Schema::new(vec![Field::new("k", DataType::Int32, true)]));
         let batch = RecordBatch::try_new(
             Arc::clone(&schema),
@@ -1800,12 +1804,12 @@ mod tests {
         )
         .unwrap();
         let on: Vec<PhysicalExprRef> = vec![Arc::new(Column::new("k", 0))];
-        bucket_ids(&batch, &on, 0).unwrap()[0]
+        bucket_ids(&batch, &on, level).unwrap()[0]
     }
 
     /// `n` keys from 1 on, all in `bucket` and none in `except`
     fn keys_in(bucket: usize, n: usize, except: &[i32]) -> Vec<i32> {
-        (1..)
+        (1..i32::MAX)
             .filter(|k| bucket_of(Some(*k)) == bucket && !except.contains(k))
             .take(n)
             .collect()
@@ -1813,7 +1817,9 @@ mod tests {
 
     /// A key outside `bucket`
     fn key_outside(bucket: usize, from: i32) -> i32 {
-        (from..).find(|k| bucket_of(Some(*k)) != bucket).unwrap()
+        (from..i32::MAX)
+            .find(|k| bucket_of(Some(*k)) != bucket)
+            .unwrap()
     }
 
     /// Runs the null-aware join in memory and spilling under a small pool, and
@@ -1948,6 +1954,34 @@ mod tests {
         build_keys.extend(some(&keys_in(null_bucket, BIG, &[])));
         let left = table(&[("id", ids(build_keys.len())), ("k", build_keys)]);
         let right = table(&[("k", vec![None])]);
+        for join_type in [JoinType::LeftAnti, JoinType::LeftMark] {
+            assert_spills_like_in_memory(
+                Arc::clone(&left),
+                Arc::clone(&right),
+                &[("k", "k")],
+                1,
+                join_type,
+            )
+            .await;
+        }
+    }
+
+    /// `build.k NOT IN (probe.k)` over one hot key: splitting cannot shrink
+    /// the pair, which is joined a chunk of build rows at a time, each still
+    /// deciding with the probe side's NULL from another bucket. (That such a
+    /// pair is never joined with the roles swapped is checked by the
+    /// `NOT IN` fuzz test with `DF_HJ_RUNG=reversed`.)
+    #[tokio::test]
+    async fn not_in_build_rows_hot_key_pair_sees_the_whole_probe_side() {
+        // More rows than the pool holds, all with one key
+        let hot = vec![Some(1); 3 * BIG];
+        let left = table(&[("id", ids(3 * BIG)), ("k", hot)]);
+        // A probe key that follows the hot key into its pair (the hot child is
+        // found after one more split), so that its probe side is not empty
+        let follower = (2..i32::MAX)
+            .find(|k| (0..2).all(|l| bucket_at(Some(*k), l) == bucket_at(Some(1), l)))
+            .unwrap();
+        let right = table(&[("k", vec![None, Some(follower)])]);
         for join_type in [JoinType::LeftAnti, JoinType::LeftMark] {
             assert_spills_like_in_memory(
                 Arc::clone(&left),
