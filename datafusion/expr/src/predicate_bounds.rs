@@ -84,7 +84,7 @@ impl PredicateBoundsEvaluator<'_> {
                         // If `e` is a boolean expression, check if `e` is provably 'unknown'.
                         DataType::Boolean => self.evaluate_bounds(e)?.is_unknown()?,
                         // If `e` is not a boolean expression, check if `e` is provably null
-                        _ => self.is_null_with_nullable(e, || Some(true)),
+                        _ => self.is_null_with_nullable(e, Some(true)),
                     }
                 }
             }
@@ -100,7 +100,7 @@ impl PredicateBoundsEvaluator<'_> {
                             self.evaluate_bounds(e)?.is_unknown()?.not()?
                         }
                         // If `e` is not a boolean expression, check if `e` is provably null
-                        _ => self.is_null_with_nullable(e, || Some(true)).not()?,
+                        _ => self.is_null_with_nullable(e, Some(true)).not()?,
                     }
                 }
             }
@@ -150,15 +150,15 @@ impl PredicateBoundsEvaluator<'_> {
     ///
     /// This method only returns sets containing `TRUE`, `FALSE`, or both.
     fn is_null(&self, expr: &Expr) -> NullableInterval {
-        self.is_null_with_nullable(expr, || expr.nullable(self.input_schema).ok())
+        self.is_null_with_nullable(expr, expr.nullable(self.input_schema).ok())
     }
 
-    /// [`Self::is_null`], where `nullable` gives `expr`'s nullability (`None`
-    /// if it is not known), for a caller that already has it.
+    /// [`Self::is_null`] given `expr`'s nullability (`None` if it is not
+    /// known), for a caller that already has it.
     fn is_null_with_nullable(
         &self,
         expr: &Expr,
-        nullable: impl FnOnce() -> Option<bool>,
+        nullable: Option<bool>,
     ) -> NullableInterval {
         // Fast path for literals
         if let Expr::Literal(scalar, _) = expr {
@@ -170,7 +170,7 @@ impl PredicateBoundsEvaluator<'_> {
         }
 
         // If `expr` is not nullable, we can be certain `expr` is not null
-        if nullable() == Some(false) {
+        if nullable == Some(false) {
             return NullableInterval::FALSE;
         }
 
