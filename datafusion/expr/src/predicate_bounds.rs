@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: See the NOTICE file distributed with this work for additional information regarding copyright ownership
 // SPDX-FileContributor: Licensed to the Apache Software Foundation (ASF) under one or more contributor license agreements
 
+use crate::expr_schema::output_field;
 use crate::{Between, BinaryExpr, Expr, ExprSchemable};
 use arrow::datatypes::DataType;
 use datafusion_common::tree_node::{TreeNode, TreeNodeRecursion};
@@ -69,31 +70,37 @@ impl PredicateBoundsEvaluator<'_> {
                     }
                 }
             }
+            // `e`'s field is computed once: its nullability and its type are
+            // read from it, and `is_null` is told that `e` is nullable. Asking
+            // `e` for each separately visits a nested CASE in `e` once per
+            // question at every level.
             Expr::IsNull(e) => {
+                let field = output_field(e, self.input_schema)?;
                 // If `e` is not nullable, then `e IS NULL` is provably false
-                if !e.nullable(self.input_schema)? {
+                if !field.is_nullable() {
                     NullableInterval::FALSE
                 } else {
-                    match e.get_type(self.input_schema)? {
+                    match field.data_type() {
                         // If `e` is a boolean expression, check if `e` is provably 'unknown'.
                         DataType::Boolean => self.evaluate_bounds(e)?.is_unknown()?,
                         // If `e` is not a boolean expression, check if `e` is provably null
-                        _ => self.is_null(e),
+                        _ => self.is_null_with_nullable(e, || Some(true)),
                     }
                 }
             }
             Expr::IsNotNull(e) => {
+                let field = output_field(e, self.input_schema)?;
                 // If `e` is not nullable, then `e IS NOT NULL` is provably true
-                if !e.nullable(self.input_schema)? {
+                if !field.is_nullable() {
                     NullableInterval::TRUE
                 } else {
-                    match e.get_type(self.input_schema)? {
+                    match field.data_type() {
                         // If `e` is a boolean expression, try to evaluate it and test for not unknown
                         DataType::Boolean => {
                             self.evaluate_bounds(e)?.is_unknown()?.not()?
                         }
                         // If `e` is not a boolean expression, check if `e` is provably null
-                        _ => self.is_null(e).not()?,
+                        _ => self.is_null_with_nullable(e, || Some(true)).not()?,
                     }
                 }
             }
@@ -143,6 +150,16 @@ impl PredicateBoundsEvaluator<'_> {
     ///
     /// This method only returns sets containing `TRUE`, `FALSE`, or both.
     fn is_null(&self, expr: &Expr) -> NullableInterval {
+        self.is_null_with_nullable(expr, || expr.nullable(self.input_schema).ok())
+    }
+
+    /// [`Self::is_null`], where `nullable` gives `expr`'s nullability (`None`
+    /// if it is not known), for a caller that already has it.
+    fn is_null_with_nullable(
+        &self,
+        expr: &Expr,
+        nullable: impl FnOnce() -> Option<bool>,
+    ) -> NullableInterval {
         // Fast path for literals
         if let Expr::Literal(scalar, _) = expr {
             if scalar.is_null() {
@@ -153,7 +170,7 @@ impl PredicateBoundsEvaluator<'_> {
         }
 
         // If `expr` is not nullable, we can be certain `expr` is not null
-        if expr.nullable(self.input_schema).ok() == Some(false) {
+        if nullable() == Some(false) {
             return NullableInterval::FALSE;
         }
 

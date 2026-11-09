@@ -743,25 +743,40 @@ impl CaseExpr {
     }
 }
 
+/// The type of a CASE from the types of its THEN branches (in order) and of
+/// its ELSE branch. Lazy: evaluation asks only the branches it needs, and
+/// [`CaseExpr::return_field`] passes the fields it already has.
+fn case_type(
+    then_types: impl IntoIterator<Item = Result<DataType>>,
+    else_type: impl FnOnce() -> Option<Result<DataType>>,
+) -> Result<DataType> {
+    // since all then results have the same data type, we can choose any one as the
+    // return data type except for the null.
+    let mut data_type = DataType::Null;
+    for then_type in then_types {
+        data_type = then_type?;
+        if !data_type.equals_datatype(&DataType::Null) {
+            break;
+        }
+    }
+    // if all then results are null, we use data type of else expr instead if possible.
+    if data_type.equals_datatype(&DataType::Null)
+        && let Some(else_type) = else_type()
+    {
+        data_type = else_type?;
+    }
+
+    Ok(data_type)
+}
+
 impl CaseBody {
     fn data_type(&self, input_schema: &Schema) -> Result<DataType> {
-        // since all then results have the same data type, we can choose any one as the
-        // return data type except for the null.
-        let mut data_type = DataType::Null;
-        for i in 0..self.when_then_expr.len() {
-            data_type = self.when_then_expr[i].1.data_type(input_schema)?;
-            if !data_type.equals_datatype(&DataType::Null) {
-                break;
-            }
-        }
-        // if all then results are null, we use data type of else expr instead if possible.
-        if data_type.equals_datatype(&DataType::Null)
-            && let Some(e) = &self.else_expr
-        {
-            data_type = e.data_type(input_schema)?;
-        }
-
-        Ok(data_type)
+        case_type(
+            self.when_then_expr
+                .iter()
+                .map(|(_, then)| then.data_type(input_schema)),
+            || self.else_expr.as_ref().map(|e| e.data_type(input_schema)),
+        )
     }
 
     /// See [CaseExpr::case_when_with_expr].
@@ -1067,7 +1082,7 @@ impl CaseExpr {
         batch: &RecordBatch,
         projected: &ProjectedCaseBody,
     ) -> Result<ColumnarValue> {
-        let return_type = self.data_type(&batch.schema())?;
+        let return_type = self.body.data_type(&batch.schema())?;
         if let Some(projection) = projected.projection_for(batch) {
             let projected_batch = batch.project(&projection)?;
             projected
@@ -1090,7 +1105,7 @@ impl CaseExpr {
         batch: &RecordBatch,
         projected: &ProjectedCaseBody,
     ) -> Result<ColumnarValue> {
-        let return_type = self.data_type(&batch.schema())?;
+        let return_type = self.body.data_type(&batch.schema())?;
         if let Some(projection) = projected.projection_for(batch) {
             let projected_batch = batch.project(&projection)?;
             projected
@@ -1122,7 +1137,7 @@ impl CaseExpr {
             // WHEN [false | null] --> NULL
             ColumnarValue::Scalar(_) => {
                 // return scalar NULL value
-                ScalarValue::try_from(self.data_type(&batch.schema())?)
+                ScalarValue::try_from(self.body.data_type(&batch.schema())?)
                     .map(ColumnarValue::Scalar)
             }
             // WHEN column --> column
@@ -1149,7 +1164,7 @@ impl CaseExpr {
     }
 
     fn scalar_or_scalar(&self, batch: &RecordBatch) -> Result<ColumnarValue> {
-        let return_type = self.data_type(&batch.schema())?;
+        let return_type = self.body.data_type(&batch.schema())?;
 
         // evaluate when expression
         let when_value = self.body.when_then_expr[0].0.evaluate(batch)?;
@@ -1203,7 +1218,7 @@ impl CaseExpr {
             match &self.body.else_expr {
                 Some(else_expr) => else_expr.evaluate(batch),
                 None => {
-                    let return_type = self.data_type(&batch.schema())?;
+                    let return_type = self.body.data_type(&batch.schema())?;
                     Ok(ColumnarValue::Scalar(ScalarValue::try_new_null(
                         &return_type,
                     )?))
@@ -1243,34 +1258,24 @@ impl CaseExpr {
     }
 }
 
-impl PhysicalExpr for CaseExpr {
-    // SKETCH: migrate. CASE is not a field rule (its nullability looks at the
-    // WHEN predicates), so this is the old `return_field` default written out:
-    // `data_type`/`nullable` below stay the overrides. Next step: move the
-    // nullability analysis into `CaseBody` and build the field once here.
-    fn return_field(&self, input_schema: &Schema) -> Result<FieldRef> {
-        Ok(Arc::new(Field::new(
-            "",
-            self.data_type(input_schema)?,
-            self.nullable(input_schema)?,
-        )))
-    }
-
-    fn data_type(&self, input_schema: &Schema) -> Result<DataType> {
-        self.body.data_type(input_schema)
-    }
-
-    fn nullable(&self, input_schema: &Schema) -> Result<bool> {
-        let nullable_then = self.body.when_then_expr.iter().find_map(|(w, t)| {
-            let is_nullable = match t.nullable(input_schema) {
-                // Pass on error determining nullability verbatim
-                Err(e) => return Some(Err(e)),
-                Ok(n) => n,
-            };
-
+impl CaseExpr {
+    /// Whether this CASE may be NULL: a reachable nullable THEN, or a nullable
+    /// or missing ELSE. `then_fields` and `else_field` are the branches'
+    /// fields.
+    ///
+    /// The logical `case_nullable` (expr_schema.rs) keeps a copy of this
+    /// analysis; keep them in sync.
+    fn case_nullable(
+        &self,
+        then_fields: &[FieldRef],
+        else_field: Option<&Field>,
+        input_schema: &Schema,
+    ) -> Result<bool> {
+        let mut when_then = self.body.when_then_expr.iter().zip(then_fields);
+        let nullable_then = when_then.find_map(|((w, t), then_field)| {
             // Branches with a then expression that is not nullable do not impact the
             // nullability of the case expression.
-            if !is_nullable {
+            if !then_field.is_nullable() {
                 return None;
             }
 
@@ -1308,15 +1313,44 @@ impl PhysicalExpr for CaseExpr {
             // expression itself is nullable.
             // Use `Result::map` to propagate the error from `nullable_then` if there is one.
             nullable_then.map(|_| true)
-        } else if let Some(e) = &self.body.else_expr {
+        } else if let Some(else_field) = else_field {
             // There are no reachable nullable 'then' expressions, so all we still need to
             // check is the 'else' expression's nullability.
-            e.nullable(input_schema)
+            Ok(else_field.is_nullable())
         } else {
             // CASE produces NULL if there is no `else` expr
             // (aka when none of the `when_then_exprs` match)
             Ok(true)
         }
+    }
+}
+
+impl PhysicalExpr for CaseExpr {
+    /// CASE is not a field rule (its nullability looks at the WHEN
+    /// predicates), so the rule is here. Each THEN/ELSE field is computed once
+    /// and both the type and the nullability are read from it: asking each
+    /// branch for its type and then for its nullability visits a nested CASE
+    /// twice per level (2^depth).
+    fn return_field(&self, input_schema: &Schema) -> Result<FieldRef> {
+        let then_fields = self
+            .body
+            .when_then_expr
+            .iter()
+            .map(|(_, then)| then.return_field(input_schema))
+            .collect::<Result<Vec<_>>>()?;
+        let else_field = self
+            .body
+            .else_expr
+            .as_ref()
+            .map(|e| e.return_field(input_schema))
+            .transpose()?;
+        let data_type = case_type(
+            then_fields.iter().map(|f| Ok(f.data_type().clone())),
+            || else_field.as_ref().map(|f| Ok(f.data_type().clone())),
+        )?;
+        let nullable =
+            self.case_nullable(&then_fields, else_field.as_deref(), input_schema)?;
+        Ok(Arc::new(Field::new("", data_type, nullable)))
     }
 
     fn evaluate(&self, batch: &RecordBatch) -> Result<ColumnarValue> {

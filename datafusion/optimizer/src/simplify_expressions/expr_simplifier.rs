@@ -3179,143 +3179,152 @@ mod tests {
 
     #[test]
     fn test_simplify_composed_bitwise_and() {
-        // ((c2 > 5) & (c1 < 6)) & (c2 > 5) --> (c2 > 5) & (c1 < 6)
+        // Bitwise operators take integers: `nullable()` reads the expression's
+        // output field, which type-checks it, so the operands are well typed
+        // (they were Boolean comparisons, which no bitwise operator accepts).
+        // ((c3 + 5) & (c4 - 6)) & (c3 + 5) --> (c3 + 5) & (c4 - 6)
 
         let expr = bitwise_and(
-            bitwise_and(col("c2").gt(lit(5)), col("c1").lt(lit(6))),
-            col("c2").gt(lit(5)),
+            bitwise_and(col("c3") + lit(5), col("c4") - lit(6)),
+            col("c3") + lit(5),
         );
-        let expected = bitwise_and(col("c2").gt(lit(5)), col("c1").lt(lit(6)));
+        let expected = bitwise_and(col("c3") + lit(5), col("c4") - lit(6));
 
         assert_eq!(simplify(expr), expected);
 
-        // (c2 > 5) & ((c2 > 5) & (c1 < 6)) --> (c2 > 5) & (c1 < 6)
+        // (c3 + 5) & ((c3 + 5) & (c4 - 6)) --> (c3 + 5) & (c4 - 6)
 
         let expr = bitwise_and(
-            col("c2").gt(lit(5)),
-            bitwise_and(col("c2").gt(lit(5)), col("c1").lt(lit(6))),
+            col("c3") + lit(5),
+            bitwise_and(col("c3") + lit(5), col("c4") - lit(6)),
         );
-        let expected = bitwise_and(col("c2").gt(lit(5)), col("c1").lt(lit(6)));
+        let expected = bitwise_and(col("c3") + lit(5), col("c4") - lit(6));
         assert_eq!(simplify(expr), expected);
     }
 
     #[test]
     fn test_simplify_composed_bitwise_or() {
-        // ((c2 > 5) | (c1 < 6)) | (c2 > 5) --> (c2 > 5) | (c1 < 6)
+        // Bitwise operators take integers: `nullable()` reads the expression's
+        // output field, which type-checks it, so the operands are well typed
+        // (they were Boolean comparisons, which no bitwise operator accepts).
+        // ((c3 + 5) | (c4 - 6)) | (c3 + 5) --> (c3 + 5) | (c4 - 6)
 
         let expr = bitwise_or(
-            bitwise_or(col("c2").gt(lit(5)), col("c1").lt(lit(6))),
-            col("c2").gt(lit(5)),
+            bitwise_or(col("c3") + lit(5), col("c4") - lit(6)),
+            col("c3") + lit(5),
         );
-        let expected = bitwise_or(col("c2").gt(lit(5)), col("c1").lt(lit(6)));
+        let expected = bitwise_or(col("c3") + lit(5), col("c4") - lit(6));
 
         assert_eq!(simplify(expr), expected);
 
-        // (c2 > 5) | ((c2 > 5) | (c1 < 6)) --> (c2 > 5) | (c1 < 6)
+        // (c3 + 5) | ((c3 + 5) | (c4 - 6)) --> (c3 + 5) | (c4 - 6)
 
         let expr = bitwise_or(
-            col("c2").gt(lit(5)),
-            bitwise_or(col("c2").gt(lit(5)), col("c1").lt(lit(6))),
+            col("c3") + lit(5),
+            bitwise_or(col("c3") + lit(5), col("c4") - lit(6)),
         );
-        let expected = bitwise_or(col("c2").gt(lit(5)), col("c1").lt(lit(6)));
+        let expected = bitwise_or(col("c3") + lit(5), col("c4") - lit(6));
 
         assert_eq!(simplify(expr), expected);
     }
 
     #[test]
     fn test_simplify_composed_bitwise_xor() {
-        // with an even number of the column "c2"
-        // c2 ^ ((c2 ^ (c2 | c1)) ^ (c1 & c2)) --> (c2 | c1) ^ (c1 & c2)
+        // Bitwise operators take integers: `nullable()` reads the expression's
+        // output field, which type-checks it, so the operands are well typed
+        // (c3_non_null: Int64, c4: UInt32; they were Boolean and Utf8 columns).
+        // with an even number of the column "c3"
+        // c3 ^ ((c3 ^ (c3 | c4)) ^ (c4 & c3)) --> (c3 | c4) ^ (c4 & c3)
 
         let expr = bitwise_xor(
-            col("c2_non_null"),
+            col("c3_non_null"),
             bitwise_xor(
                 bitwise_xor(
-                    col("c2_non_null"),
-                    bitwise_or(col("c2_non_null"), col("c1")),
+                    col("c3_non_null"),
+                    bitwise_or(col("c3_non_null"), col("c4")),
                 ),
-                bitwise_and(col("c1"), col("c2_non_null")),
+                bitwise_and(col("c4"), col("c3_non_null")),
             ),
         );
 
         let expected = bitwise_xor(
-            bitwise_or(col("c2_non_null"), col("c1")),
-            bitwise_and(col("c1"), col("c2_non_null")),
+            bitwise_or(col("c3_non_null"), col("c4")),
+            bitwise_and(col("c4"), col("c3_non_null")),
         );
 
         assert_eq!(simplify(expr), expected);
 
-        // with an odd number of the column "c2"
-        // c2 ^ (c2 ^ (c2 | c1)) ^ ((c1 & c2) ^ c2) --> c2 ^ ((c2 | c1) ^ (c1 & c2))
+        // with an odd number of the column "c3"
+        // c3 ^ (c3 ^ (c3 | c4)) ^ ((c4 & c3) ^ c3) --> c3 ^ ((c3 | c4) ^ (c4 & c3))
 
         let expr = bitwise_xor(
-            col("c2_non_null"),
+            col("c3_non_null"),
             bitwise_xor(
                 bitwise_xor(
-                    col("c2_non_null"),
-                    bitwise_or(col("c2_non_null"), col("c1")),
+                    col("c3_non_null"),
+                    bitwise_or(col("c3_non_null"), col("c4")),
                 ),
                 bitwise_xor(
-                    bitwise_and(col("c1"), col("c2_non_null")),
-                    col("c2_non_null"),
+                    bitwise_and(col("c4"), col("c3_non_null")),
+                    col("c3_non_null"),
                 ),
             ),
         );
 
         let expected = bitwise_xor(
-            col("c2_non_null"),
+            col("c3_non_null"),
             bitwise_xor(
-                bitwise_or(col("c2_non_null"), col("c1")),
-                bitwise_and(col("c1"), col("c2_non_null")),
+                bitwise_or(col("c3_non_null"), col("c4")),
+                bitwise_and(col("c4"), col("c3_non_null")),
             ),
         );
 
         assert_eq!(simplify(expr), expected);
 
-        // with an even number of the column "c2"
-        // ((c2 ^ (c2 | c1)) ^ (c1 & c2)) ^ c2 --> (c2 | c1) ^ (c1 & c2)
+        // with an even number of the column "c3"
+        // ((c3 ^ (c3 | c4)) ^ (c4 & c3)) ^ c3 --> (c3 | c4) ^ (c4 & c3)
 
         let expr = bitwise_xor(
             bitwise_xor(
                 bitwise_xor(
-                    col("c2_non_null"),
-                    bitwise_or(col("c2_non_null"), col("c1")),
+                    col("c3_non_null"),
+                    bitwise_or(col("c3_non_null"), col("c4")),
                 ),
-                bitwise_and(col("c1"), col("c2_non_null")),
+                bitwise_and(col("c4"), col("c3_non_null")),
             ),
-            col("c2_non_null"),
+            col("c3_non_null"),
         );
 
         let expected = bitwise_xor(
-            bitwise_or(col("c2_non_null"), col("c1")),
-            bitwise_and(col("c1"), col("c2_non_null")),
+            bitwise_or(col("c3_non_null"), col("c4")),
+            bitwise_and(col("c4"), col("c3_non_null")),
         );
 
         assert_eq!(simplify(expr), expected);
 
-        // with an odd number of the column "c2"
-        // (c2 ^ (c2 | c1)) ^ ((c1 & c2) ^ c2) ^ c2 --> ((c2 | c1) ^ (c1 & c2)) ^ c2
+        // with an odd number of the column "c3"
+        // (c3 ^ (c3 | c4)) ^ ((c4 & c3) ^ c3) ^ c3 --> ((c3 | c4) ^ (c4 & c3)) ^ c3
 
         let expr = bitwise_xor(
             bitwise_xor(
                 bitwise_xor(
-                    col("c2_non_null"),
-                    bitwise_or(col("c2_non_null"), col("c1")),
+                    col("c3_non_null"),
+                    bitwise_or(col("c3_non_null"), col("c4")),
                 ),
                 bitwise_xor(
-                    bitwise_and(col("c1"), col("c2_non_null")),
-                    col("c2_non_null"),
+                    bitwise_and(col("c4"), col("c3_non_null")),
+                    col("c3_non_null"),
                 ),
             ),
-            col("c2_non_null"),
+            col("c3_non_null"),
         );
 
         let expected = bitwise_xor(
             bitwise_xor(
-                bitwise_or(col("c2_non_null"), col("c1")),
-                bitwise_and(col("c1"), col("c2_non_null")),
+                bitwise_or(col("c3_non_null"), col("c4")),
+                bitwise_and(col("c4"), col("c3_non_null")),
             ),
-            col("c2_non_null"),
+            col("c3_non_null"),
         );
 
         assert_eq!(simplify(expr), expected);
@@ -3363,33 +3372,42 @@ mod tests {
 
     #[test]
     fn test_simplify_bitwise_and_or() {
-        // (c2 < 3) & ((c2 < 3) | c1) -> (c2 < 3)
+        // Bitwise operators take integers: `nullable()` reads the expression's
+        // output field, which type-checks it, so the operands are well typed
+        // (they were Boolean comparisons, which no bitwise operator accepts).
+        // (c3 + 3) & ((c3 + 3) | c4) -> (c3 + 3)
         let expr = bitwise_and(
-            col("c2_non_null").lt(lit(3)),
-            bitwise_or(col("c2_non_null").lt(lit(3)), col("c1_non_null")),
+            col("c3_non_null") + lit(3),
+            bitwise_or(col("c3_non_null") + lit(3), col("c4_non_null")),
         );
-        let expected = col("c2_non_null").lt(lit(3));
+        let expected = col("c3_non_null") + lit(3);
 
         assert_eq!(simplify(expr), expected);
     }
 
     #[test]
     fn test_simplify_bitwise_or_and() {
-        // (c2 < 3) | ((c2 < 3) & c1) -> (c2 < 3)
+        // Bitwise operators take integers: `nullable()` reads the expression's
+        // output field, which type-checks it, so the operands are well typed
+        // (they were Boolean comparisons, which no bitwise operator accepts).
+        // (c3 + 3) | ((c3 + 3) & c4) -> (c3 + 3)
         let expr = bitwise_or(
-            col("c2_non_null").lt(lit(3)),
-            bitwise_and(col("c2_non_null").lt(lit(3)), col("c1_non_null")),
+            col("c3_non_null") + lit(3),
+            bitwise_and(col("c3_non_null") + lit(3), col("c4_non_null")),
         );
-        let expected = col("c2_non_null").lt(lit(3));
+        let expected = col("c3_non_null") + lit(3);
 
         assert_eq!(simplify(expr), expected);
     }
 
     #[test]
     fn test_simplify_simple_bitwise_and() {
-        // (c2 > 5) & (c2 > 5) -> (c2 > 5)
-        let expr = (col("c2").gt(lit(5))).bitand(col("c2").gt(lit(5)));
-        let expected = col("c2").gt(lit(5));
+        // Bitwise operators take integers: `nullable()` reads the expression's
+        // output field, which type-checks it, so the operands are well typed
+        // (they were Boolean comparisons, which no bitwise operator accepts).
+        // (c3 + 5) & (c3 + 5) -> (c3 + 5)
+        let expr = (col("c3") + lit(5)).bitand(col("c3") + lit(5));
+        let expected = col("c3") + lit(5);
 
         assert_eq!(simplify(expr), expected);
     }

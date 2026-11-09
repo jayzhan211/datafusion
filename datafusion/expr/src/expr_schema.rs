@@ -291,7 +291,7 @@ impl ExprSchemable for Expr {
 /// `to_field` did for every child, and which `get_type`/`nullable` paid for
 /// functions.
 #[cfg_attr(feature = "recursive_protection", recursive::recursive)]
-fn output_field(expr: &Expr, schema: &dyn ExprSchema) -> Result<FieldRef> {
+pub(crate) fn output_field(expr: &Expr, schema: &dyn ExprSchema) -> Result<FieldRef> {
     #[expect(deprecated)]
     let field = match expr {
         Expr::Alias(Alias {
@@ -397,11 +397,28 @@ fn output_field(expr: &Expr, schema: &dyn ExprSchema) -> Result<FieldRef> {
         // SKETCH: CASE exists in both layers, but its nullability looks at the
         // WHEN predicates, so it is not a field rule. The physical CaseExpr
         // keeps its own copy ("keep in sync", case.rs).
-        Expr::Case(case) => Arc::new(Field::new(
-            "",
-            case_type(case, schema)?,
-            case_nullable(case, schema)?,
-        )),
+        //
+        // Each THEN/ELSE field is computed once and both the type and the
+        // nullability are read from it: asking each branch for its type and
+        // then for its nullability visits a nested CASE twice per level
+        // (2^depth).
+        Expr::Case(case) => {
+            let then_fields = case
+                .when_then_expr
+                .iter()
+                .map(|(_, then)| output_field(then, schema))
+                .collect::<Result<Vec<_>>>()?;
+            let else_field = case
+                .else_expr
+                .as_ref()
+                .map(|e| output_field(e, schema))
+                .transpose()?;
+            Arc::new(Field::new(
+                "",
+                case_type(&then_fields, else_field.as_deref()),
+                case_nullable(case, &then_fields, else_field.as_deref(), schema)?,
+            ))
+        }
 
         // Logical-only kinds.
         Expr::Between(Between {
@@ -571,90 +588,91 @@ fn output_field(expr: &Expr, schema: &dyn ExprSchema) -> Result<FieldRef> {
     Ok(field)
 }
 
-/// The type of a CASE: the common type of the THEN and ELSE branches.
-fn case_type(case: &Case, schema: &dyn ExprSchema) -> Result<DataType> {
-    let then_types = case
-        .when_then_expr
+/// The type of a CASE: the common type of the THEN and ELSE branches, from
+/// their fields.
+fn case_type(then_fields: &[FieldRef], else_field: Option<&Field>) -> DataType {
+    let then_types = then_fields
         .iter()
-        .map(|(_, expr)| expr.get_type(schema))
-        .collect::<Result<Vec<_>>>()?;
-    let else_type = case
-        .else_expr
-        .as_ref()
-        .map(|expr| expr.get_type(schema))
-        .transpose()?;
+        .map(|field| field.data_type().clone())
+        .collect::<Vec<_>>();
+    let else_type = else_field.map(|field| field.data_type().clone());
     // If the branches have no common type, keep the old provisional
     // type. The analyzer reports the error.
     let common_type =
         get_coerce_type_for_case_expression(&then_types, else_type.as_ref());
-    Ok(common_type.unwrap_or_else(|| {
+    common_type.unwrap_or_else(|| {
         then_types
             .into_iter()
             .find(|t| !t.is_null())
             .or(else_type)
             .unwrap_or(DataType::Null)
-    }))
+    })
 }
 
 /// Whether a CASE may be NULL: a reachable nullable THEN, or a nullable or
-/// missing ELSE.
+/// missing ELSE. `then_fields` and `else_field` are the branches' fields.
 ///
 /// The physical `CaseExpr` keeps a copy of this analysis; keep them in sync.
-fn case_nullable(case: &Case, input_schema: &dyn ExprSchema) -> Result<bool> {
-    let nullable_then = case.when_then_expr.iter().find_map(|(w, t)| {
-        let is_nullable = match t.nullable(input_schema) {
-            Err(e) => return Some(Err(e)),
-            Ok(n) => n,
-        };
+fn case_nullable(
+    case: &Case,
+    then_fields: &[FieldRef],
+    else_field: Option<&Field>,
+    input_schema: &dyn ExprSchema,
+) -> Result<bool> {
+    let nullable_then =
+        case.when_then_expr
+            .iter()
+            .zip(then_fields)
+            .find_map(|((w, t), then_field)| {
+                // Branches with a then expression that is not nullable do not impact the
+                // nullability of the case expression.
+                if !then_field.is_nullable() {
+                    return None;
+                }
 
-        // Branches with a then expression that is not nullable do not impact the
-        // nullability of the case expression.
-        if !is_nullable {
-            return None;
-        }
+                // For case-with-expression assume all 'then' expressions are reachable
+                if case.expr.is_some() {
+                    return Some(Ok(()));
+                }
 
-        // For case-with-expression assume all 'then' expressions are reachable
-        if case.expr.is_some() {
-            return Some(Ok(()));
-        }
+                // For branches with a nullable 'then' expression, try to determine
+                // if the 'then' expression is ever reachable in the situation where
+                // it would evaluate to null.
+                let bounds = match predicate_bounds::evaluate_bounds(
+                    w,
+                    Some(unwrap_certainly_null_expr(t)),
+                    input_schema,
+                ) {
+                    Err(e) => return Some(Err(e)),
+                    Ok(b) => b,
+                };
 
-        // For branches with a nullable 'then' expression, try to determine
-        // if the 'then' expression is ever reachable in the situation where
-        // it would evaluate to null.
-        let bounds = match predicate_bounds::evaluate_bounds(
-            w,
-            Some(unwrap_certainly_null_expr(t)),
-            input_schema,
-        ) {
-            Err(e) => return Some(Err(e)),
-            Ok(b) => b,
-        };
+                let can_be_true =
+                    match bounds.contains_value(ScalarValue::Boolean(Some(true))) {
+                        Err(e) => return Some(Err(e)),
+                        Ok(b) => b,
+                    };
 
-        let can_be_true = match bounds.contains_value(ScalarValue::Boolean(Some(true))) {
-            Err(e) => return Some(Err(e)),
-            Ok(b) => b,
-        };
-
-        if !can_be_true {
-            // If the derived 'when' expression can never evaluate to true, the
-            // 'then' expression is not reachable when it would evaluate to NULL.
-            // The most common pattern for this is `WHEN x IS NOT NULL THEN x`.
-            None
-        } else {
-            // The branch might be taken
-            Some(Ok(()))
-        }
-    });
+                if !can_be_true {
+                    // If the derived 'when' expression can never evaluate to true, the
+                    // 'then' expression is not reachable when it would evaluate to NULL.
+                    // The most common pattern for this is `WHEN x IS NOT NULL THEN x`.
+                    None
+                } else {
+                    // The branch might be taken
+                    Some(Ok(()))
+                }
+            });
 
     if let Some(nullable_then) = nullable_then {
         // There is at least one reachable nullable 'then' expression, so the case
         // expression itself is nullable.
         // Use `Result::map` to propagate the error from `nullable_then` if there is one.
         nullable_then.map(|_| true)
-    } else if let Some(e) = &case.else_expr {
+    } else if let Some(else_field) = else_field {
         // There are no reachable nullable 'then' expressions, so all we still need to
         // check is the 'else' expression's nullability.
-        e.nullable(input_schema)
+        Ok(else_field.is_nullable())
     } else {
         // CASE produces NULL if there is no `else` expr
         // (aka when none of the `when_then_exprs` match)
@@ -1057,9 +1075,11 @@ mod tests {
         let expr = col("foo").in_list(vec![lit(1); 5], false);
         assert!(!expr.nullable(&get_schema(false)).unwrap());
         assert!(expr.nullable(&get_schema(true)).unwrap());
-        // Testing nullable() returns an error.
+        // An error looking up an inspected input is returned. `nullable()`
+        // reads the column's field (`field_from_column`), not
+        // `ExprSchema::nullable`, so the error is injected there.
         assert!(
-            expr.nullable(&get_schema(false).with_error_on_nullable(true))
+            expr.nullable(&get_schema(false).with_error_on_field(true))
                 .is_err()
         );
 
@@ -1215,6 +1235,50 @@ mod tests {
         Ok(())
     }
 
+    /// A CASE reads each THEN/ELSE field once, so the work on nested CASEs
+    /// (from the coalesce -> CASE rewrite, or written by hand) grows with the
+    /// depth, not with 2^depth as when the type and the nullability each
+    /// visited the branches.
+    #[test]
+    fn test_nested_case_reads_each_branch_once() -> Result<()> {
+        #[derive(Debug)]
+        struct CountingSchema {
+            field: FieldRef,
+            lookups: std::cell::Cell<usize>,
+        }
+
+        impl ExprSchema for CountingSchema {
+            fn field_from_column(&self, _col: &Column) -> Result<&FieldRef> {
+                self.lookups.set(self.lookups.get() + 1);
+                Ok(&self.field)
+            }
+        }
+
+        let schema = CountingSchema {
+            field: Arc::new(Field::new("c", DataType::Int32, true)),
+            lookups: std::cell::Cell::new(0),
+        };
+        // Nested in the ELSE and in the THEN (and in a WHEN through IS NULL),
+        // alternately.
+        let depth = 24;
+        let mut expr = col("c");
+        for i in 0..depth {
+            let when_expr = col("c").eq(lit(i));
+            expr = match i % 3 {
+                0 => when(when_expr, col("c")).otherwise(expr)?,
+                1 => when(when_expr, expr).otherwise(col("c"))?,
+                _ => when(expr.is_null(), col("c")).otherwise(lit(i))?,
+            };
+        }
+
+        let field = expr.to_field(&schema)?.1;
+        assert_eq!(field.data_type(), &DataType::Int32);
+        assert!(field.is_nullable());
+        let lookups = schema.lookups.get();
+        assert!(lookups <= 10 * depth as usize, "{lookups} column lookups");
+        Ok(())
+    }
+
     #[test]
     fn test_expr_placeholder() {
         let schema = MockExprSchema::new();
@@ -1284,14 +1348,14 @@ mod tests {
     #[derive(Debug)]
     struct MockExprSchema {
         field: FieldRef,
-        error_on_nullable: bool,
+        error_on_field: bool,
     }
 
     impl MockExprSchema {
         fn new() -> Self {
             Self {
                 field: Arc::new(Field::new("mock_field", DataType::Null, false)),
-                error_on_nullable: false,
+                error_on_field: false,
             }
         }
 
@@ -1305,8 +1369,8 @@ mod tests {
             self
         }
 
-        fn with_error_on_nullable(mut self, error_on_nullable: bool) -> Self {
-            self.error_on_nullable = error_on_nullable;
+        fn with_error_on_field(mut self, error_on_field: bool) -> Self {
+            self.error_on_field = error_on_field;
             self
         }
 
@@ -1318,12 +1382,8 @@ mod tests {
     }
 
     impl ExprSchema for MockExprSchema {
-        fn nullable(&self, _col: &Column) -> Result<bool> {
-            assert_or_internal_err!(!self.error_on_nullable, "nullable error");
-            Ok(self.field.is_nullable())
-        }
-
         fn field_from_column(&self, _col: &Column) -> Result<&FieldRef> {
+            assert_or_internal_err!(!self.error_on_field, "field lookup error");
             Ok(&self.field)
         }
     }

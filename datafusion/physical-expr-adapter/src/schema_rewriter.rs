@@ -757,6 +757,9 @@ impl DefaultPhysicalExprAdapterRewriter {
 
         // We need a cast expression whenever the logical and physical fields differ,
         // whether that difference is only metadata/nullability or also data type.
+        // The cast's output field has the logical type and metadata; it is
+        // nullable if the file column or the logical field is (a NOT NULL
+        // logical field does not make the file's NULLs go away).
         // TODO: add optimization to move the cast from the column to literal expressions in the case of `col = 123`
         // since that's much cheaper to evaluate.
         // See https://github.com/apache/datafusion/issues/15780#issuecomment-2824716928
@@ -1036,10 +1039,12 @@ mod tests {
 
         let result = adapter.rewrite(Arc::new(Column::new("a", 0)))?;
 
-        // Ensure the expression preserves the logical field nullability/metadata.
+        // The cast carries the logical field's metadata. Its output is nullable
+        // because the file column is (source OR target, field_rules::cast): a
+        // NOT NULL logical field does not make the file's NULLs go away.
         let return_field = result.return_field(physical_schema.as_ref())?;
         assert_eq!(return_field.data_type(), &DataType::Int64);
-        assert!(!return_field.is_nullable());
+        assert!(return_field.is_nullable());
         assert_eq!(
             return_field
                 .metadata()

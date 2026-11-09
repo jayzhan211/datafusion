@@ -391,7 +391,7 @@ mod proto_tests {
     use crate::proto_test_util::{
         StubDecoder, StubEncoder, UnreachableDecoder, column_node,
     };
-    use arrow::datatypes::Field;
+    use arrow::datatypes::{DataType, Field};
     use datafusion_common::DataFusionError;
     use datafusion_physical_expr_common::physical_expr::proto_decode::PhysicalExprDecodeCtx;
     use datafusion_physical_expr_common::physical_expr::proto_encode::PhysicalExprEncodeCtx;

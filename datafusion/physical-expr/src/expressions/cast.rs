@@ -1593,8 +1593,9 @@ mod tests {
             // Field name comes from source
             assert_eq!(field.name(), "a");
             assert_eq!(field.data_type(), &Int64);
-            // Nullability comes from target
-            assert_eq!(field.is_nullable(), target_nullable);
+            // Nullable if the source or the target is (field_rules::cast), as
+            // `nullable()` already said: a NOT NULL target does not make NULLs go away.
+            assert_eq!(field.is_nullable(), child_nullable || target_nullable);
             // Target metadata should be preserved exactly
             assert_eq!(
                 field.metadata().get("target_meta"),
@@ -2775,7 +2776,9 @@ mod proto_tests {
         assert_eq!(decoded.target_field(), &target);
         assert_eq!(decoded.target_metadata(), Some(target.metadata()));
         assert_eq!(decoded.target_nullable(), Some(false));
-        assert!(!decoded.return_field(&schema).unwrap().is_nullable());
+        // The NOT NULL target survives the round trip; the output is still
+        // nullable because the source `a` is (source OR target, field_rules::cast).
+        assert!(decoded.return_field(&schema).unwrap().is_nullable());
     }
 
     #[test]

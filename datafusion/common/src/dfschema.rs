@@ -1371,11 +1371,19 @@ impl Display for DFSchema {
 /// widely used in the DataFusion codebase.
 pub trait ExprSchema: std::fmt::Debug {
     /// Is this column reference nullable?
+    ///
+    /// The type, nullability and metadata of an `Expr` (`ExprSchemable`'s
+    /// `to_field`, `get_type`, `nullable`, `metadata`) read a column through
+    /// [`Self::field_from_column`] only, not through this method: overriding
+    /// it does not change what an `Expr` reports.
     fn nullable(&self, col: &Column) -> Result<bool> {
         Ok(self.field_from_column(col)?.is_nullable())
     }
 
     /// What is the datatype of this column?
+    ///
+    /// Like [`Self::nullable`], not read by `ExprSchemable`, which reads
+    /// [`Self::field_from_column`] only.
     fn data_type(&self, col: &Column) -> Result<&DataType> {
         Ok(self.field_from_column(col)?.data_type())
     }

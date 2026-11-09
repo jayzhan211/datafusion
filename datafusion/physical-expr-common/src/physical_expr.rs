@@ -63,22 +63,31 @@ pub type PhysicalExprRef = Arc<dyn PhysicalExpr>;
 pub trait PhysicalExpr: Any + Send + Sync + Display + Debug + DynEq + DynHash {
     /// The data type of [`Self::return_field`].
     ///
-    /// Do not override: implement [`Self::return_field`], so that the type,
-    /// the nullability and the field cannot disagree.
+    /// Implementations must not override this method: implement
+    /// [`Self::return_field`], so that the type, the nullability and the field
+    /// cannot disagree.
+    ///
+    /// `return_field` must not call `self.data_type()` or `self.nullable()`:
+    /// both read `return_field`, so it would call itself forever. Migrating an
+    /// implementation that wrote `data_type` and `nullable` is one line: move
+    /// their bodies into `return_field` as
+    /// `Ok(Arc::new(Field::new("", <data_type body>, <nullable body>)))`
+    /// and delete the two methods.
     ///
     /// SKETCH: Rust cannot forbid overriding a provided method, and a
     /// `#[deprecated]` here would warn at every caller, not at overriders.
     /// Column, Literal, ScalarFunctionExpr, AsyncFuncExpr, LambdaVariable,
     /// SqlSimilarToPattern and the FFI wrapper still override it (consistently
-    /// with their `return_field`); CaseExpr and DynamicFilterPhysicalExpr still
-    /// derive their `return_field` from it.
+    /// with their `return_field`); DynamicFilterPhysicalExpr still derives its
+    /// `return_field` from its own overrides.
     fn data_type(&self, input_schema: &Schema) -> Result<DataType> {
         Ok(self.return_field(input_schema)?.data_type().to_owned())
     }
     /// Whether [`Self::return_field`] is nullable.
     ///
-    /// Do not override: implement [`Self::return_field`] (see
-    /// [`Self::data_type`]).
+    /// Implementations must not override this method, and `return_field` must
+    /// not call it (it would call itself forever); see [`Self::data_type`]
+    /// for the one-line migration.
     fn nullable(&self, input_schema: &Schema) -> Result<bool> {
         Ok(self.return_field(input_schema)?.is_nullable())
     }
@@ -88,14 +97,22 @@ pub trait PhysicalExpr: Any + Send + Sync + Display + Debug + DynEq + DynHash {
     /// its data type, nullability and metadata.
     ///
     /// This is the one field method an implementation writes; `data_type`
-    /// and `nullable` read it. An expression kind that also exists as a
-    /// logical `Expr` computes it with the same rule as the logical layer, from
+    /// and `nullable` read it, so it must not call `self.data_type()` or
+    /// `self.nullable()` (see [`Self::data_type`]). Compute each child's field
+    /// once and read its type and nullability from it: asking a child for
+    /// each separately visits a nested tree once per question at every level.
+    /// An expression kind that also exists as a logical `Expr` computes it
+    /// with the same rule as the logical layer, from
     /// `datafusion_expr_common::field_rules`.
     ///
     /// The name is informational: operators name their output columns
     /// themselves (`ProjectionExec` with its alias). An expression that makes
     /// a new value returns an empty name, so that `data_type()` on a deep tree
-    /// does not format every subtree.
+    /// does not format every subtree. A caller that needs a column name for
+    /// an expression uses its alias, or its `Display`
+    /// ([`ProjectionExpr::new_from_expression`] does).
+    ///
+    /// [`ProjectionExpr::new_from_expression`]: https://docs.rs/datafusion/latest/datafusion/physical_expr/projection/struct.ProjectionExpr.html#method.new_from_expression
     ///
     /// Before, `return_field` defaulted to a field built from `data_type` and
     /// `nullable`, which defaulted to reading `return_field`: an implementation

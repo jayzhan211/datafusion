@@ -81,16 +81,24 @@ impl ProjectionExpr {
         Self { expr, alias }
     }
 
-    /// Create a new projection expression from an expression and a schema using the expression's output field name as alias.
+    /// Create a new projection expression from an expression and a schema.
+    ///
+    /// The alias is the name of the expression's output field when it has
+    /// one (a column keeps its name, a cast of a column too), otherwise the
+    /// expression's `Display` (`a@0 + b@1`). An expression that makes a new
+    /// value returns a field with an empty name, see
+    /// [`PhysicalExpr::return_field`].
     pub fn new_from_expression(
         expr: Arc<dyn PhysicalExpr>,
         schema: &Schema,
     ) -> Result<Self> {
         let field = expr.return_field(schema)?;
-        Ok(Self {
-            expr,
-            alias: field.name().to_string(),
-        })
+        let alias = if field.name().is_empty() {
+            expr.to_string()
+        } else {
+            field.name().to_string()
+        };
+        Ok(Self { expr, alias })
     }
 }
 
@@ -1514,6 +1522,27 @@ pub(crate) mod tests {
     use datafusion_common::config::ConfigOptions;
     use datafusion_expr::{Operator, ScalarUDF};
     use insta::assert_snapshot;
+
+    /// A column keeps its name; an expression that makes a new value (whose
+    /// field has no name) is named after its `Display`.
+    #[test]
+    fn new_from_expression_alias() -> Result<()> {
+        let schema = Schema::new(vec![
+            Field::new("a", DataType::Int32, true),
+            Field::new("b", DataType::Int32, true),
+        ]);
+        let column = ProjectionExpr::new_from_expression(col("a", &schema)?, &schema)?;
+        assert_eq!(column.alias, "a");
+
+        let sum = Arc::new(BinaryExpr::new(
+            col("a", &schema)?,
+            Operator::Plus,
+            col("b", &schema)?,
+        ));
+        let sum = ProjectionExpr::new_from_expression(sum, &schema)?;
+        assert_eq!(sum.alias, "a@0 + b@1");
+        Ok(())
+    }
 
     pub(crate) fn output_schema(
         mapping: &ProjectionMapping,
