@@ -533,6 +533,10 @@ impl<'a> TypeCoercionRewriter<'a> {
                 &left_type,
                 &right_type,
             )?
+        } else if left_data_type == left_type {
+            // `cast_to` would compute `left`'s type again (a visit of the whole
+            // subtree) only to return `left` unchanged.
+            left
         } else {
             left.cast_to(&left_type, left_schema)?
         };
@@ -545,6 +549,8 @@ impl<'a> TypeCoercionRewriter<'a> {
                 &right_type,
                 &left_type,
             )?
+        } else if right_data_type == right_type {
+            right
         } else {
             right.cast_to(&right_type, right_schema)?
         };
