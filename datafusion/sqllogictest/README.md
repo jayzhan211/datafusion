@@ -127,6 +127,19 @@ RUST_LOG=datafusion_execution::memory_pool=info cargo test --test sqllogictests 
 cargo test --test sqllogictests -- --memory-drift false
 ```
 
+## Running with every hash join spilling
+
+`SLT_HASH_JOIN_SPILL_BUDGET=<bytes>` turns on
+`datafusion.execution.enable_hash_join_spilling` and makes every hash join
+build side overflow its memory reservation, so each join that can spill does,
+joining its spilled pieces within that many bytes. Results must not change;
+`EXPLAIN ANALYZE` output gains spill metrics, and a row order that no
+`ORDER BY` fixes may differ.
+
+```shell
+SLT_HASH_JOIN_SPILL_BUDGET=16384 cargo test --test sqllogictests
+```
+
 ## Cookbook: Adding Tests
 
 1. Add queries

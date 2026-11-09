@@ -1846,6 +1846,7 @@ impl ExecutionPlan for HashJoinExec {
                 let build = self.left_fut.try_once(|| {
                     let left_stream = self.left.execute(0, Arc::clone(&context))?;
                     let reservation = MemoryConsumer::new("HashJoinInput")
+                        .with_can_spill(true)
                         .register(context.memory_pool());
                     let build = collect(left_stream, reservation, right_partitions);
                     Ok(collect_left_build(
@@ -1864,6 +1865,7 @@ impl ExecutionPlan for HashJoinExec {
             }
             let left_stream = self.left.execute(partition, Arc::clone(&context))?;
             let reservation = MemoryConsumer::new(format!("HashJoinInput[{partition}]"))
+                .with_can_spill(true)
                 .register(context.memory_pool());
             let build = collect(left_stream, reservation, 1);
             let right = self.right.execute(partition, Arc::clone(&context))?;

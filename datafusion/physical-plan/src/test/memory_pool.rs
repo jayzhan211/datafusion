@@ -12,13 +12,14 @@ use datafusion_execution::memory_pool::{
 };
 use parking_lot::Mutex;
 
-/// A pool that refuses each consumer whose name starts with a capped prefix
-/// more than that cap, and grants everything else.
+/// A pool that refuses each consumer that can spill and whose name starts
+/// with a capped prefix more than that cap, and grants everything else.
 ///
 /// Spilling operators spill when the pool refuses them, so this makes one
-/// operator spill at a chosen size without starving the rest of the plan.
-/// A hash join, for example, spills its build side past the cap on
-/// `HashJoinInput` and joins its spilled pieces within the cap on
+/// operator spill at a chosen size without starving the rest of the plan; a
+/// consumer that cannot spill would only fail, so it is never refused. A
+/// hash join that can spill, for example, spills its build side past the cap
+/// on `HashJoinInput` and joins its spilled pieces within the cap on
 /// `HashJoinSpill`.
 #[derive(Debug, Default)]
 pub struct CappedConsumerPool {
@@ -40,6 +41,9 @@ impl CappedConsumerPool {
     }
 
     fn cap(&self, consumer: &MemoryConsumer) -> Option<usize> {
+        if !consumer.can_spill() {
+            return None;
+        }
         self.caps
             .iter()
             .find(|(prefix, _)| consumer.name().starts_with(prefix.as_str()))

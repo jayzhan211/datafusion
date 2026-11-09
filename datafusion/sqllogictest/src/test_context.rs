@@ -50,13 +50,14 @@ use range_partitioning::{
 use async_trait::async_trait;
 use datafusion::common::cast::as_float64_array;
 use datafusion::execution::SessionStateBuilder;
-use datafusion::execution::memory_pool::UnboundedMemoryPool;
+use datafusion::execution::memory_pool::{MemoryPool, UnboundedMemoryPool};
 use datafusion::execution::runtime_env::RuntimeEnvBuilder;
 use datafusion::physical_plan::joins::HashJoinExec;
 use datafusion::physical_plan::operator_statistics::{
     ClosureStatisticsProvider, StatisticsRegistry, StatisticsResult,
 };
 use datafusion::physical_plan::statistics::StatisticsArgs;
+use datafusion::physical_plan::test::memory_pool::CappedConsumerPool;
 use log::info;
 use tempfile::TempDir;
 
@@ -87,6 +88,7 @@ impl TestContext {
     /// enabled), the file should be skipped
     pub async fn try_new_for_test_file(relative_path: &Path) -> Option<Self> {
         let file_name = relative_path.file_name().unwrap().to_str().unwrap();
+        let hash_join_spill_budget = hash_join_spill_budget();
         let config = SessionConfig::new()
             // hardcode target partitions so plans are deterministic
             .with_target_partitions(4)
@@ -95,11 +97,21 @@ impl TestContext {
             // as `scan_efficiency_ratio` in EXPLAIN ANALYZE output) whenever
             // the version string length changes. Pin it so test output is
             // independent of the version.
-            .set_str("datafusion.execution.parquet.created_by", "datafusion");
-        let pool = crate::memory_drift::wrap_pool(
-            Arc::new(UnboundedMemoryPool::default()),
-            &relative_path.display().to_string(),
-        );
+            .set_str("datafusion.execution.parquet.created_by", "datafusion")
+            .set_bool(
+                "datafusion.execution.enable_hash_join_spilling",
+                hash_join_spill_budget.is_some(),
+            );
+        let pool: Arc<dyn MemoryPool> = match hash_join_spill_budget {
+            Some(budget) => Arc::new(
+                CappedConsumerPool::new()
+                    .with_cap("HashJoinInput", 1)
+                    .with_cap("HashJoinSpill", budget),
+            ),
+            None => Arc::new(UnboundedMemoryPool::default()),
+        };
+        let pool =
+            crate::memory_drift::wrap_pool(pool, &relative_path.display().to_string());
         let runtime = RuntimeEnvBuilder::new()
             .with_memory_pool(pool)
             .build_arc()
@@ -944,6 +956,15 @@ fn register_conflicting_metadata_tables(ctx: &SessionContext) {
     let batch_right =
         RecordBatch::try_new(Arc::new(schema_right), vec![Arc::new(data_right)]).unwrap();
     ctx.register_batch("smaller_table", batch_right).unwrap();
+}
+
+/// `SLT_HASH_JOIN_SPILL_BUDGET=<bytes>`: every hash join build side overflows
+/// its reservation and spills, joining its spilled pieces within that many
+/// bytes, so the suite checks that spilling joins answer as in memory
+fn hash_join_spill_budget() -> Option<usize> {
+    std::env::var("SLT_HASH_JOIN_SPILL_BUDGET")
+        .ok()
+        .and_then(|budget| budget.parse().ok())
 }
 
 #[cfg(test)]

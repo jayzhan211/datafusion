@@ -401,6 +401,12 @@ async fn split_build(
         reservation,
     } = overflow;
     let kept = Arc::new(KeptMemory::take_over(ctx, reservation));
+    // The handle shared by the probe streams holds no rows itself. Built
+    // first, so that the kept buckets below are sized around it rather than it
+    // asking for memory once they fill what is kept
+    let handle =
+        ctx.build
+            .build(&mut vec![], &mut kept.buffers.new_empty(), probe_streams)?;
 
     // The collected batches are covered by the reservation taken over: release
     // each one's share once its rows are copied into the buckets.
@@ -490,10 +496,6 @@ async fn split_build(
     for (bucket, _) in &spilled {
         buckets[*bucket] = true;
     }
-    // The handle shared by the probe streams holds no rows itself
-    let handle =
-        ctx.build
-            .build(&mut vec![], &mut kept.buffers.new_empty(), probe_streams)?;
     Ok(handle.with_spilled(Arc::new(SpilledBuild {
         resident: Mutex::new(Some(Arc::new(left_data))),
         kept: Mutex::new(Some(kept)),
