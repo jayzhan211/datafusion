@@ -28,6 +28,7 @@ use datafusion::physical_plan::joins::{
     SortMergeJoinExec,
 };
 use datafusion::physical_plan::sorts::sort::SortExec;
+use datafusion::physical_plan::test::memory_pool::CappedConsumerPool;
 use datafusion::physical_plan::{ExecutionPlan, ExecutionPlanProperties, common};
 use datafusion::prelude::{SessionConfig, SessionContext};
 use datafusion_common::{NullEquality, ScalarValue};
@@ -43,6 +44,26 @@ use itertools::Itertools;
 use rand::Rng;
 use rand::{SeedableRng, rngs::StdRng};
 use test_utils::stagger_batch_with_seed;
+
+/// What a spilling hash join may hold for joining its spilled pieces: a small
+/// budget splits deep and reaches the fallbacks for pieces that cannot shrink,
+/// a larger one keeps some buckets in memory
+const HJ_SPILL_BUDGETS: &[usize] = &[4 * 1024, 64 * 1024];
+
+/// A context in which every hash join build side overflows its reservation,
+/// so the join spills, and joins its spilled pieces within `spill_budget`
+fn spilling_task_ctx(batch_size: usize, spill_budget: usize) -> Arc<TaskContext> {
+    let pool = CappedConsumerPool::new()
+        .with_cap("HashJoinInput", 1)
+        .with_cap("HashJoinSpill", spill_budget);
+    let runtime = RuntimeEnvBuilder::new()
+        .with_memory_pool(Arc::new(pool))
+        .build_arc()
+        .unwrap();
+    let mut config = SessionConfig::new().with_batch_size(batch_size);
+    config.options_mut().execution.enable_hash_join_spilling = true;
+    SessionContext::new_with_config_rt(config, runtime).task_ctx()
+}
 
 // Determines what Fuzz tests needs to run
 // Ideally all tests should match, but in reality some tests
@@ -1055,6 +1076,32 @@ impl JoinFuzzTestCase {
             let mut hj_formatted_sorted: Vec<&str> =
                 hj_formatted.trim().lines().collect();
             hj_formatted_sorted.sort_unstable();
+
+            // The same hash join when its build side does not fit: it must spill
+            // and still return the same rows
+            for spill_budget in HJ_SPILL_BUDGETS {
+                let hj = self.hash_join();
+                let ctx = spilling_task_ctx(*batch_size, *spill_budget);
+                let spilled = collect(Arc::clone(&hj) as Arc<dyn ExecutionPlan>, ctx)
+                    .await
+                    .unwrap();
+                let spilled_formatted =
+                    pretty_format_batches(&spilled).unwrap().to_string();
+                let mut spilled_sorted: Vec<&str> =
+                    spilled_formatted.trim().lines().collect();
+                spilled_sorted.sort_unstable();
+                assert_eq!(
+                    spilled_sorted, hj_formatted_sorted,
+                    "HashJoinExec spilling within {spill_budget} bytes and in memory produced different results, batch_size: {batch_size}"
+                );
+                // With the smallest budget the pieces cannot all stay in memory
+                if *spill_budget == HJ_SPILL_BUDGETS[0]
+                    && self.input1.iter().map(|b| b.num_rows()).sum::<usize>() > 100
+                {
+                    let spills = hj.metrics().and_then(|m| m.spill_count()).unwrap_or(0);
+                    assert!(spills > 0, "the build side must spill to disk");
+                }
+            }
 
             if debug
                 && ((join_tests.contains(&NljHj) && nlj_rows != hj_rows)

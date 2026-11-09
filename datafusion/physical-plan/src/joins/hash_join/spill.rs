@@ -36,6 +36,7 @@
 //! the spilled pairs runs on that kept memory, so it does not ask the pool for
 //! more at a point where it could no longer react by spilling.
 
+use std::collections::VecDeque;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Weak};
@@ -50,9 +51,7 @@ use datafusion_common::hash_utils::{RandomState, create_hashes};
 use datafusion_common::utils::memory::{
     RecordBatchMemoryCounter, get_record_batch_memory_size,
 };
-use datafusion_common::{
-    JoinSide, JoinType, NullEquality, Result, internal_err, resources_err,
-};
+use datafusion_common::{JoinSide, JoinType, NullEquality, Result, internal_err};
 use datafusion_execution::SpillFile;
 use datafusion_execution::memory_pool::{
     MemoryConsumer, MemoryPool, MemoryReservation, MergeMemoryPool,
@@ -64,8 +63,8 @@ use futures::{FutureExt, Stream, StreamExt, TryStreamExt, ready, stream};
 use parking_lot::Mutex;
 
 use super::exec::{
-    BuildOutcome, BuildOverflow, BuildParams, JoinLeftData, SpillTrigger,
-    build_table_bytes, is_resources_exhausted,
+    BuildOutcome, BuildOverflow, BuildParams, JoinLeftData, build_table_bytes,
+    is_resources_exhausted,
 };
 use super::not_in::{NotIn, NotInScope};
 use super::shared_bounds::SharedBuildAccumulator;
@@ -76,6 +75,7 @@ use crate::joins::PartitionMode;
 use crate::joins::utils::{
     BuildProbeJoinMetrics, ColumnIndex, JoinFilter, OnceFut, need_produce_result_in_final,
 };
+use crate::metrics::{Count, ExecutionPlanMetricsSet, MetricBuilder};
 use crate::spill::in_progress_spill_file::InProgressSpillFile;
 use crate::spill::spill_manager::SpillManager;
 use crate::stream::RecordBatchStreamAdapter;
@@ -153,9 +153,31 @@ pub(super) struct SpillContext {
     pub(super) build_spill: SpillManager,
     pub(super) probe_spill: SpillManager,
     pub(super) pool: Arc<dyn MemoryPool>,
-    pub(super) trigger: SpillTrigger,
+    pub(super) pairs: SpilledPairMetrics,
     pub(super) fetch: Option<usize>,
     pub(super) right_side_ordered: bool,
+}
+
+/// How the spilled pairs of a partition were joined, beyond the spill counts
+#[derive(Clone, Debug)]
+pub(super) struct SpilledPairMetrics {
+    /// Pairs split again because they did not fit the kept memory
+    resplit: Count,
+    /// Pairs that splitting cannot shrink, joined with their probe rows hashed
+    reversed: Count,
+    /// Pairs that splitting cannot shrink, joined a chunk at a time
+    chunked: Count,
+}
+
+impl SpilledPairMetrics {
+    pub(super) fn new(metrics: &ExecutionPlanMetricsSet, partition: usize) -> Self {
+        let counter = |name| MetricBuilder::new(metrics).counter(name, partition);
+        Self {
+            resplit: counter("spilled_pairs_resplit"),
+            reversed: counter("spilled_pairs_reversed"),
+            chunked: counter("spilled_pairs_chunked"),
+        }
+    }
 }
 
 impl SpillContext {
@@ -451,7 +473,7 @@ async fn split_build(
             }
             ctx.build
                 .build(&mut vec![], &mut kept.buffers.new_empty(), probe_streams)
-                .map_err(|e| e.context("PoC: empty resident build"))?
+                .map_err(|e| e.context("an empty kept build side"))?
         }
         Err(e) => return Err(e),
     };
@@ -642,7 +664,6 @@ struct KeptMemory {
     pool: Arc<MergeMemoryPool>,
     /// The bucket buffers while collecting the build side
     buffers: MemoryReservation,
-    trigger: SpillTrigger,
     /// What joining one spilled pair may use, set once the build side is split
     for_spilled_pairs: AtomicUsize,
 }
@@ -671,28 +692,19 @@ impl KeptMemory {
         drop(held);
         // Another consumer may take the bytes just released first; the rows are
         // then re-accounted as they are copied into buckets
-        let granted = buffers.try_grow(bytes).is_ok();
-        if std::env::var_os("DF_HJ_RUNG_LOG").is_some() {
-            eprintln!(
-                "HJ_KEEP take_over partition={partition} held={bytes} granted={granted}"
-            );
-        }
+        let _ = buffers.try_grow(bytes);
         pool.retain(pool.reserved());
         Self {
             pool,
             buffers,
-            trigger: ctx.trigger,
             for_spilled_pairs: AtomicUsize::new(0),
         }
     }
 
     /// Grows `reservation`, a child of the kept pool, while the build side is
-    /// split, unless the execution pool or the test knob refuses. What it gets
-    /// is kept until the spilled pairs are joined.
+    /// split, unless the execution pool refuses. What it gets is kept until
+    /// the spilled pairs are joined.
     fn try_grow(&self, reservation: &MemoryReservation, bytes: usize) -> bool {
-        if self.trigger.refuses(reservation.size(), bytes) {
-            return false;
-        }
         let granted = reservation.try_grow(bytes).is_ok();
         if granted {
             self.pool.retain(self.pool.reserved());
@@ -706,15 +718,9 @@ impl KeptMemory {
     /// more would only starve other operators.
     fn keep_for_spilled_pairs(&self, pairs: impl Iterator<Item = usize>) {
         let held = self.pool.reserved();
-        let mut largest = 0;
         let bytes = pairs
             .map(|pair| {
-                largest = largest.max(pair);
                 let mut piece = pair;
-                // PoC: DF_HJ_KEEP=all keeps everything held, up to the largest pair
-                if std::env::var("DF_HJ_KEEP").is_ok_and(|v| v == "all") {
-                    return pair;
-                }
                 while piece > held && piece >= BUCKETS {
                     piece = piece.div_ceil(BUCKETS);
                 }
@@ -722,12 +728,6 @@ impl KeptMemory {
             })
             .max()
             .unwrap_or(0);
-        if std::env::var_os("DF_HJ_RUNG_LOG").is_some() {
-            eprintln!(
-                "HJ_KEEP for_spilled_pairs largest={largest} reserved={held} keep={}",
-                bytes.min(held)
-            );
-        }
         let bytes = bytes.min(held);
         self.pool.retain(bytes);
         self.for_spilled_pairs.store(bytes, Ordering::Relaxed);
@@ -739,7 +739,7 @@ impl KeptMemory {
     /// holding almost nothing: splitting would only write more files.
     fn grow_toward(&self, want: usize, useful: usize) {
         let have = self.capacity();
-        if self.trigger.cap.is_some() || want <= have {
+        if want <= have {
             return;
         }
         let probe = self.buffers.new_empty();
@@ -749,9 +749,6 @@ impl KeptMemory {
                 let kept = have + more;
                 self.pool.retain(kept.min(self.pool.reserved()));
                 self.for_spilled_pairs.store(kept, Ordering::Relaxed);
-                if std::env::var_os("DF_HJ_RUNG_LOG").is_some() {
-                    eprintln!("HJ_KEEP grow from={have} to={kept}");
-                }
                 return;
             }
             more /= 2;
@@ -760,9 +757,7 @@ impl KeptMemory {
 
     /// What joining one spilled pair may use without asking the execution pool
     fn capacity(&self) -> usize {
-        self.trigger
-            .cap
-            .unwrap_or_else(|| self.for_spilled_pairs.load(Ordering::Relaxed))
+        self.for_spilled_pairs.load(Ordering::Relaxed)
     }
 }
 
@@ -1059,17 +1054,11 @@ fn join_pair(
             // first split: the whole pair would starve other operators
             kept.grow_toward(need.div_ceil(BUCKETS).max(smallest_piece), smallest_piece);
         }
-        // (The test knob keeps splitting, so forced runs still reach the rungs)
-        let splits_cannot_fit = kept.trigger.cap.is_none() && smallest_piece > kept.capacity();
+        let splits_cannot_fit = smallest_piece > kept.capacity();
         let fits = need <= kept.capacity();
         if build.rows == 0 || fits || level >= MAX_LEVEL || splits_cannot_fit || !can_split
         {
-            let forced = if level >= MAX_LEVEL { forced_rung() } else { None };
-            let joined = match forced {
-                Some(_) => resources_err!("PoC: DF_HJ_RUNG skips the in-memory join"),
-                None => join_in_memory(&ctx, &kept, &build, &probe, facts.as_deref()).await,
-            };
-            match joined {
+            match join_in_memory(&ctx, &kept, &build, &probe, facts.as_deref()).await {
                 Ok(stream) => return Ok(stream),
                 // The estimate fell short: split further rather than fail
                 Err(e)
@@ -1082,24 +1071,23 @@ fn join_pair(
                 // probe rows instead if they fit, else hash it a chunk at a time
                 Err(e) if is_resources_exhausted(&e) => {
                     let reversed = !ctx.judges_build_rows()
-                        && match forced.as_deref() {
-                            Some(rung) => rung == "reversed",
-                            None => join_bytes(probe.rows, probe.bytes) <= kept.capacity(),
-                        };
+                        && join_bytes(probe.rows, probe.bytes) <= kept.capacity();
                     if reversed {
-                        rung_log("reversed", level, &build, &probe);
                         match join_reversed(&ctx, &kept, &build, &probe).await {
-                            Ok(stream) => return Ok(stream),
+                            Ok(stream) => {
+                                ctx.pairs.reversed.add(1);
+                                return Ok(stream);
+                            }
                             Err(e) if is_resources_exhausted(&e) => {}
                             Err(e) => return Err(e),
                         }
                     }
-                    rung_log("chunked", level, &build, &probe);
+                    ctx.pairs.chunked.add(1);
                     return Ok(join_chunked(&ctx, &kept, &build, &probe, facts.as_ref()));
                 }
                 Err(e) => {
                     return Err(e.context(format!(
-                        "PoC: joining a spilled pair at level {level}: {} build rows, {} bytes, capacity {}",
+                        "Joining a spilled hash join bucket pair at level {level}: {} build rows, {} bytes, capacity {}",
                         build.rows,
                         build.bytes,
                         kept.capacity()
@@ -1108,6 +1096,7 @@ fn join_pair(
             }
         }
 
+        ctx.pairs.resplit.add(1);
         let level = level + 1;
         let batch_size = ctx.stream.batch_size;
         let builds =
@@ -1242,13 +1231,9 @@ async fn hash_side(
     let mut batches = vec![];
     let mut rows = read_side(spill, side)?;
     while let Some(batch) = rows.try_next().await? {
-        // Within the kept memory unless the pair cannot be split further,
-        // which then needs the pool to grant the rest
-        let size = get_record_batch_memory_size(&batch);
-        if forced_rung().is_none() && kept.trigger.refuses(reservation.size(), size) {
-            return resources_err!("PoC: test knob refused reloading a spilled side");
-        }
-        reservation.try_grow(size)?;
+        // From the kept memory, or from the pool for a pair that cannot be
+        // split further
+        reservation.try_grow(get_record_batch_memory_size(&batch))?;
         batches.push(batch);
     }
     params.build(&mut batches, &mut reservation, 1)
@@ -1382,8 +1367,14 @@ fn chunks(
         .div_ceil(hashed.rows.max(1))
         .max(1);
     let chunk_rows = (kept.capacity() / per_row).max(1);
-    let state = (None::<SendableRecordBatchStream>, None::<RecordBatch>);
-    let joins = stream::try_unfold(state, move |(rows, pending)| {
+    // The rows not joined yet, the rows read but not joined yet (front first),
+    // and the rows a chunk takes
+    let state = (
+        None::<SendableRecordBatchStream>,
+        VecDeque::<RecordBatch>::new(),
+        chunk_rows,
+    );
+    let joins = stream::try_unfold(state, move |(rows, mut pending, mut chunk_rows)| {
         let (ctx, kept) = (Arc::clone(&ctx), Arc::clone(&kept));
         let (params, stream) = (params.clone(), stream.clone());
         let (hashed, streamed) = (hashed.clone(), streamed.clone());
@@ -1398,76 +1389,74 @@ fn chunks(
                 Some(rows) => rows,
                 None => read_side(hashed_spill, &hashed)?,
             };
-            let mut pending = pending;
-            let mut batches = vec![];
-            let mut taken = 0;
-            while taken < chunk_rows {
-                let (batch, sliced) = match pending.take() {
-                    Some(batch) => (batch, true),
-                    None => match rows.try_next().await? {
-                        Some(batch) => (batch, false),
-                        None => break,
-                    },
-                };
-                let take = batch.num_rows().min(chunk_rows - taken);
-                let piece = batch.slice(0, take);
-                // A slice holds its whole batch: copy it, so the chunk holds
-                // (and is charged for) only its own rows
-                let piece = if sliced || take < batch.num_rows() {
-                    let rows = UInt32Array::from_iter_values(0..take as u32);
-                    take_record_batch(&piece, &rows)?
-                } else {
-                    piece
-                };
-                if take < batch.num_rows() {
-                    pending = Some(batch.slice(take, batch.num_rows() - take));
+            loop {
+                let mut batches = vec![];
+                let mut taken = 0;
+                while taken < chunk_rows {
+                    let (batch, sliced) = match pending.pop_front() {
+                        Some(batch) => (batch, true),
+                        None => match rows.try_next().await? {
+                            Some(batch) => (batch, false),
+                            None => break,
+                        },
+                    };
+                    let take = batch.num_rows().min(chunk_rows - taken);
+                    let piece = batch.slice(0, take);
+                    // A slice holds its whole batch: copy it, so the chunk
+                    // holds (and is charged for) only its own rows
+                    let piece = if sliced || take < batch.num_rows() {
+                        let rows = UInt32Array::from_iter_values(0..take as u32);
+                        take_record_batch(&piece, &rows)?
+                    } else {
+                        piece
+                    };
+                    if take < batch.num_rows() {
+                        pending.push_front(batch.slice(take, batch.num_rows() - take));
+                    }
+                    batches.push(piece);
+                    taken += take;
                 }
-                batches.push(piece);
-                taken += take;
+                if taken == 0 {
+                    return Ok::<_, datafusion_common::DataFusionError>(None);
+                }
+                let mut reservation = kept.buffers.new_empty();
+                // What the build counts as its input: a slice holds its whole batch
+                let mut counter = RecordBatchMemoryCounter::new();
+                let built = reservation
+                    .try_grow(batches.iter().map(|b| counter.count_batch(b)).sum())
+                    .and_then(|()| params.build(&mut batches, &mut reservation, 1));
+                match built {
+                    Ok(left_data) => {
+                        if let Some(facts) = &facts {
+                            facts.record_on(&left_data);
+                        }
+                        let streamed_rows = read_side(streamed_spill, &streamed)?;
+                        let joined: SendableRecordBatchStream = Box::pin(stream.stream(
+                            owned(left_data),
+                            streamed_rows,
+                            None,
+                            false,
+                            None,
+                        ));
+                        return Ok(Some((joined, (Some(rows), pending, chunk_rows))));
+                    }
+                    // A small chunk's table takes more than its rows suggest
+                    // (a hash table has a smallest size): put the rows back and
+                    // take half as many
+                    Err(e) if taken > 1 && is_resources_exhausted(&e) => {
+                        drop(reservation);
+                        for batch in batches.into_iter().rev() {
+                            pending.push_front(batch);
+                        }
+                        chunk_rows = taken / 2;
+                    }
+                    Err(e) => return Err(e),
+                }
             }
-            if taken == 0 {
-                return Ok::<_, datafusion_common::DataFusionError>(None);
-            }
-            let mut reservation = kept.buffers.new_empty();
-            // What the build counts as its input: a slice holds its whole batch
-            let mut counter = RecordBatchMemoryCounter::new();
-            reservation.try_grow(batches.iter().map(|b| counter.count_batch(b)).sum())?;
-            let left_data = params.build(&mut batches, &mut reservation, 1)?;
-            if let Some(facts) = &facts {
-                facts.record_on(&left_data);
-            }
-            if std::env::var_os("DF_HJ_RUNG_LOG").is_some() {
-                eprintln!("HJ_CHUNK rows={taken} swapped={swapped}");
-            }
-            let streamed_rows = read_side(streamed_spill, &streamed)?;
-            let joined: SendableRecordBatchStream = Box::pin(stream.stream(
-                owned(left_data),
-                streamed_rows,
-                None,
-                false,
-                None,
-            ));
-            Ok(Some((joined, (Some(rows), pending))))
         }
     })
     .try_flatten();
     Box::pin(RecordBatchStreamAdapter::new(schema, joins))
-}
-
-/// PoC: DF_HJ_RUNG_LOG=1 prints which rung joins an unsplittable pair
-/// PoC test knob (`DF_HJ_RUNG=reversed|chunked`): the rung every pair at the
-/// depth cap takes, so the fuzz covers each rung for every join type
-fn forced_rung() -> Option<String> {
-    std::env::var("DF_HJ_RUNG").ok()
-}
-
-fn rung_log(rung: &str, level: usize, build: &SpilledSide, probe: &SpilledSide) {
-    if std::env::var_os("DF_HJ_RUNG_LOG").is_some() {
-        eprintln!(
-            "HJ_RUNG {rung} level={level} build_rows={} probe_rows={}",
-            build.rows, probe.rows
-        );
-    }
 }
 
 /// Splits one spilled side into the buckets of the next level
@@ -1770,6 +1759,9 @@ mod tests {
     use crate::ExecutionPlan;
     use crate::joins::HashJoinExecBuilder;
     use crate::test::TestMemoryExec;
+    use crate::test::memory_pool::CappedConsumerPool;
+    use datafusion_expr::Operator;
+    use datafusion_physical_expr::expressions::BinaryExpr;
 
     /// Rows the spilled bucket gets, so that it is the largest and the pool
     /// cannot hold it
@@ -1970,7 +1962,7 @@ mod tests {
     /// the pair, which is joined a chunk of build rows at a time, each still
     /// deciding with the probe side's NULL from another bucket. (That such a
     /// pair is never joined with the roles swapped is checked by the
-    /// `NOT IN` fuzz test with `DF_HJ_RUNG=reversed`.)
+    /// `NOT IN` fuzz test, whose spill runs reach that fallback.)
     #[tokio::test]
     async fn not_in_build_rows_hot_key_pair_sees_the_whole_probe_side() {
         // More rows than the pool holds, all with one key
@@ -2128,6 +2120,177 @@ mod tests {
                 join_type,
             )
             .await;
+        }
+    }
+
+    /// The join types a spilled pair that splitting cannot shrink must handle
+    const ALL_JOIN_TYPES: [JoinType; 10] = [
+        JoinType::Inner,
+        JoinType::Left,
+        JoinType::Right,
+        JoinType::Full,
+        JoinType::LeftSemi,
+        JoinType::RightSemi,
+        JoinType::LeftAnti,
+        JoinType::RightAnti,
+        JoinType::LeftMark,
+        JoinType::RightMark,
+    ];
+
+    /// Runs a `Partitioned` join of `k` = `k`, optionally filtered by
+    /// `left.v < right.v`, in memory and under `pool`, and returns both
+    /// results (sorted rows) and the spilling run's metrics
+    async fn run_both(
+        left: &Arc<dyn ExecutionPlan>,
+        right: &Arc<dyn ExecutionPlan>,
+        join_type: JoinType,
+        filtered: bool,
+        pool: CappedConsumerPool,
+    ) -> (Vec<String>, Vec<String>, crate::metrics::MetricsSet) {
+        let join = || {
+            let on = vec![(
+                Arc::new(Column::new_with_schema("k", &left.schema()).unwrap())
+                    as PhysicalExprRef,
+                Arc::new(Column::new_with_schema("k", &right.schema()).unwrap())
+                    as PhysicalExprRef,
+            )];
+            let filter = filtered.then(|| {
+                let expr = Arc::new(BinaryExpr::new(
+                    Arc::new(Column::new("v", 0)),
+                    Operator::Lt,
+                    Arc::new(Column::new("rv", 1)),
+                )) as PhysicalExprRef;
+                let schema = Schema::new(vec![
+                    Field::new("v", DataType::Int32, true),
+                    Field::new("rv", DataType::Int32, true),
+                ]);
+                JoinFilter::new(
+                    expr,
+                    vec![
+                        ColumnIndex {
+                            index: 1,
+                            side: JoinSide::Left,
+                        },
+                        ColumnIndex {
+                            index: 1,
+                            side: JoinSide::Right,
+                        },
+                    ],
+                    Arc::new(schema),
+                )
+            });
+            Arc::new(
+                HashJoinExecBuilder::new(
+                    Arc::clone(left),
+                    Arc::clone(right),
+                    on,
+                    join_type,
+                )
+                .with_filter(filter)
+                .with_partition_mode(PartitionMode::Partitioned)
+                .build()
+                .unwrap(),
+            )
+        };
+        let collect = |join: Arc<crate::joins::HashJoinExec>, ctx: Arc<TaskContext>| async move {
+            let batches = crate::collect(Arc::clone(&join) as _, ctx).await.unwrap();
+            let text = pretty_format_batches(&batches).unwrap().to_string();
+            let mut rows: Vec<String> = text
+                .lines()
+                .filter(|line| line.starts_with('|'))
+                .skip(1)
+                .map(str::to_string)
+                .collect();
+            rows.sort();
+            (rows, join.metrics().unwrap())
+        };
+        let (expected, _) = collect(join(), Arc::new(TaskContext::default())).await;
+        let mut config = SessionConfig::new().with_batch_size(512);
+        config.options_mut().execution.enable_hash_join_spilling = true;
+        let runtime = RuntimeEnvBuilder::new()
+            .with_memory_pool(Arc::new(pool))
+            .build_arc()
+            .unwrap();
+        let ctx = TaskContext::default()
+            .with_session_config(config)
+            .with_runtime(runtime);
+        let (actual, metrics) = collect(join(), Arc::new(ctx)).await;
+        (expected, actual, metrics)
+    }
+
+    /// One hot key with `build_hot` build rows and `probe_hot` probe rows,
+    /// plus keys only one side has and NULL keys on both sides
+    fn hot_key_tables(
+        build_hot: usize,
+        probe_hot: usize,
+    ) -> (Arc<dyn ExecutionPlan>, Arc<dyn ExecutionPlan>) {
+        let side = |hot: usize, others: std::ops::Range<i32>| {
+            let mut k: Vec<Option<i32>> = vec![Some(0); hot];
+            k.extend(others.map(Some));
+            k.push(None);
+            let v = (0..k.len() as i32).map(|i| Some(i % 7)).collect();
+            (k, v)
+        };
+        let (lk, lv) = side(build_hot, 1..200);
+        let (rk, rv) = side(probe_hot, 100..300);
+        (
+            table(&[("k", lk), ("v", lv)]),
+            table(&[("k", rk), ("rv", rv)]),
+        )
+    }
+
+    fn sum(metrics: &crate::metrics::MetricsSet, name: &str) -> usize {
+        metrics.sum_by_name(name).map_or(0, |m| m.as_usize())
+    }
+
+    /// Every build side overflows, and the spilled pieces get `spill` bytes
+    fn spilling_pool(spill: usize) -> CappedConsumerPool {
+        CappedConsumerPool::new()
+            .with_cap("HashJoinInput", 1)
+            .with_cap("HashJoinSpill", spill)
+    }
+
+    /// A hot key splitting cannot shrink, whose probe rows fit the kept
+    /// memory: joined with the roles swapped, under the mirrored join type
+    #[tokio::test]
+    async fn hot_pair_with_few_probe_rows_is_reversed() {
+        let (left, right) = hot_key_tables(1000, 3);
+        for join_type in ALL_JOIN_TYPES {
+            for filtered in [false, true] {
+                let (expected, actual, metrics) = run_both(
+                    &left,
+                    &right,
+                    join_type,
+                    filtered,
+                    spilling_pool(16 * 1024),
+                )
+                .await;
+                assert_eq!(actual, expected, "{join_type} filtered={filtered}");
+                assert!(
+                    sum(&metrics, "spilled_pairs_reversed") > 0,
+                    "{join_type} filtered={filtered}: {metrics}"
+                );
+            }
+        }
+    }
+
+    /// A hot key splitting cannot shrink, with too many rows on both sides:
+    /// joined a chunk of the judged side at a time
+    #[tokio::test]
+    async fn hot_pair_with_many_probe_rows_is_chunked() {
+        // Small enough to keep the output small, too big for 2 KB either way
+        let (left, right) = hot_key_tables(300, 300);
+        for join_type in ALL_JOIN_TYPES {
+            for filtered in [false, true] {
+                let (expected, actual, metrics) =
+                    run_both(&left, &right, join_type, filtered, spilling_pool(2 * 1024))
+                        .await;
+                assert_eq!(actual, expected, "{join_type} filtered={filtered}");
+                assert!(
+                    sum(&metrics, "spilled_pairs_chunked") > 0,
+                    "{join_type} filtered={filtered}: {metrics}"
+                );
+            }
         }
     }
 }

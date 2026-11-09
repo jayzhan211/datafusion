@@ -22,7 +22,9 @@ use arrow::datatypes::{DataType, Field, Schema};
 use arrow::util::pretty::pretty_format_batches;
 use datafusion::common::JoinType;
 use datafusion::datasource::MemTable;
+use datafusion::execution::runtime_env::RuntimeEnvBuilder;
 use datafusion::physical_plan::joins::HashJoinExec;
+use datafusion::physical_plan::test::memory_pool::CappedConsumerPool;
 use datafusion::physical_plan::{ExecutionPlan, collect};
 use datafusion::prelude::{SessionConfig, SessionContext};
 use rand::rngs::StdRng;
@@ -74,17 +76,26 @@ async fn null_aware_join_matches_reference() {
                         "datafusion.optimizer.hash_join_single_partition_threshold_rows",
                         0,
                     );
-                let ctx = SessionContext::new_with_config(config);
-                ctx.register_table("o", Arc::clone(&outer) as _).unwrap();
-                ctx.register_table("i", Arc::clone(&inner) as _).unwrap();
-                for ((query, reference), expected) in cases.iter().zip(&expected_rows) {
-                    let (actual, plan) = run(&ctx, query).await;
-                    plans.record(plan.as_ref());
-                    assert_eq!(
-                        actual, *expected,
-                        "seed={seed} target_partitions={target_partitions} \
-                         batch_size={batch_size}\nquery: {query}\nreference: {reference}"
-                    );
+                // In memory, and spilling every null-aware join's build side
+                // with a small or a larger budget for the spilled pieces
+                for spill_budget in [None, Some(4 * 1024), Some(64 * 1024)] {
+                    let ctx = match spill_budget {
+                        None => SessionContext::new_with_config(config.clone()),
+                        Some(budget) => spilling_ctx(config.clone(), budget),
+                    };
+                    ctx.register_table("o", Arc::clone(&outer) as _).unwrap();
+                    ctx.register_table("i", Arc::clone(&inner) as _).unwrap();
+                    for ((query, reference), expected) in cases.iter().zip(&expected_rows)
+                    {
+                        let (actual, plan) = run(&ctx, query).await;
+                        plans.record(plan.as_ref());
+                        assert_eq!(
+                            actual, *expected,
+                            "seed={seed} target_partitions={target_partitions} \
+                             batch_size={batch_size} spill_budget={spill_budget:?}\n\
+                             query: {query}\nreference: {reference}"
+                        );
+                    }
                 }
             }
         }
@@ -93,6 +104,21 @@ async fn null_aware_join_matches_reference() {
     assert!(plans.left_anti > 0, "{plans:?}");
     assert!(plans.right_anti > 0, "{plans:?}");
     assert!(plans.correlated_right_anti > 0, "{plans:?}");
+    assert!(plans.spilled > 0, "{plans:?}");
+}
+
+/// A context in which every hash join build side overflows its reservation,
+/// so the join spills, and joins its spilled pieces within `spill_budget`
+fn spilling_ctx(mut config: SessionConfig, spill_budget: usize) -> SessionContext {
+    let pool = CappedConsumerPool::new()
+        .with_cap("HashJoinInput", 1)
+        .with_cap("HashJoinSpill", spill_budget);
+    let runtime = RuntimeEnvBuilder::new()
+        .with_memory_pool(Arc::new(pool))
+        .build_arc()
+        .unwrap();
+    config.options_mut().execution.enable_hash_join_spilling = true;
+    SessionContext::new_with_config_rt(config, runtime)
 }
 
 /// Counts the null-aware anti join plans the fuzz queries ran.
@@ -103,6 +129,8 @@ struct NullAwarePlans {
     /// `RightAnti` joins with more than one key or a join filter, which
     /// decide `NOT IN` per probe row.
     correlated_right_anti: usize,
+    /// Null-aware joins that spilled their build side
+    spilled: usize,
 }
 
 impl NullAwarePlans {
@@ -111,6 +139,9 @@ impl NullAwarePlans {
         if let Some(join) = plan.downcast_ref::<HashJoinExec>()
             && join.null_aware
         {
+            if join.metrics().and_then(|m| m.spill_count()).unwrap_or(0) > 0 {
+                self.spilled += 1;
+            }
             match join.join_type() {
                 JoinType::LeftAnti => self.left_anti += 1,
                 JoinType::RightAnti => {

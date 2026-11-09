@@ -94,8 +94,8 @@ use parking_lot::Mutex;
 
 use super::partitioned_hash_eval::SeededRandomState;
 use super::spill::{
-    SpillContext, SpilledBuild, StreamParams, collect_left_build, collect_left_stream,
-    spillable_stream,
+    SpillContext, SpilledBuild, SpilledPairMetrics, StreamParams, collect_left_build,
+    collect_left_stream, spillable_stream,
 };
 use crate::metrics::SpillMetrics;
 use crate::spill::spill_manager::SpillManager;
@@ -1238,56 +1238,26 @@ impl HashJoinExec {
             .transpose()
     }
 
-    /// Returns how this partition stops building in memory, if it can spill.
+    /// Whether a partition whose build side the memory pool refuses spills
+    /// instead of failing.
     ///
     /// A join whose output keeps the probe side's order cannot emit spilled
     /// buckets after the others: it fails as before instead. Without a memory
     /// limit nothing is ever refused, so today's stream runs.
-    fn spill_trigger(&self, context: &TaskContext) -> Option<SpillTrigger> {
-        // PoC switches: DF_HJ_SPILL=0 disables spilling, DF_HJ_SPILL_FORCE=<bytes>
-        // refuses every build above that many bytes even without a memory
-        // limit, DF_HJ_SPILL_FLAG=1 turns the option on where the config cannot
-        // be set (the sqllogictest runner)
-        if std::env::var("DF_HJ_SPILL").is_ok_and(|v| v == "0") {
-            return None;
-        }
-        let cap = std::env::var("DF_HJ_SPILL_FORCE")
-            .ok()
-            .and_then(|v| v.parse().ok());
-        let enabled = context
+    fn can_spill(&self, context: &TaskContext) -> bool {
+        context
             .session_config()
             .options()
             .execution
             .enable_hash_join_spilling
-            || std::env::var_os("DF_HJ_SPILL_FLAG").is_some()
-            || cap.is_some();
-        let ordered = self.cache.output_ordering().is_some();
-        let eligible = enabled
             && self.mode != PartitionMode::Auto
-            && !ordered
+            && self.cache.output_ordering().is_none()
             && self.prepared_build.is_none()
             && context.runtime_env().disk_manager.tmp_files_enabled()
-            && (cap.is_some()
-                || !matches!(
-                    context.memory_pool().memory_limit(),
-                    MemoryLimit::Infinite
-                ));
-        if !eligible && std::env::var_os("DF_HJ_RUNG_LOG").is_some() {
-            eprintln!(
-                "HJ_NOSPILL mode={:?} enabled={} prepared={} null_aware={} ordered={} join_type={:?}",
-                self.mode,
-                enabled,
-                self.prepared_build.is_some(),
-                self.null_aware,
-                ordered,
-                self.join_type
-            );
-        }
-        eligible.then_some(SpillTrigger { cap })
+            && !matches!(context.memory_pool().memory_limit(), MemoryLimit::Infinite)
     }
 
     /// What a probe stream that may spill needs, see [`super::spill`]
-    #[expect(clippy::too_many_arguments)]
     fn spill_context(
         &self,
         partition: usize,
@@ -1295,7 +1265,6 @@ impl HashJoinExec {
         on_left: Vec<PhysicalExprRef>,
         join_metrics: BuildProbeJoinMetrics,
         array_map_created_count: Count,
-        trigger: SpillTrigger,
         not_in: Option<NotIn>,
     ) -> SpillContext {
         let column_indices = match self.projection.as_ref() {
@@ -1349,7 +1318,7 @@ impl HashJoinExec {
             probe_spill: SpillManager::new(env, spill_metrics, self.right.schema())
                 .with_compression_type(compression),
             pool: Arc::clone(context.memory_pool()),
-            trigger,
+            pairs: SpilledPairMetrics::new(&self.metrics, partition),
             fetch: self.fetch,
             right_side_ordered: self.right.output_ordering().is_some(),
         }
@@ -1842,9 +1811,7 @@ impl ExecutionPlan for HashJoinExec {
             .flatten()
             .flatten();
 
-        if self.prepared_build.is_none()
-            && let Some(trigger) = self.spill_trigger(&context)
-        {
+        if self.can_spill(&context) {
             let spill_context = || {
                 self.spill_context(
                     partition,
@@ -1852,7 +1819,6 @@ impl ExecutionPlan for HashJoinExec {
                     on_left.clone(),
                     join_metrics.clone(),
                     array_map_created_count.clone(),
-                    trigger,
                     not_in,
                 )
             };
@@ -1871,7 +1837,7 @@ impl ExecutionPlan for HashJoinExec {
                     not_in,
                     array_map_created_count.clone(),
                     BuildMode::Ordinary,
-                    Some(trigger),
+                    true,
                 )
             };
             if self.mode == PartitionMode::CollectLeft {
@@ -3297,7 +3263,7 @@ async fn collect_left_input(
         not_in,
         array_map_created_count,
         mode,
-        None,
+        false,
     )
     .await?
     {
@@ -3327,20 +3293,6 @@ pub(super) struct BuildOverflow {
     pub(super) reservation: MemoryReservation,
 }
 
-/// When a build side that can spill stops collecting in memory
-#[derive(Clone, Copy, Debug)]
-pub(super) struct SpillTrigger {
-    /// PoC test knob (`DF_HJ_SPILL_FORCE`): refuse anything above this many bytes
-    pub(super) cap: Option<usize>,
-}
-
-impl SpillTrigger {
-    /// Whether holding `additional` bytes on top of `held` is refused by the test knob
-    pub(super) fn refuses(&self, held: usize, additional: usize) -> bool {
-        self.cap.is_some_and(|cap| held + additional > cap)
-    }
-}
-
 pub(super) fn is_resources_exhausted(error: &datafusion_common::DataFusionError) -> bool {
     matches!(
         error.find_root(),
@@ -3348,9 +3300,9 @@ pub(super) fn is_resources_exhausted(error: &datafusion_common::DataFusionError)
     )
 }
 
-/// [`collect_left_input`] that, given a [`SpillTrigger`], answers a refused
-/// allocation with [`BuildOutcome::Overflow`] instead of an error. Until then
-/// it runs exactly the same code.
+/// [`collect_left_input`] that, when the build side `can_spill`, answers a
+/// refused allocation with [`BuildOutcome::Overflow`] instead of an error.
+/// Until then it runs exactly the same code.
 #[expect(clippy::too_many_arguments)]
 async fn collect_left_input_or_overflow(
     random_state: RandomState,
@@ -3366,7 +3318,7 @@ async fn collect_left_input_or_overflow(
     not_in: Option<NotIn>,
     array_map_created_count: Count,
     mode: BuildMode,
-    spill: Option<SpillTrigger>,
+    can_spill: bool,
 ) -> Result<BuildOutcome> {
     let schema = left_stream.schema();
     let prepared = mode == BuildMode::Prepared;
@@ -3390,19 +3342,10 @@ async fn collect_left_input_or_overflow(
             }
         }
         let batch_size = state.memory_counter.count_batch(&batch);
-        let refused = match spill {
-            Some(trigger) if trigger.refuses(state.reservation.size(), batch_size) => {
-                true
-            }
-            Some(_) => match state.reservation.try_grow(batch_size) {
-                Ok(()) => false,
-                Err(e) if is_resources_exhausted(&e) => true,
-                Err(e) => return Err(e),
-            },
-            None => {
-                state.reservation.try_grow(batch_size)?;
-                false
-            }
+        let refused = match state.reservation.try_grow(batch_size) {
+            Ok(()) => false,
+            Err(e) if can_spill && is_resources_exhausted(&e) => true,
+            Err(e) => return Err(e),
         };
         if refused {
             state.batches.push(batch);
@@ -3472,11 +3415,6 @@ async fn collect_left_input_or_overflow(
             reservation,
         })
     };
-    if let Some(trigger) = spill
-        && trigger.refuses(reservation.size(), build_table_bytes(num_rows))
-    {
-        return Ok(overflow(batches, reservation));
-    }
     match build_in_memory(
         &random_state,
         &schema,
@@ -3499,7 +3437,7 @@ async fn collect_left_input_or_overflow(
         prepared,
     ) {
         Ok(data) => Ok(BuildOutcome::InMemory(data)),
-        Err(e) if spill.is_some() && !prepared && is_resources_exhausted(&e) => {
+        Err(e) if can_spill && !prepared && is_resources_exhausted(&e) => {
             Ok(overflow(batches, reservation))
         }
         Err(e) => Err(e),
