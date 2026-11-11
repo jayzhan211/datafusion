@@ -9364,38 +9364,42 @@ mod tests {
     /// completes, though nothing waited for the spilled build side
     #[tokio::test]
     async fn test_spilled_build_sides_publish_key_bounds() -> Result<()> {
-        let hashed = |batch: RecordBatch, key: &str| -> Result<Arc<dyn ExecutionPlan>> {
-            let schema = batch.schema();
-            let input =
-                TestMemoryExec::try_new_exec(&[vec![batch]], Arc::clone(&schema), None)?;
-            let key = Arc::new(Column::new_with_schema(key, &schema)?) as _;
-            Ok(Arc::new(RepartitionExec::try_new(
-                input,
-                Partitioning::Hash(vec![key], 4),
-            )?))
-        };
+        let hashed =
+            |batches: Vec<RecordBatch>, key: &str| -> Result<Arc<dyn ExecutionPlan>> {
+                let schema = batches[0].schema();
+                let input =
+                    TestMemoryExec::try_new_exec(&[batches], Arc::clone(&schema), None)?;
+                let key = Arc::new(Column::new_with_schema(key, &schema)?) as _;
+                Ok(Arc::new(RepartitionExec::try_new(
+                    input,
+                    Partitioning::Hash(vec![key], 4),
+                )?))
+            };
         let build_keys = (100..20_100).collect::<Vec<i32>>();
         let probe_keys = (0..30_000).collect::<Vec<i32>>();
         for mode in [PartitionMode::Partitioned, PartitionMode::CollectLeft] {
-            let build = build_table_i32(
-                ("l_a", &build_keys),
-                ("l_key", &build_keys),
-                ("l_c", &build_keys),
-            );
+            // Batches of rising keys: the bounds must cover the rows read
+            // after the build side overflowed, not just those before
+            let build = build_keys
+                .chunks(1000)
+                .map(|keys| {
+                    let keys = keys.to_vec();
+                    build_table_i32(("l_a", &keys), ("l_key", &keys), ("l_c", &keys))
+                })
+                .collect::<Vec<_>>();
             let left = match mode {
                 PartitionMode::Partitioned => hashed(build, "l_key")?,
-                _ => TestMemoryExec::try_new_exec(
-                    &[vec![build.clone()]],
-                    build.schema(),
-                    None,
-                )?,
+                _ => {
+                    let schema = build[0].schema();
+                    TestMemoryExec::try_new_exec(&[build], schema, None)?
+                }
             };
             let right = hashed(
-                build_table_i32(
+                vec![build_table_i32(
                     ("r_a", &probe_keys),
                     ("r_key", &probe_keys),
                     ("r_c", &probe_keys),
-                ),
+                )],
                 "r_key",
             )?;
             let on = vec![(
