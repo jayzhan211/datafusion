@@ -535,13 +535,18 @@ async fn split_build(
         mut rest,
         reservation,
     } = overflow;
-    let kept = Arc::new(KeptMemory::take_over(ctx, reservation));
-    // The handle shared by the probe streams holds no rows itself. Built
-    // first, so that the kept buckets below are sized around it rather than it
-    // asking for memory once they fill what is kept
+    let held = reservation.size();
+    drop(reservation);
+    let kept = Arc::new(KeptMemory::new(ctx));
+    // The handle shared by the probe streams holds no rows itself. Built from
+    // the memory just released, before the collected rows take the rest back:
+    // asked for after them, it would need more than the partition held, which
+    // a fair pool refuses once more consumers share it. The kept buckets below
+    // are then sized around it.
     let handle =
         ctx.build
             .build(&mut vec![], &mut kept.buffers.new_empty(), probe_streams)?;
+    kept.take_over(held);
 
     // The collected batches are covered by the reservation taken over: release
     // each one's share once its rows are copied into the buckets.
@@ -826,8 +831,8 @@ impl Drop for KeptMemory {
 }
 
 impl KeptMemory {
-    /// Moves what the build side held into a pool that keeps it
-    fn take_over(ctx: &SpillContext, held: MemoryReservation) -> Self {
+    /// A pool that keeps what a spilling partition gets, holding nothing yet
+    fn new(ctx: &SpillContext) -> Self {
         let partition = ctx.stream.partition;
         let pool = Arc::new(MergeMemoryPool::new(
             Arc::clone(&ctx.pool),
@@ -836,17 +841,21 @@ impl KeptMemory {
         ));
         let buffers = MemoryConsumer::new(format!("HashJoinSpillBuffers[{partition}]"))
             .register(&(Arc::clone(&pool) as Arc<dyn MemoryPool>));
-        let bytes = held.size();
-        drop(held);
-        // Another consumer may take the bytes just released first; the rows are
-        // then re-accounted as they are copied into buckets
-        let _ = buffers.try_grow(bytes);
-        pool.retain(pool.reserved());
         Self {
             pool,
             buffers,
             for_spilled_pairs: AtomicUsize::new(0),
         }
+    }
+
+    /// Takes back, for the rows the build side collected, the rest of the
+    /// `held` bytes it released. Another consumer may take them first; the
+    /// rows are then re-accounted as they are copied into buckets.
+    fn take_over(&self, held: usize) {
+        let _ = self
+            .buffers
+            .try_grow(held.saturating_sub(self.pool.reserved()));
+        self.pool.retain(self.pool.reserved());
     }
 
     /// Grows `reservation`, a child of the kept pool, while the build side is
@@ -2389,6 +2398,55 @@ mod tests {
 
     fn sum(metrics: &crate::metrics::MetricsSet, name: &str) -> usize {
         metrics.sum_by_name(name).map_or(0, |m| m.as_usize())
+    }
+
+    /// A build side that overflows holding exactly its cap, with the spilled
+    /// pieces capped at the same bytes: a fair pool's share can shrink to what
+    /// a partition holds once more consumers register, and the partition must
+    /// then get by on what it held
+    #[tokio::test]
+    async fn spilling_needs_no_more_than_the_build_side_held() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("k", DataType::Int32, true),
+            Field::new("v", DataType::Int32, true),
+        ]));
+        let build: Vec<RecordBatch> = (0..4)
+            .map(|i| {
+                let keys = i * 500..(i + 1) * 500;
+                RecordBatch::try_new(
+                    Arc::clone(&schema),
+                    vec![
+                        Arc::new(Int32Array::from_iter_values(keys.clone())),
+                        Arc::new(Int32Array::from_iter_values(keys.map(|k| k % 7))),
+                    ],
+                )
+                .unwrap()
+            })
+            .collect();
+        // Each batch counts the same, so the fourth is refused with three held
+        let mut counter = RecordBatchMemoryCounter::new();
+        let sizes: Vec<usize> = build.iter().map(|b| counter.count_batch(b)).collect();
+        assert!(sizes.iter().all(|size| *size == sizes[0]), "{sizes:?}");
+        let held = 3 * sizes[0];
+        let left: Arc<dyn ExecutionPlan> =
+            TestMemoryExec::try_new_exec(&[build], schema, None).unwrap();
+        let probe: Vec<i32> = (250..2250).step_by(3).collect();
+        let right = table(&[
+            ("k", some(&probe)),
+            ("rv", probe.iter().map(|k| Some(k % 5)).collect()),
+        ]);
+        for join_type in ALL_JOIN_TYPES {
+            let pool = CappedConsumerPool::new()
+                .with_cap("HashJoinInput", held)
+                .with_cap("HashJoinSpill", held);
+            let (expected, actual, metrics) =
+                run_both(&left, &right, join_type, false, pool).await;
+            assert_eq!(actual, expected, "{join_type}");
+            assert!(
+                metrics.spill_count().unwrap_or(0) > 0,
+                "{join_type}: {metrics}"
+            );
+        }
     }
 
     /// Every build side overflows, and the spilled pieces get `spill` bytes

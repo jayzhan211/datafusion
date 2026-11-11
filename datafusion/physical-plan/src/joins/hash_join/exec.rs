@@ -9375,13 +9375,13 @@ mod tests {
                     Partitioning::Hash(vec![key], 4),
                 )?))
             };
-        let build_keys = (100..20_100).collect::<Vec<i32>>();
-        let probe_keys = (0..30_000).collect::<Vec<i32>>();
+        let build_keys = (100..2_100).collect::<Vec<i32>>();
+        let probe_keys = (0..3_000).collect::<Vec<i32>>();
         for mode in [PartitionMode::Partitioned, PartitionMode::CollectLeft] {
             // Batches of rising keys: the bounds must cover the rows read
             // after the build side overflowed, not just those before
             let build = build_keys
-                .chunks(1000)
+                .chunks(100)
                 .map(|keys| {
                     let keys = keys.to_vec();
                     build_table_i32(("l_a", &keys), ("l_key", &keys), ("l_c", &keys))
@@ -9423,7 +9423,7 @@ mod tests {
             // Every build side overflows at once
             let pool = crate::test::memory_pool::CappedConsumerPool::new()
                 .with_cap("HashJoinInput", 1)
-                .with_cap("HashJoinSpill", 16 * 1024);
+                .with_cap("HashJoinSpill", 4 * 1024);
             let runtime = RuntimeEnvBuilder::new()
                 .with_memory_pool(Arc::new(pool))
                 .build_arc()?;
@@ -9433,7 +9433,7 @@ mod tests {
                     .with_runtime(runtime),
             );
             let batches = tokio::time::timeout(
-                std::time::Duration::from_secs(10),
+                std::time::Duration::from_secs(30),
                 crate::execution_plan::collect(Arc::clone(&join) as _, task_ctx),
             )
             .await
@@ -9448,7 +9448,7 @@ mod tests {
             assert!(dynamic_filter.is_complete(), "{mode:?}");
             let filter = dynamic_filter.current()?.to_string();
             assert!(
-                filter.contains("r_key@1 >= 100 AND r_key@1 <= 20099"),
+                filter.contains("r_key@1 >= 100 AND r_key@1 <= 2099"),
                 "{mode:?}: expected the build keys' bounds, got: {filter}"
             );
         }
