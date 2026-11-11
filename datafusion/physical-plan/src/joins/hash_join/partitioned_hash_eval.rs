@@ -280,14 +280,26 @@ pub struct HashTableLookupExpr {
 enum Lookup {
     /// One map holding every build key, probed directly with no routing.
     Single(Arc<ReservedMap>),
-    /// One hash table per build partition of a `Partitioned` join, `None` where
-    /// the partition is empty. A key is only ever built into the partition its
-    /// key routes to, so each probe row is looked up in that partition's table
-    /// alone: no `CASE` over per-partition filters, and no merged table.
+    /// One entry per build partition of a `Partitioned` join. A key is only
+    /// ever built into the partition its key routes to, so each probe row is
+    /// looked up in that partition's table alone: no `CASE` over per-partition
+    /// filters, and no merged table.
     Routed {
         router: PartitionRouter,
-        maps: Arc<[Option<Arc<ReservedMap>>]>,
+        maps: Arc<[PartitionKeys]>,
     },
+}
+
+/// What a routed [`HashTableLookupExpr`] knows of one build partition's keys
+#[derive(Clone)]
+pub(crate) enum PartitionKeys {
+    /// The partition has no rows: no key routed to it is found
+    Empty,
+    /// The partition's hash table
+    Table(Arc<ReservedMap>),
+    /// The partition's keys are not in memory (its build side spilled to
+    /// disk): every key routed to it is found
+    Unknown,
 }
 
 /// Assigns probe rows to the build partition their key was repartitioned to.
@@ -369,7 +381,10 @@ impl HashTableLookupExpr {
     ) -> Result<Self> {
         let maps = maps
             .into_iter()
-            .map(|map| map.map(ReservedMap::unreserved).map(Arc::new))
+            .map(|map| match map {
+                Some(map) => PartitionKeys::Table(Arc::new(ReservedMap::unreserved(map))),
+                None => PartitionKeys::Empty,
+            })
             .collect();
         Self::new_reserved(
             on_columns,
@@ -387,22 +402,22 @@ impl HashTableLookupExpr {
         on_columns: Vec<PhysicalExprRef>,
         random_state: SeededRandomState,
         router: Option<PartitionRouter>,
-        maps: Vec<Option<Arc<ReservedMap>>>,
+        maps: Vec<PartitionKeys>,
         description: String,
         pruning_bitmap: Option<Arc<KeyRangeBitmap>>,
     ) -> Result<Self> {
         let lookup = match (router, maps.as_slice()) {
             // Every row routes to the only partition, so skip routing.
-            (_, [Some(map)]) => Lookup::Single(Arc::clone(map)),
+            (_, [PartitionKeys::Table(map)]) => Lookup::Single(Arc::clone(map)),
             (None, _) => {
                 return internal_err!(
                     "a lookup over anything but one non-empty map needs a partition router"
                 );
             }
             (Some(router), _) => {
-                if maps.iter().flatten().any(|map| {
-                    let map: &Map = map;
-                    !matches!(map, Map::HashMap(_))
+                if maps.iter().any(|keys| {
+                    matches!(keys, PartitionKeys::Table(map)
+                        if !matches!(map.as_ref() as &Map, Map::HashMap(_)))
                 }) {
                     return internal_err!(
                         "routed lookups only support hash table partitions"
@@ -433,7 +448,7 @@ impl HashTableLookupExpr {
         &self,
         keys: &[ArrayRef],
         router: &PartitionRouter,
-        maps: &[Option<Arc<ReservedMap>>],
+        maps: &[PartitionKeys],
     ) -> Result<BooleanArray> {
         let num_rows = keys[0].len();
         let mut partition_ids = Vec::with_capacity(num_rows);
@@ -461,16 +476,25 @@ impl HashTableLookupExpr {
 
             let mut matched = BooleanBufferBuilder::new(num_rows);
             matched.append_n(num_rows, false);
-            for (partition, map) in maps.iter().enumerate() {
-                // An empty partition holds no key, so its rows stay unmatched.
-                let Some(map) = map else { continue };
+            for (partition, keys) in maps.iter().enumerate() {
+                let run = starts[partition]..starts[partition + 1];
+                let map = match keys {
+                    // An empty partition holds no key, so its rows stay unmatched.
+                    PartitionKeys::Empty => continue,
+                    PartitionKeys::Unknown => {
+                        for &row in &rows[run] {
+                            matched.set_bit(row as usize, true);
+                        }
+                        continue;
+                    }
+                    PartitionKeys::Table(map) => map,
+                };
                 let map: &Map = map;
                 let Map::HashMap(map) = map else {
                     return internal_err!(
                         "routed lookups only support hash table partitions"
                     );
                 };
-                let run = starts[partition]..starts[partition + 1];
                 if run.is_empty() {
                     continue;
                 }

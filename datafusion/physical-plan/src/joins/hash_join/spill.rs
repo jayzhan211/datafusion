@@ -63,11 +63,13 @@ use futures::{FutureExt, Stream, StreamExt, TryStreamExt, ready, stream};
 use parking_lot::Mutex;
 
 use super::exec::{
-    BuildOutcome, BuildOverflow, BuildParams, JoinLeftData, build_table_bytes,
-    is_resources_exhausted,
+    BuildOutcome, BuildOverflow, BuildParams, CollectLeftAccumulator, JoinLeftData,
+    build_table_bytes, is_resources_exhausted,
 };
 use super::not_in::{NotIn, NotInScope};
-use super::shared_bounds::SharedBuildAccumulator;
+use super::shared_bounds::{
+    PartitionBounds, PartitionBuildData, PushdownStrategy, SharedBuildAccumulator,
+};
 use super::stream::{
     BuildSide, BuildSideInitialState, HashJoinStream, HashJoinStreamState,
 };
@@ -154,6 +156,9 @@ pub(super) struct SpillContext {
     pub(super) probe_spill: SpillManager,
     pub(super) pool: Arc<dyn MemoryPool>,
     pub(super) pairs: SpilledPairMetrics,
+    /// The join has a dynamic filter: a spilled build side reports its keys'
+    /// bounds to it, see [`KeyStats`]
+    pub(super) dynamic_filter: bool,
     pub(super) fetch: Option<usize>,
     pub(super) right_side_ordered: bool,
 }
@@ -270,10 +275,11 @@ pub(super) fn spillable_stream(
                 ctx.fetch,
             )),
             BuildOutcome::Overflow(overflow) => {
-                // The kept buckets cannot answer for the spilled ones: let every
-                // probe row of this partition through.
-                drop(report);
+                // The other partitions need not wait while this one reads and
+                // spills the rest of its build side
+                let report = report.spilling();
                 let left = split_build(&ctx, overflow, 1).await?;
+                report.spilled(&left)?;
                 let fetch = ctx.fetch;
                 limit(probe_spilled(ctx, Arc::new(left), right)?, fetch)
             }
@@ -300,6 +306,30 @@ impl PendingReport {
     /// Hands the accumulator to the stream that reports for this partition
     fn take(mut self) -> Option<Arc<SharedBuildAccumulator>> {
         self.accumulator.take()
+    }
+
+    /// Reports the partition spilling: its build data follows in [`Self::spilled`]
+    fn spilling(self) -> Self {
+        if let Some(accumulator) = &self.accumulator {
+            accumulator.report_spilling(self.partition);
+        }
+        self
+    }
+
+    /// Reports what `left`, the spilled build side, holds: its key bounds
+    fn spilled(mut self, left: &JoinLeftData) -> Result<()> {
+        let Some(accumulator) = self.accumulator.take() else {
+            return Ok(());
+        };
+        match left.spilled().and_then(|spilled| spilled.keys.as_ref()) {
+            Some(keys) => accumulator.report_spilled_build_data(
+                keys.build_data(PartitionMode::Partitioned, self.partition),
+            ),
+            None => {
+                accumulator.report_canceled_partition(self.partition);
+                Ok(())
+            }
+        }
     }
 }
 
@@ -339,7 +369,15 @@ pub(super) fn collect_left_stream(
     let output = stream::once(async move {
         let left = futures::future::poll_fn(|cx| build.get_shared(cx)).await?;
         let fetch = ctx.fetch;
-        let stream: SendableRecordBatchStream = if left.spilled().is_some() {
+        let stream: SendableRecordBatchStream = if let Some(spilled) = left.spilled() {
+            // As each probe stream of an in-memory build reports it
+            if let (Some(accumulator), Some(keys)) = (accumulator, &spilled.keys) {
+                accumulator
+                    .report_build_data(
+                        keys.build_data(PartitionMode::CollectLeft, ctx.stream.partition),
+                    )
+                    .await?;
+            }
             limit(probe_spilled(ctx, left, right)?, fetch)
         } else {
             Box::pin(ctx.stream.stream(
@@ -386,6 +424,103 @@ pub(super) struct SpilledBuild {
     drop_null_probe_keys: bool,
     /// For an uncorrelated `build.key NOT IN (probe.key)`, see [`ProbeFacts`]
     probe_facts: Option<Arc<ProbeFacts>>,
+    /// What the join's dynamic filter learns of this build side, if it has one
+    keys: Option<SpilledKeys>,
+}
+
+/// The keys of a build side that spills, for the join's dynamic filter. Read
+/// as the rows are, since they are not all in memory at the end. The keys
+/// themselves stay unknown, so the filter lets every probe row within the
+/// bounds through, as for a canceled partition but narrower.
+struct KeyStats {
+    on_left: Vec<PhysicalExprRef>,
+    bounds: Vec<CollectLeftAccumulator>,
+    rows: usize,
+    has_null: bool,
+}
+
+impl KeyStats {
+    fn try_new(build: &BuildParams) -> Result<Self> {
+        Ok(Self {
+            on_left: build.on_left.clone(),
+            bounds: build
+                .on_left
+                .iter()
+                .map(|key| {
+                    CollectLeftAccumulator::try_new(Arc::clone(key), &build.schema)
+                })
+                .collect::<Result<_>>()?,
+            rows: 0,
+            has_null: false,
+        })
+    }
+
+    fn update(&mut self, batch: &RecordBatch) -> Result<()> {
+        for bounds in &mut self.bounds {
+            bounds.update_batch(batch)?;
+        }
+        if !self.has_null {
+            // Logical nulls, as for an in-memory build: a dictionary key can
+            // point at a NULL value
+            for key in &self.on_left {
+                let values = key.evaluate(batch)?.into_array(batch.num_rows())?;
+                self.has_null |= values.logical_null_count() > 0;
+            }
+        }
+        self.rows += batch.num_rows();
+        Ok(())
+    }
+
+    fn finish(self) -> Result<SpilledKeys> {
+        // As an in-memory build reports: no bounds and no keys without rows
+        if self.rows == 0 {
+            return Ok(SpilledKeys {
+                pushdown: PushdownStrategy::Empty,
+                bounds: PartitionBounds::new(vec![]),
+                keys_have_null: false,
+            });
+        }
+        Ok(SpilledKeys {
+            pushdown: PushdownStrategy::BoundsOnly,
+            bounds: PartitionBounds::new(
+                self.bounds
+                    .into_iter()
+                    .map(CollectLeftAccumulator::evaluate)
+                    .collect::<Result<_>>()?,
+            ),
+            keys_have_null: self.has_null,
+        })
+    }
+}
+
+/// What a spilled build side reports to the join's dynamic filter
+struct SpilledKeys {
+    pushdown: PushdownStrategy,
+    bounds: PartitionBounds,
+    keys_have_null: bool,
+}
+
+impl SpilledKeys {
+    fn build_data(&self, mode: PartitionMode, partition: usize) -> PartitionBuildData {
+        let (pushdown, bounds, keys_have_null) = (
+            self.pushdown.clone(),
+            self.bounds.clone(),
+            self.keys_have_null,
+        );
+        match mode {
+            PartitionMode::CollectLeft => PartitionBuildData::CollectLeft {
+                pushdown,
+                bounds,
+                keys_have_null,
+            },
+            _ => PartitionBuildData::Partitioned {
+                partition_id: partition,
+                pushdown,
+                bounds,
+                keys_have_null,
+            },
+        }
+    }
 }
 
 /// Splits an overflowed build side into buckets, spills the largest until the
@@ -411,6 +546,10 @@ async fn split_build(
     // The collected batches are covered by the reservation taken over: release
     // each one's share once its rows are copied into the buckets.
     let mut build = BucketedBuild::new(0);
+    let mut keys = ctx
+        .dynamic_filter
+        .then(|| KeyStats::try_new(&ctx.build))
+        .transpose()?;
     let mut collected = kept.buffers.size();
     // Only an uncorrelated `probe.key NOT IN (build.key)` looks: one key
     let mut build_has_row = false;
@@ -425,6 +564,9 @@ async fn split_build(
     for batch in batches {
         let _timer = ctx.build.metrics.build_time.timer();
         look_for_null(&batch)?;
+        if let Some(keys) = &mut keys {
+            keys.update(&batch)?;
+        }
         build.push(ctx, &kept, &batch)?;
         let released = get_record_batch_memory_size(&batch).min(collected);
         kept.buffers.shrink(released);
@@ -434,6 +576,9 @@ async fn split_build(
     while let Some(batch) = rest.try_next().await? {
         let _timer = ctx.build.metrics.build_time.timer();
         look_for_null(&batch)?;
+        if let Some(keys) = &mut keys {
+            keys.update(&batch)?;
+        }
         build.push(ctx, &kept, &batch)?;
     }
     drop(rest);
@@ -506,6 +651,7 @@ async fn split_build(
         no_rows: build_has_null,
         drop_null_probe_keys: build_has_row,
         probe_facts: ctx.build_rows_not_in().then(Default::default),
+        keys: keys.map(KeyStats::finish).transpose()?,
     })))
 }
 

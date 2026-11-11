@@ -1319,6 +1319,7 @@ impl HashJoinExec {
                 .with_compression_type(compression),
             pool: Arc::clone(context.memory_pool()),
             pairs: SpilledPairMetrics::new(&self.metrics, partition),
+            dynamic_filter: false,
             fetch: self.fetch,
             right_side_ordered: self.right.output_ordering().is_some(),
         }
@@ -1813,14 +1814,16 @@ impl ExecutionPlan for HashJoinExec {
 
         if self.can_spill(&context) {
             let spill_context = || {
-                self.spill_context(
+                let mut ctx = self.spill_context(
                     partition,
                     &context,
                     on_left.clone(),
                     join_metrics.clone(),
                     array_map_created_count.clone(),
                     not_in,
-                )
+                );
+                ctx.dynamic_filter = enable_dynamic_filter_pushdown;
+                ctx
             };
             let collect = |left_stream, reservation, probe_streams| {
                 collect_left_input_or_overflow(
@@ -2960,7 +2963,7 @@ fn lr_is_preserved(join_type: JoinType) -> (bool, bool) {
 /// The bounds are used for dynamic filter pushdown optimization, where filters
 /// based on the actual data ranges can be pushed down to the probe side to
 /// eliminate unnecessary data early.
-struct CollectLeftAccumulator {
+pub(super) struct CollectLeftAccumulator {
     /// The physical expression to evaluate for each batch
     expr: Arc<dyn PhysicalExpr>,
     /// Accumulator for tracking the minimum value across all batches
@@ -2978,7 +2981,10 @@ impl CollectLeftAccumulator {
     ///
     /// # Returns
     /// A new `CollectLeftAccumulator` instance configured for the expression's data type
-    fn try_new(expr: Arc<dyn PhysicalExpr>, schema: &SchemaRef) -> Result<Self> {
+    pub(super) fn try_new(
+        expr: Arc<dyn PhysicalExpr>,
+        schema: &SchemaRef,
+    ) -> Result<Self> {
         /// Recursively unwraps dictionary types to get the underlying value type.
         fn dictionary_value_type(data_type: &DataType) -> DataType {
             match data_type {
@@ -3010,7 +3016,7 @@ impl CollectLeftAccumulator {
     ///
     /// # Returns
     /// Ok(()) if the update succeeds, or an error if expression evaluation fails
-    fn update_batch(&mut self, batch: &RecordBatch) -> Result<()> {
+    pub(super) fn update_batch(&mut self, batch: &RecordBatch) -> Result<()> {
         let array = self.expr.evaluate(batch)?.into_array(batch.num_rows())?;
         self.min.update_batch(std::slice::from_ref(&array))?;
         self.max.update_batch(std::slice::from_ref(&array))?;
@@ -3023,7 +3029,7 @@ impl CollectLeftAccumulator {
     ///
     /// # Returns
     /// The `ColumnBounds` containing the minimum and maximum values observed
-    fn evaluate(mut self) -> Result<ColumnBounds> {
+    pub(super) fn evaluate(mut self) -> Result<ColumnBounds> {
         Ok(ColumnBounds::new(
             self.min.evaluate()?,
             self.max.evaluate()?,
@@ -9350,6 +9356,98 @@ mod tests {
         // The filter was really built: the partitions waited on each other
         child_dynamic_filter.wait_complete().await;
 
+        Ok(())
+    }
+
+    /// A build side that spills still reports the bounds of its keys, once it
+    /// has read them all: the probe side stays filtered and the filter
+    /// completes, though nothing waited for the spilled build side
+    #[tokio::test]
+    async fn test_spilled_build_sides_publish_key_bounds() -> Result<()> {
+        let hashed = |batch: RecordBatch, key: &str| -> Result<Arc<dyn ExecutionPlan>> {
+            let schema = batch.schema();
+            let input =
+                TestMemoryExec::try_new_exec(&[vec![batch]], Arc::clone(&schema), None)?;
+            let key = Arc::new(Column::new_with_schema(key, &schema)?) as _;
+            Ok(Arc::new(RepartitionExec::try_new(
+                input,
+                Partitioning::Hash(vec![key], 4),
+            )?))
+        };
+        let build_keys = (100..20_100).collect::<Vec<i32>>();
+        let probe_keys = (0..30_000).collect::<Vec<i32>>();
+        for mode in [PartitionMode::Partitioned, PartitionMode::CollectLeft] {
+            let build = build_table_i32(
+                ("l_a", &build_keys),
+                ("l_key", &build_keys),
+                ("l_c", &build_keys),
+            );
+            let left = match mode {
+                PartitionMode::Partitioned => hashed(build, "l_key")?,
+                _ => TestMemoryExec::try_new_exec(
+                    &[vec![build.clone()]],
+                    build.schema(),
+                    None,
+                )?,
+            };
+            let right = hashed(
+                build_table_i32(
+                    ("r_a", &probe_keys),
+                    ("r_key", &probe_keys),
+                    ("r_c", &probe_keys),
+                ),
+                "r_key",
+            )?;
+            let on = vec![(
+                Arc::new(Column::new_with_schema("l_key", &left.schema())?) as _,
+                Arc::new(Column::new_with_schema("r_key", &right.schema())?) as _,
+            )];
+            let (join, dynamic_filter) = hash_join_with_dynamic_filter_and_mode(
+                left,
+                right,
+                on,
+                JoinType::Inner,
+                mode,
+            )?;
+            let join = Arc::new(join);
+
+            let mut session_config = SessionConfig::default();
+            session_config
+                .options_mut()
+                .execution
+                .enable_hash_join_spilling = true;
+            // Every build side overflows at once
+            let pool = crate::test::memory_pool::CappedConsumerPool::new()
+                .with_cap("HashJoinInput", 1)
+                .with_cap("HashJoinSpill", 16 * 1024);
+            let runtime = RuntimeEnvBuilder::new()
+                .with_memory_pool(Arc::new(pool))
+                .build_arc()?;
+            let task_ctx = Arc::new(
+                TaskContext::default()
+                    .with_session_config(session_config)
+                    .with_runtime(runtime),
+            );
+            let batches = tokio::time::timeout(
+                std::time::Duration::from_secs(10),
+                crate::execution_plan::collect(Arc::clone(&join) as _, task_ctx),
+            )
+            .await
+            .expect("no partition waits for a spilled build side")?;
+
+            let rows: usize = batches.iter().map(|b| b.num_rows()).sum();
+            assert_eq!(rows, build_keys.len(), "{mode:?}");
+            assert!(
+                join.metrics().unwrap().spill_count().unwrap_or(0) > 0,
+                "{mode:?}: the build sides did not spill"
+            );
+            assert!(dynamic_filter.is_complete(), "{mode:?}");
+            let filter = dynamic_filter.current()?.to_string();
+            assert!(
+                filter.contains("r_key@1 >= 100 AND r_key@1 <= 20099"),
+                "{mode:?}: expected the build keys' bounds, got: {filter}"
+            );
+        }
         Ok(())
     }
 
