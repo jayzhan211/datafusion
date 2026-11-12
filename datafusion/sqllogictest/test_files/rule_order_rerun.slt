@@ -1,0 +1,80 @@
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
+
+#   http://www.apache.org/licenses/LICENSE-2.0
+
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
+
+# This file runs the rule list twice, as re-planning does (Ballista re-plans
+# each stage with the whole list), see `rule_order.rs`. The second run sees the
+# plan the first produced.
+
+statement ok
+set datafusion.sql_parser.dialect = 'PostgreSQL';
+
+# `MaterializedCteExec` outputs its main input's rows, so the query's ORDER BY
+# below it has to be recorded. Otherwise the second run drops the merge of the
+# sorted partitions, and the rows come back in the order the partitions finish.
+query TT
+EXPLAIN WITH c AS MATERIALIZED (
+  SELECT 5 a UNION ALL SELECT 4 UNION ALL SELECT 3 UNION ALL SELECT 2 UNION ALL SELECT 1
+)
+SELECT * FROM c ORDER BY a
+----
+logical_plan
+01)MaterializedCte: name=c
+02)--SubqueryAlias: c
+03)----Union
+04)------Projection: Int64(5) AS a
+05)--------EmptyRelation: rows=1
+06)------Projection: Int64(4) AS a
+07)--------EmptyRelation: rows=1
+08)------Projection: Int64(3) AS a
+09)--------EmptyRelation: rows=1
+10)------Projection: Int64(2) AS a
+11)--------EmptyRelation: rows=1
+12)------Projection: Int64(1) AS a
+13)--------EmptyRelation: rows=1
+14)--Sort: c.a ASC NULLS LAST
+15)----MaterializedCteScan: name=c
+physical_plan
+01)MaterializedCteExec: name=c
+02)--UnionExec
+03)----ProjectionExec: expr=[5 as a]
+04)------PlaceholderRowExec
+05)----ProjectionExec: expr=[4 as a]
+06)------PlaceholderRowExec
+07)----ProjectionExec: expr=[3 as a]
+08)------PlaceholderRowExec
+09)----ProjectionExec: expr=[2 as a]
+10)------PlaceholderRowExec
+11)----ProjectionExec: expr=[1 as a]
+12)------PlaceholderRowExec
+13)--SortPreservingMergeExec: [a@0 ASC NULLS LAST]
+14)----SortExec: expr=[a@0 ASC NULLS LAST], preserve_partitioning=[true]
+15)------MaterializedCteScanExec: name=c
+
+query I
+WITH c AS MATERIALIZED (
+  SELECT 5 a UNION ALL SELECT 4 UNION ALL SELECT 3 UNION ALL SELECT 2 UNION ALL SELECT 1
+)
+SELECT * FROM c ORDER BY a
+----
+1
+2
+3
+4
+5
+
+statement ok
+set datafusion.sql_parser.dialect = generic;

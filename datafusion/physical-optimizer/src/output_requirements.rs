@@ -27,7 +27,6 @@ use datafusion_physical_plan::execution_plan::{
 use datafusion_physical_plan::projection::{
     ProjectionExec, make_with_child, update_expr, update_ordering_requirement,
 };
-use datafusion_physical_plan::scalar_subquery::ScalarSubqueryExec;
 use datafusion_physical_plan::sorts::sort::SortExec;
 use datafusion_physical_plan::sorts::sort_preserving_merge::SortPreservingMergeExec;
 use datafusion_physical_plan::{
@@ -394,18 +393,23 @@ fn require_top_ordering(plan: Arc<dyn ExecutionPlan>) -> Result<Arc<dyn Executio
 }
 
 /// Which child (if any) `require_top_ordering_helper` should descend into when
-/// searching for the operator that establishes the global ordering.
+/// searching for the operator that establishes the global ordering: the only
+/// child, or the one child whose rows a multi-child node outputs unchanged (it
+/// keeps that child's order and has its schema), such as the main input of
+/// `ScalarSubqueryExec` or `MaterializedCteExec`. Without this the search stops
+/// at such a node and loses the query's global ORDER BY.
 fn output_requirement_child(plan: &dyn ExecutionPlan) -> Option<usize> {
-    if plan.children().len() == 1 {
-        Some(0)
-    } else if plan.downcast_ref::<ScalarSubqueryExec>().is_some() {
-        // `ScalarSubqueryExec` is multi-child but order-transparent on child 0
-        // (the main input); its other children are subquery plans that don't
-        // affect output ordering, so descend into child 0. Without this the
-        // search stops here and loses the query's global ORDER BY.
-        Some(0)
-    } else {
-        None
+    let children = plan.children();
+    if children.len() == 1 {
+        return Some(0);
+    }
+    let keeps_order = plan.maintains_input_order();
+    let mut passed_through = children.iter().enumerate().filter(|(idx, child)| {
+        keeps_order.get(*idx).copied().unwrap_or(false) && child.schema() == plan.schema()
+    });
+    match (passed_through.next(), passed_through.next()) {
+        (Some((idx, _)), None) => Some(idx),
+        _ => None,
     }
 }
 

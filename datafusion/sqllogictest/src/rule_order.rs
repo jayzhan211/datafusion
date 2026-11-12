@@ -24,6 +24,10 @@
 //! - `move:KEY:before:OTHER` / `move:KEY:after:OTHER`: move `KEY` next to `OTHER`.
 //! - `reverse`: reverse the list.
 //! - `shuffle:SEED`: shuffle the list with a seeded generator.
+//! - `twice`: run the list again after itself, as a re-planning step does
+//!   (Ballista re-plans each stage with the whole list). The copies get `@2`.
+//! - `twice-except:KEY`: the same, without `KEY` in the second run (Ballista
+//!   leaves out `FilterPushdown(Post)`).
 //!
 //! `KEY` is the rule's `name()`. A name that repeats in the default list gets
 //! `#2` on its second use, such as `OutputRequirements#2` (remove mode) and
@@ -59,6 +63,7 @@ fn spec_for_file(file_name: &str) -> Option<&'static str> {
             Some("move:OutputRequirements#2:before:OutputRequirements")
         }
         "rule_order_limit_first.slt" => Some("first:LimitPushdown"),
+        "rule_order_rerun.slt" => Some("twice"),
         "rule_order_reenforce.slt" => Some(
             "move:FilterPushdown:after:EnsureRequirements,move:join_selection:after:FilterPushdown",
         ),
@@ -187,8 +192,20 @@ fn apply(rules: &mut Vec<(String, Rule)>, directive: &str) {
             rules.insert(at, rule);
         }
         ["shuffle", seed] => shuffle(rules, seed.parse().expect("numeric seed")),
+        ["twice"] => run_again(rules, None),
+        ["twice-except", key] => run_again(rules, Some(key)),
         _ => panic!("{ENV_VAR}: unknown directive {directive}"),
     }
+}
+
+/// Appends a copy of the list, leaving out `except`, with `@2` on each key.
+fn run_again(rules: &mut Vec<(String, Rule)>, except: Option<&str>) {
+    let again: Vec<(String, Rule)> = rules
+        .iter()
+        .filter(|(key, _)| Some(key.as_str()) != except)
+        .map(|(key, rule)| (format!("{key}@2"), Arc::clone(rule)))
+        .collect();
+    rules.extend(again);
 }
 
 fn position(rules: &[(String, Rule)], key: &str) -> usize {
