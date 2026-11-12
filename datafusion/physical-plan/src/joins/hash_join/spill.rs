@@ -2449,6 +2449,256 @@ mod tests {
         }
     }
 
+    /// Its batches, then nothing more, ever: a query reading it stops there
+    #[derive(Debug)]
+    struct StallsAfter {
+        schema: SchemaRef,
+        batches: Vec<RecordBatch>,
+    }
+
+    impl crate::streaming::PartitionStream for StallsAfter {
+        fn schema(&self) -> &SchemaRef {
+            &self.schema
+        }
+
+        fn execute(&self, _: Arc<TaskContext>) -> SendableRecordBatchStream {
+            let batches = self.batches.clone().into_iter().map(Ok);
+            Box::pin(RecordBatchStreamAdapter::new(
+                Arc::clone(&self.schema),
+                stream::iter(batches).chain(stream::pending()),
+            ))
+        }
+    }
+
+    /// `k` and `v` columns of `keys`, 100 rows a batch, in `partitions`
+    /// partitions; with `stall`, each partition then waits forever
+    fn keyed(
+        keys: std::ops::Range<i32>,
+        v: &str,
+        partitions: usize,
+        stall: bool,
+    ) -> Arc<dyn ExecutionPlan> {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("k", DataType::Int32, true),
+            Field::new(v, DataType::Int32, true),
+        ]));
+        let keys: Vec<i32> = keys.collect();
+        let mut parts = vec![vec![]; partitions];
+        for (i, chunk) in keys.chunks(100).enumerate() {
+            parts[i % partitions].push(
+                RecordBatch::try_new(
+                    Arc::clone(&schema),
+                    vec![
+                        Arc::new(Int32Array::from(chunk.to_vec())),
+                        Arc::new(Int32Array::from_iter_values(
+                            chunk.iter().map(|k| k % 7),
+                        )),
+                    ],
+                )
+                .unwrap(),
+            );
+        }
+        if !stall {
+            return TestMemoryExec::try_new_exec(&parts, schema, None).unwrap();
+        }
+        let parts = parts
+            .into_iter()
+            .map(|batches| {
+                Arc::new(StallsAfter {
+                    schema: Arc::clone(&schema),
+                    batches,
+                }) as _
+            })
+            .collect();
+        Arc::new(
+            crate::streaming::StreamingTableExec::try_new(
+                schema,
+                parts,
+                None,
+                vec![],
+                false,
+                None,
+            )
+            .unwrap(),
+        )
+    }
+
+    fn files_under(dir: &std::path::Path) -> usize {
+        std::fs::read_dir(dir).map_or(0, |entries| {
+            entries
+                .flatten()
+                .map(|entry| {
+                    let path = entry.path();
+                    if path.is_dir() { files_under(&path) } else { 1 }
+                })
+                .sum()
+        })
+    }
+
+    /// Where a query is dropped
+    #[derive(Debug, Clone, Copy)]
+    enum Cancel {
+        /// While its build side stalls after it overflowed
+        BuildStalls,
+        /// While its probe side stalls after its first rows
+        ProbeStalls,
+        /// After this many output batches
+        After(usize),
+    }
+
+    /// Runs a spilling join until `cancel`, drops it, and checks that its
+    /// spill files are deleted and its memory returned. Returns how many
+    /// batches the join gave.
+    async fn cancel_spilling_join(mode: PartitionMode, cancel: Cancel) -> usize {
+        static RUN: AtomicUsize = AtomicUsize::new(0);
+        let dir = std::env::temp_dir().join(format!(
+            "hj-spill-cancel-{}-{}",
+            std::process::id(),
+            RUN.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let probe_partitions = match mode {
+            PartitionMode::CollectLeft => 2,
+            _ => 1,
+        };
+        let left = keyed(0..2000, "v", 1, matches!(cancel, Cancel::BuildStalls));
+        let right = keyed(
+            1000..4000,
+            "rv",
+            probe_partitions,
+            matches!(cancel, Cancel::ProbeStalls),
+        );
+        let on = vec![(
+            Arc::new(Column::new_with_schema("k", &left.schema()).unwrap())
+                as PhysicalExprRef,
+            Arc::new(Column::new_with_schema("k", &right.schema()).unwrap())
+                as PhysicalExprRef,
+        )];
+        let join: Arc<dyn ExecutionPlan> = Arc::new(
+            HashJoinExecBuilder::new(left, right, on, JoinType::Full)
+                .with_partition_mode(mode)
+                .build()
+                .unwrap(),
+        );
+        let mut config = SessionConfig::new().with_batch_size(64);
+        config.options_mut().execution.enable_hash_join_spilling = true;
+        // Small enough for the build side to spill buckets before it stalls
+        let spill_cap = match cancel {
+            Cancel::BuildStalls => 4 * 1024,
+            _ => 16 * 1024,
+        };
+        let pool = Arc::new(
+            CappedConsumerPool::new()
+                .with_cap("HashJoinInput", 1)
+                .with_cap("HashJoinSpill", spill_cap),
+        );
+        let runtime = RuntimeEnvBuilder::new()
+            .with_memory_pool(Arc::clone(&pool) as _)
+            .with_disk_manager_builder(
+                datafusion_execution::disk_manager::DiskManagerBuilder::default()
+                    .with_mode(
+                        datafusion_execution::disk_manager::DiskManagerMode::Directories(
+                            vec![dir.clone()],
+                        ),
+                    ),
+            )
+            .build_arc()
+            .unwrap();
+        let ctx = Arc::new(
+            TaskContext::default()
+                .with_session_config(config)
+                .with_runtime(Arc::clone(&runtime)),
+        );
+        let streams = (0..join.properties().output_partitioning().partition_count())
+            .map(|partition| join.execute(partition, Arc::clone(&ctx)).unwrap());
+        let mut output = stream::select_all(streams);
+        let mut batches = 0;
+        let deadline = datafusion_common::instant::Instant::now()
+            + std::time::Duration::from_secs(20);
+        loop {
+            if let Cancel::After(k) = cancel
+                && batches == k
+            {
+                break;
+            }
+            match tokio::time::timeout(
+                std::time::Duration::from_millis(20),
+                output.next(),
+            )
+            .await
+            {
+                Ok(Some(batch)) => {
+                    batch.unwrap();
+                    batches += 1;
+                }
+                Ok(None) => {
+                    assert!(
+                        matches!(cancel, Cancel::After(_)),
+                        "{mode:?} {cancel:?}: a stalled input cannot finish"
+                    );
+                    break;
+                }
+                // Stalled: once it has spilled, drop it here
+                Err(_)
+                    if !matches!(cancel, Cancel::After(_)) && files_under(&dir) > 0 =>
+                {
+                    break;
+                }
+                Err(_) => assert!(
+                    datafusion_common::instant::Instant::now() < deadline,
+                    "{mode:?} {cancel:?}: no progress after {batches} batches"
+                ),
+            }
+        }
+        if !matches!(cancel, Cancel::After(_)) {
+            assert!(
+                files_under(&dir) > 0,
+                "{mode:?} {cancel:?}: nothing spilled"
+            );
+        }
+        drop(output);
+        drop(join);
+        drop(ctx);
+        // Files still being read are deleted when their reader stops
+        let cleaned = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            while files_under(&dir) > 0
+                || runtime.disk_manager.used_disk_space() > 0
+                || pool.reserved() > 0
+            {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await;
+        let left_over = (
+            files_under(&dir),
+            runtime.disk_manager.used_disk_space(),
+            pool.reserved(),
+        );
+        drop(runtime);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(
+            cleaned.is_ok(),
+            "{mode:?} {cancel:?} after {batches} batches: (files, disk bytes, reserved bytes) left: {left_over:?}"
+        );
+        batches
+    }
+
+    /// A spilling join dropped at any point deletes its spill files and
+    /// returns its memory: while the build side is split, while probe rows
+    /// are routed, and after every output batch through the spilled pairs
+    #[tokio::test]
+    async fn canceled_spilling_join_leaves_nothing() {
+        for mode in [PartitionMode::Partitioned, PartitionMode::CollectLeft] {
+            cancel_spilling_join(mode, Cancel::BuildStalls).await;
+            cancel_spilling_join(mode, Cancel::ProbeStalls).await;
+            let all = cancel_spilling_join(mode, Cancel::After(usize::MAX)).await;
+            assert!(all > 1, "{mode:?}");
+            for k in 0..all {
+                cancel_spilling_join(mode, Cancel::After(k)).await;
+            }
+        }
+    }
+
     /// Every build side overflows, and the spilled pieces get `spill` bytes
     fn spilling_pool(spill: usize) -> CappedConsumerPool {
         CappedConsumerPool::new()
