@@ -33,7 +33,9 @@
 //! ```text
 //! EnsureRequirements::optimize(plan)
 //! │
-//! ├─ Phase 0: top-down Interleave → Union      (replace_interleave_with_union)
+//! ├─ Phase 0: hash joins made runnable on unbounded inputs
+//! │           (make_unbounded_joins_runnable, bottom-up), then
+//! │           top-down Interleave → Union      (replace_interleave_with_union)
 //! │           and Auto join modes resolved     (resolve_auto_join_mode)
 //! │
 //! ├─ Phase 1: top-down join-key reorder        (adjust_input_keys_ordering)
@@ -192,6 +194,12 @@ impl PhysicalOptimizerRule for EnsureRequirements {
         // runs before the marker is added, add it. The marker stays until the
         // physical planner's final pass, so later rules see the requirement too.
         let plan = OutputRequirements::new_add_mode().optimize(plan, config)?;
+
+        // A hash join can't run with an unbounded build side. `JoinSelection`
+        // normally makes such joins runnable; when the list doesn't run it, or runs
+        // it later, do it here, before the join's mode and requirements are used.
+        let plan =
+            crate::join_selection::make_unbounded_joins_runnable(plan, config)?.data;
 
         // Phase 0: Normalize `InterleaveExec` back to `UnionExec` (top-down).
         // Interleaves are distribution artifacts of Phase 2, which re-derives

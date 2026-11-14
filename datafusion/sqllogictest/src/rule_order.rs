@@ -61,6 +61,7 @@ fn spec_for_file(file_name: &str) -> Option<&'static str> {
     match file_name {
         "rule_order_output_requirements.slt" => Some("last:OutputRequirements"),
         "rule_order_limit_first.slt" => Some("first:LimitPushdown"),
+        "rule_order_unbounded_join.slt" => Some("drop:join_selection"),
         "rule_order_rerun.slt" => Some("twice"),
         "rule_order_reenforce.slt" => Some(
             "move:FilterPushdown:after:EnsureRequirements,move:join_selection:after:FilterPushdown",

@@ -17,7 +17,7 @@ use crate::utils::is_limit;
 use datafusion_common::Statistics;
 use datafusion_common::config::ConfigOptions;
 use datafusion_common::error::Result;
-use datafusion_common::tree_node::{Transformed, TransformedResult, TreeNode};
+use datafusion_common::tree_node::{Transformed, TreeNode};
 use datafusion_common::{JoinSide, JoinType, internal_err, plan_err};
 use datafusion_expr_common::sort_properties::SortProperties;
 use datafusion_physical_expr::LexOrdering;
@@ -141,16 +141,10 @@ impl PhysicalOptimizerRule for JoinSelection {
         plan: Arc<dyn ExecutionPlan>,
         context: &dyn PhysicalOptimizerContext,
     ) -> Result<Arc<dyn ExecutionPlan>> {
-        let subrules: Vec<Box<PipelineFixerSubrule>> = vec![
-            Box::new(hash_join_convert_symmetric_subrule),
-            Box::new(hash_join_swap_subrule),
-        ];
         let config = context.config_options();
         // A rewrite that breaks a requirement the plan declares is repaired by the
         // physical planner, which runs enforcement again.
-        let new_plan = plan
-            .transform_up(|p| apply_subrules(p, &subrules, config))
-            .data()?;
+        let new_plan = make_unbounded_joins_runnable(plan, config)?.data;
         transform_up_with_fetch_above(new_plan, false, &mut |p, fetch_above| {
             let rewritten = statistical_join_selection_subrule(Arc::clone(&p), context)?;
             // A fetch picks rows by this join's output order, so the rewrite has to
@@ -653,6 +647,24 @@ pub(crate) fn swap_join_according_to_unboundedness(
             hash_join.swap_inputs(mode)
         }
     }
+}
+
+/// Makes the hash joins in `plan` runnable on unbounded inputs: a join over two
+/// unbounded inputs becomes a [`SymmetricHashJoinExec`], and a join whose build
+/// side is unbounded swaps its inputs when its join type allows. Both
+/// [`JoinSelection`] and [`EnsureRequirements`] do this, so a plan is runnable
+/// whichever of them a rule list runs.
+///
+/// [`EnsureRequirements`]: crate::ensure_requirements::EnsureRequirements
+pub(crate) fn make_unbounded_joins_runnable(
+    plan: Arc<dyn ExecutionPlan>,
+    config_options: &ConfigOptions,
+) -> Result<Transformed<Arc<dyn ExecutionPlan>>> {
+    let subrules: Vec<Box<PipelineFixerSubrule>> = vec![
+        Box::new(hash_join_convert_symmetric_subrule),
+        Box::new(hash_join_swap_subrule),
+    ];
+    plan.transform_up(|p| apply_subrules(p, &subrules, config_options))
 }
 
 /// Apply given `PipelineFixerSubrule`s to a given plan. This plan, along with

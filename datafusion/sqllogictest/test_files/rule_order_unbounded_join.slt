@@ -1,0 +1,72 @@
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
+
+#   http://www.apache.org/licenses/LICENSE-2.0
+
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
+
+# This file runs without `JoinSelection` (see `rule_order.rs`). A hash join can't
+# run when its build side is unbounded, so a join over two unbounded inputs has to
+# become a symmetric hash join, and a join with an unbounded build side has to swap
+# its inputs. `EnsureRequirements` makes the plan runnable when no rule has.
+
+query I
+COPY (VALUES (1, 'x'), (2, 'x')) TO 'test_files/scratch/rule_order_unbounded_join/left.csv'
+STORED AS CSV OPTIONS ('format.has_header' 'true');
+----
+2
+
+query I
+COPY (VALUES (2, 'y'), (3, 'y')) TO 'test_files/scratch/rule_order_unbounded_join/right.csv'
+STORED AS CSV OPTIONS ('format.has_header' 'true');
+----
+2
+
+statement ok
+CREATE UNBOUNDED EXTERNAL TABLE l(a INT NOT NULL, b VARCHAR)
+STORED AS CSV LOCATION 'test_files/scratch/rule_order_unbounded_join/left.csv'
+OPTIONS ('format.has_header' 'true');
+
+statement ok
+CREATE UNBOUNDED EXTERNAL TABLE r(a INT NOT NULL, b VARCHAR)
+STORED AS CSV LOCATION 'test_files/scratch/rule_order_unbounded_join/right.csv'
+OPTIONS ('format.has_header' 'true');
+
+statement ok
+CREATE TABLE bounded(a INT NOT NULL, c VARCHAR) AS VALUES (2, 'z');
+
+# Both inputs unbounded.
+query IT
+SELECT l.a, r.b FROM l JOIN r ON l.a = r.a;
+----
+2 y
+
+query I
+SELECT a FROM l WHERE a NOT IN (SELECT a FROM r);
+----
+1
+
+# The unbounded input is on the build side, so the inputs swap.
+query IT
+SELECT l.a, bounded.c FROM l JOIN bounded ON l.a = bounded.a;
+----
+2 z
+
+statement ok
+DROP TABLE l;
+
+statement ok
+DROP TABLE r;
+
+statement ok
+DROP TABLE bounded;
