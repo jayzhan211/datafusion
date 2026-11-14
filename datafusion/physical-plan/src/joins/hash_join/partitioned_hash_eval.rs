@@ -281,15 +281,26 @@ pub struct HashTableLookupExpr {
 enum Lookup {
     /// One map holding every build key, probed directly with no routing.
     Single(Arc<ReservedMap>),
-    /// One map (a hash table or an array map) per build partition of a
-    /// `Partitioned` join, `None` where the partition is empty. A key is only
-    /// ever built into the partition its key routes to, so each probe row is
-    /// looked up in that partition's map alone: no `CASE` over per-partition
-    /// filters, and no merged map.
+    /// One entry per build partition of a `Partitioned` join, see
+    /// [`PartitionKeys`]. A key is only ever built into the partition its key
+    /// routes to, so each probe row is looked up in that partition's map alone:
+    /// no `CASE` over per-partition filters, and no merged map.
     Routed {
         router: PartitionRouter,
-        maps: Arc<[Option<Arc<ReservedMap>>]>,
+        maps: Arc<[PartitionKeys]>,
     },
+}
+
+/// What a routed [`HashTableLookupExpr`] knows of one build partition's keys
+#[derive(Clone)]
+pub(crate) enum PartitionKeys {
+    /// The partition has no rows: no key routed to it is found
+    Empty,
+    /// The partition's hash table
+    Table(Arc<ReservedMap>),
+    /// The partition's keys are not in memory (its build side spilled to
+    /// disk): every key routed to it is found
+    Unknown,
 }
 
 /// Assigns probe rows to the build partition their key was repartitioned to.
@@ -371,7 +382,10 @@ impl HashTableLookupExpr {
     ) -> Result<Self> {
         let maps = maps
             .into_iter()
-            .map(|map| map.map(ReservedMap::unreserved).map(Arc::new))
+            .map(|map| match map {
+                Some(map) => PartitionKeys::Table(Arc::new(ReservedMap::unreserved(map))),
+                None => PartitionKeys::Empty,
+            })
             .collect();
         Self::new_reserved(
             on_columns,
@@ -389,13 +403,13 @@ impl HashTableLookupExpr {
         on_columns: Vec<PhysicalExprRef>,
         random_state: SeededRandomState,
         router: Option<PartitionRouter>,
-        maps: Vec<Option<Arc<ReservedMap>>>,
+        maps: Vec<PartitionKeys>,
         description: String,
         pruning_bitmap: Option<Arc<KeyRangeBitmap>>,
     ) -> Result<Self> {
         let lookup = match (router, maps.as_slice()) {
             // Every row routes to the only partition, so skip routing.
-            (_, [Some(map)]) => Lookup::Single(Arc::clone(map)),
+            (_, [PartitionKeys::Table(map)]) => Lookup::Single(Arc::clone(map)),
             (None, _) => {
                 return internal_err!(
                     "a lookup over anything but one non-empty map needs a partition router"
@@ -425,7 +439,7 @@ impl HashTableLookupExpr {
         &self,
         keys: &[ArrayRef],
         router: &PartitionRouter,
-        maps: &[Option<Arc<ReservedMap>>],
+        maps: &[PartitionKeys],
     ) -> Result<BooleanArray> {
         let num_rows = keys[0].len();
         let mut partition_ids = Vec::with_capacity(num_rows);
@@ -443,30 +457,35 @@ impl HashTableLookupExpr {
         // by hash, so this path skips hashing the keys.
         let array_maps: Option<Vec<Option<&ArrayMap>>> = maps
             .iter()
-            .map(|map| match map.as_deref().map(|map| -> &Map { map }) {
-                None => Some(None),
-                Some(Map::ArrayMap(map)) => Some(Some(map)),
-                Some(Map::HashMap(_)) => None,
+            .map(|keys| match keys {
+                PartitionKeys::Empty | PartitionKeys::Unknown => Some(None),
+                PartitionKeys::Table(map) => match map.as_ref() as &Map {
+                    Map::ArrayMap(map) => Some(Some(map)),
+                    Map::HashMap(_) => None,
+                },
             })
             .collect();
-        if let Some(array_maps) = array_maps {
-            return probe_runs(&array_maps, &starts, &rows, |map, run| {
+        let matched = match array_maps {
+            Some(array_maps) => probe_runs(&array_maps, &starts, &rows, |map, run| {
                 probe_array_map(map, run)
-            });
-        }
-
-        with_hashes(keys, self.random_state.random_state(), |hashes| {
-            let sorted_hashes: Vec<u64> =
-                rows.iter().map(|&row| hashes[row as usize]).collect();
-            let maps: Vec<Option<&Map>> = maps
-                .iter()
-                .map(|map| map.as_deref().map(|map| -> &Map { map }))
-                .collect();
-            probe_runs(&maps, &starts, &rows, |map, run| match map {
-                Map::HashMap(map) => Ok(map.contain_hashes(&sorted_hashes[run])),
-                Map::ArrayMap(map) => probe_array_map(map, run),
-            })
-        })
+            })?,
+            None => with_hashes(keys, self.random_state.random_state(), |hashes| {
+                let sorted_hashes: Vec<u64> =
+                    rows.iter().map(|&row| hashes[row as usize]).collect();
+                let maps: Vec<Option<&Map>> = maps
+                    .iter()
+                    .map(|keys| match keys {
+                        PartitionKeys::Table(map) => Some(map.as_ref() as &Map),
+                        PartitionKeys::Empty | PartitionKeys::Unknown => None,
+                    })
+                    .collect();
+                probe_runs(&maps, &starts, &rows, |map, run| match map {
+                    Map::HashMap(map) => Ok(map.contain_hashes(&sorted_hashes[run])),
+                    Map::ArrayMap(map) => probe_array_map(map, run),
+                })
+            })?,
+        };
+        Ok(found_in_unknown(matched, maps, &starts, &rows))
     }
 }
 
@@ -521,6 +540,32 @@ fn probe_runs<M: Copy>(
         }
     }
     Ok(BooleanArray::new(matched.finish(), None))
+}
+
+/// `matched` with every row routed to a partition whose keys are unknown (its
+/// build side spilled) marked found
+fn found_in_unknown(
+    matched: BooleanArray,
+    maps: &[PartitionKeys],
+    starts: &[usize],
+    rows: &[u32],
+) -> BooleanArray {
+    if !maps
+        .iter()
+        .any(|keys| matches!(keys, PartitionKeys::Unknown))
+    {
+        return matched;
+    }
+    let mut found = BooleanBufferBuilder::new(matched.len());
+    found.append_buffer(matched.values());
+    for (partition, keys) in maps.iter().enumerate() {
+        if matches!(keys, PartitionKeys::Unknown) {
+            for &row in &rows[starts[partition]..starts[partition + 1]] {
+                found.set_bit(row as usize, true);
+            }
+        }
+    }
+    BooleanArray::new(found.finish(), None)
 }
 
 impl std::fmt::Debug for HashTableLookupExpr {

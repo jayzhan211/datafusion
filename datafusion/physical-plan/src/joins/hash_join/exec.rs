@@ -35,7 +35,7 @@ use crate::joins::utils::{
     update_hash_from_values,
 };
 use crate::joins::{JoinOn, JoinOnRef, PartitionMode, ReservedMap, SharedBitmapBuilder};
-use crate::metrics::{Count, MetricBuilder, MetricCategory};
+use crate::metrics::{Count, Gauge, MetricBuilder, MetricCategory};
 use crate::projection::{
     EmbeddedProjection, JoinData, ProjectionExec, try_embed_projection,
     try_pushdown_through_join_with_column_indices,
@@ -94,6 +94,12 @@ use futures::TryStreamExt;
 use parking_lot::Mutex;
 
 use super::partitioned_hash_eval::SeededRandomState;
+use super::spill::{
+    SpillContext, SpilledBuild, SpilledPairMetrics, StreamParams, spillable_stream,
+};
+use crate::metrics::SpillMetrics;
+use crate::spill::spill_manager::SpillManager;
+use datafusion_execution::memory_pool::MemoryLimit;
 
 mod prepared;
 pub use prepared::PreparedHashJoinBuild;
@@ -265,11 +271,24 @@ pub(super) struct JoinLeftData {
     /// Tracks the final probe partition and what every partition observed.
     /// See [`ProbeCompletion`] for the completion invariant.
     probe_completion: ProbeCompletion,
+    /// The spilled buckets when this is the kept part of a spilled build side
+    spilled: Option<Arc<SpilledBuild>>,
     // Drop the reservation after the mutable state it also accounts for.
     build: Arc<JoinBuildData>,
 }
 
 impl JoinLeftData {
+    /// This kept part of a build side with its spilled buckets
+    pub(super) fn with_spilled(mut self, spilled: Arc<SpilledBuild>) -> Self {
+        self.spilled = Some(spilled);
+        self
+    }
+
+    /// The spilled buckets, if this is the kept part of a spilled build side
+    pub(super) fn spilled(&self) -> Option<&Arc<SpilledBuild>> {
+        self.spilled.as_ref()
+    }
+
     /// return a reference to the map
     pub(super) fn map(&self) -> &Map {
         &self.build.map
@@ -1262,6 +1281,94 @@ impl HashJoinExec {
             .transpose()
     }
 
+    /// Whether a partition whose build side the memory pool refuses spills
+    /// instead of failing.
+    ///
+    /// Only a `Partitioned` join spills: a `CollectLeft` build side is shared
+    /// by every probe stream. A join whose output keeps the probe side's
+    /// order cannot emit spilled buckets after the others: it fails as before
+    /// instead. Without a memory limit nothing is ever refused, so today's
+    /// stream runs.
+    fn can_spill(&self, context: &TaskContext) -> bool {
+        context
+            .session_config()
+            .options()
+            .execution
+            .enable_hash_join_spilling
+            && self.mode == PartitionMode::Partitioned
+            && self.cache.output_ordering().is_none()
+            && self.prepared_build.is_none()
+            && context.runtime_env().disk_manager.tmp_files_enabled()
+            && !matches!(context.memory_pool().memory_limit(), MemoryLimit::Infinite)
+    }
+
+    /// What a probe stream that may spill needs, see [`super::spill`]
+    fn spill_context(
+        &self,
+        partition: usize,
+        context: &Arc<TaskContext>,
+        on_left: Vec<PhysicalExprRef>,
+        join_metrics: BuildProbeJoinMetrics,
+        array_map_created_count: Count,
+        not_in: Option<NotIn>,
+    ) -> SpillContext {
+        let column_indices = match self.projection.as_ref() {
+            Some(projection) => projection
+                .iter()
+                .map(|i| self.column_indices[*i].clone())
+                .collect(),
+            None => self.column_indices.clone(),
+        };
+        let on_right: Vec<PhysicalExprRef> =
+            self.on.iter().map(|(_, r)| Arc::clone(r)).collect();
+        let build_routing = on_left.clone();
+        let probe_routing = on_right.clone();
+        let env = context.runtime_env();
+        let compression = context.session_config().spill_compression();
+        let spill_metrics = SpillMetrics::new(&self.metrics, partition);
+        SpillContext {
+            stream: StreamParams {
+                partition,
+                schema: self.schema(),
+                on_right,
+                filter: self.filter.clone(),
+                join_type: self.join_type,
+                random_state: self.random_state.random_state().clone(),
+                join_metrics: join_metrics.clone(),
+                column_indices,
+                null_equality: self.null_equality,
+                batch_size: context.session_config().batch_size(),
+                mode: self.mode,
+            },
+            build: BuildParams {
+                random_state: self.random_state.random_state().clone(),
+                schema: self.left.schema(),
+                on_left,
+                metrics: join_metrics,
+                with_visited_indices_bitmap: need_produce_result_in_final(self.join_type),
+                config: Arc::clone(context.session_config().options()),
+                null_equality: self.null_equality,
+                array_map_created_count,
+                not_in,
+            },
+            build_routing,
+            probe_routing,
+            build_spill: SpillManager::new(
+                Arc::clone(&env),
+                spill_metrics.clone(),
+                self.left.schema(),
+            )
+            .with_compression_type(compression),
+            probe_spill: SpillManager::new(env, spill_metrics, self.right.schema())
+                .with_compression_type(compression),
+            pool: Arc::clone(context.memory_pool()),
+            pairs: SpilledPairMetrics::new(&self.metrics, partition),
+            dynamic_filter: false,
+            fetch: self.fetch,
+            right_side_ordered: self.right.output_ordering().is_some(),
+        }
+    }
+
     /// Calculate order preservation flags for this hash join.
     fn maintains_input_order(join_type: JoinType) -> Vec<bool> {
         // The output follows the probe (right) order only when every output
@@ -1748,6 +1855,53 @@ impl ExecutionPlan for HashJoinExec {
             })
             .flatten()
             .flatten();
+
+        // A null-aware (`NOT IN`) join decides a row from whole sides, which a
+        // spilled pair sees only in part: it fails as before instead
+        if not_in.is_none() && self.can_spill(&context) {
+            let spill_context = || {
+                let mut ctx = self.spill_context(
+                    partition,
+                    &context,
+                    on_left.clone(),
+                    join_metrics.clone(),
+                    array_map_created_count.clone(),
+                    not_in,
+                );
+                ctx.dynamic_filter = enable_dynamic_filter_pushdown;
+                ctx
+            };
+            let collect = |left_stream, reservation, probe_streams| {
+                collect_left_input_or_overflow(
+                    self.random_state.random_state().clone(),
+                    left_stream,
+                    on_left.clone(),
+                    join_metrics.clone(),
+                    reservation,
+                    need_produce_result_in_final(self.join_type),
+                    probe_streams,
+                    enable_dynamic_filter_pushdown,
+                    Arc::clone(context.session_config().options()),
+                    self.null_equality,
+                    not_in,
+                    array_map_created_count.clone(),
+                    BuildMode::Ordinary,
+                    true,
+                )
+            };
+            let left_stream = self.left.execute(partition, Arc::clone(&context))?;
+            let reservation = MemoryConsumer::new(format!("HashJoinInput[{partition}]"))
+                .with_can_spill(true)
+                .register(context.memory_pool());
+            let build = collect(left_stream, reservation, 1);
+            let right = self.right.execute(partition, Arc::clone(&context))?;
+            return Ok(spillable_stream(
+                spill_context(),
+                Box::pin(build),
+                right,
+                build_accumulator,
+            ));
+        }
 
         let left_fut = match (&self.prepared_build, self.mode) {
             (Some(prepared), _) => {
@@ -2832,7 +2986,7 @@ fn lr_is_preserved(join_type: JoinType) -> (bool, bool) {
 /// The bounds are used for dynamic filter pushdown optimization, where filters
 /// based on the actual data ranges can be pushed down to the probe side to
 /// eliminate unnecessary data early.
-struct CollectLeftAccumulator {
+pub(super) struct CollectLeftAccumulator {
     /// The physical expression to evaluate for each batch
     expr: Arc<dyn PhysicalExpr>,
     /// Accumulator for tracking the minimum value across all batches
@@ -2850,7 +3004,10 @@ impl CollectLeftAccumulator {
     ///
     /// # Returns
     /// A new `CollectLeftAccumulator` instance configured for the expression's data type
-    fn try_new(expr: Arc<dyn PhysicalExpr>, schema: &SchemaRef) -> Result<Self> {
+    pub(super) fn try_new(
+        expr: Arc<dyn PhysicalExpr>,
+        schema: &SchemaRef,
+    ) -> Result<Self> {
         /// Recursively unwraps dictionary types to get the underlying value type.
         fn dictionary_value_type(data_type: &DataType) -> DataType {
             match data_type {
@@ -2882,7 +3039,7 @@ impl CollectLeftAccumulator {
     ///
     /// # Returns
     /// Ok(()) if the update succeeds, or an error if expression evaluation fails
-    fn update_batch(&mut self, batch: &RecordBatch) -> Result<()> {
+    pub(super) fn update_batch(&mut self, batch: &RecordBatch) -> Result<()> {
         let array = self.expr.evaluate(batch)?.into_array(batch.num_rows())?;
         self.min.update_batch(std::slice::from_ref(&array))?;
         self.max.update_batch(std::slice::from_ref(&array))?;
@@ -2895,7 +3052,7 @@ impl CollectLeftAccumulator {
     ///
     /// # Returns
     /// The `ColumnBounds` containing the minimum and maximum values observed
-    fn evaluate(mut self) -> Result<ColumnBounds> {
+    pub(super) fn evaluate(mut self) -> Result<ColumnBounds> {
         Ok(ColumnBounds::new(
             self.min.evaluate()?,
             self.max.evaluate()?,
@@ -3110,7 +3267,7 @@ fn concat_build_batches(
 #[expect(clippy::too_many_arguments)]
 async fn collect_left_input(
     random_state: RandomState,
-    mut left_stream: SendableRecordBatchStream,
+    left_stream: SendableRecordBatchStream,
     on_left: Vec<PhysicalExprRef>,
     metrics: BuildProbeJoinMetrics,
     reservation: MemoryReservation,
@@ -3123,6 +3280,77 @@ async fn collect_left_input(
     array_map_created_count: Count,
     mode: BuildMode,
 ) -> Result<JoinLeftData> {
+    match collect_left_input_or_overflow(
+        random_state,
+        left_stream,
+        on_left,
+        metrics,
+        reservation,
+        with_visited_indices_bitmap,
+        probe_threads_count,
+        should_compute_dynamic_filters,
+        config,
+        null_equality,
+        not_in,
+        array_map_created_count,
+        mode,
+        false,
+    )
+    .await?
+    {
+        BuildOutcome::InMemory(data) => Ok(data),
+        BuildOutcome::Overflow(_) => {
+            internal_err!("Hash join build overflowed although it cannot spill")
+        }
+    }
+}
+
+/// The result of collecting a build side that may spill
+#[expect(clippy::large_enum_variant)]
+pub(super) enum BuildOutcome {
+    /// The build side fit: today's in-memory join data
+    InMemory(JoinLeftData),
+    /// The pool refused build memory, see [`super::spill`]
+    Overflow(BuildOverflow),
+}
+
+/// Everything collected when the pool refused build memory
+pub(super) struct BuildOverflow {
+    /// Every build row read so far
+    pub(super) batches: Vec<RecordBatch>,
+    /// The rest of the build input, possibly exhausted
+    pub(super) rest: SendableRecordBatchStream,
+    /// Covers what `batches` still holds, except the refused batch
+    pub(super) reservation: MemoryReservation,
+}
+
+pub(super) fn is_resources_exhausted(error: &datafusion_common::DataFusionError) -> bool {
+    matches!(
+        error.find_root(),
+        datafusion_common::DataFusionError::ResourcesExhausted(_)
+    )
+}
+
+/// [`collect_left_input`] that, when the build side `can_spill`, answers a
+/// refused allocation with [`BuildOutcome::Overflow`] instead of an error.
+/// Until then it runs exactly the same code.
+#[expect(clippy::too_many_arguments)]
+async fn collect_left_input_or_overflow(
+    random_state: RandomState,
+    mut left_stream: SendableRecordBatchStream,
+    on_left: Vec<PhysicalExprRef>,
+    metrics: BuildProbeJoinMetrics,
+    reservation: MemoryReservation,
+    with_visited_indices_bitmap: bool,
+    probe_threads_count: usize,
+    should_compute_dynamic_filters: bool,
+    config: Arc<ConfigOptions>,
+    null_equality: NullEquality,
+    not_in: Option<NotIn>,
+    array_map_created_count: Count,
+    mode: BuildMode,
+    can_spill: bool,
+) -> Result<BuildOutcome> {
     let schema = left_stream.schema();
     let prepared = mode == BuildMode::Prepared;
 
@@ -3144,11 +3372,24 @@ async fn collect_left_input(
                 accumulator.update_batch(&batch)?;
             }
         }
-        let batch_size = state.memory_counter.count_batch(&batch);
-        state.reservation.try_grow(batch_size)?;
-        state.metrics.build_mem_used.add(batch_size);
+        // Input whether or not memory is found for it
         state.metrics.build_input_batches.add(1);
         state.metrics.build_input_rows.add(batch.num_rows());
+        let batch_size = state.memory_counter.count_batch(&batch);
+        let refused = match state.reservation.try_grow(batch_size) {
+            Ok(()) => false,
+            Err(e) if can_spill && is_resources_exhausted(&e) => true,
+            Err(e) => return Err(e),
+        };
+        if refused {
+            state.batches.push(batch);
+            return Ok(BuildOutcome::Overflow(BuildOverflow {
+                batches: state.batches,
+                rest: left_stream,
+                reservation: state.reservation,
+            }));
+        }
+        state.metrics.build_mem_used.add(batch_size);
         state.num_rows += batch.num_rows();
         state.batches.push(batch);
     }
@@ -3195,7 +3436,18 @@ async fn collect_left_input(
         _ => None,
     };
 
-    build_in_memory(
+    let mut reservation = reservation;
+    let overflow = |batches: Vec<RecordBatch>, reservation: MemoryReservation| {
+        // The rows are all still in `batches`: hold exactly what they retain
+        let mut counter = RecordBatchMemoryCounter::new();
+        reservation.resize(batches.iter().map(|b| counter.count_batch(b)).sum());
+        BuildOutcome::Overflow(BuildOverflow {
+            batches,
+            rest: Box::pin(crate::EmptyRecordBatchStream::new(Arc::clone(&schema))),
+            reservation,
+        })
+    };
+    match build_in_memory(
         &random_state,
         &schema,
         &mut batches,
@@ -3205,7 +3457,7 @@ async fn collect_left_input(
         copy_bytes,
         &on_left,
         &metrics,
-        reservation,
+        &mut reservation,
         bounds,
         with_visited_indices_bitmap,
         probe_threads_count,
@@ -3215,16 +3467,95 @@ async fn collect_left_input(
         not_in,
         &array_map_created_count,
         prepared,
-    )
+    ) {
+        Ok(data) => Ok(BuildOutcome::InMemory(data)),
+        Err(e) if can_spill && !prepared && is_resources_exhausted(&e) => {
+            Ok(overflow(batches, reservation))
+        }
+        Err(e) => Err(e),
+    }
+}
+
+/// Rough bytes a hash table over `num_rows` build rows takes on top of the
+/// rows themselves: the map and the duplicate chain. A concatenated copy of
+/// the rows is not included.
+pub(super) fn build_table_bytes(num_rows: usize) -> usize {
+    estimate_memory_size::<(u32, u64)>(num_rows, size_of::<JoinHashMapU32>())
+        .unwrap_or(usize::MAX)
+        .saturating_add(num_rows * size_of::<u32>())
+}
+
+/// Builds the in-memory join data of one spilled bucket pair, see [`super::spill`]
+#[derive(Clone)]
+pub(super) struct BuildParams {
+    pub(super) random_state: RandomState,
+    pub(super) schema: SchemaRef,
+    pub(super) on_left: Vec<PhysicalExprRef>,
+    pub(super) metrics: BuildProbeJoinMetrics,
+    pub(super) with_visited_indices_bitmap: bool,
+    pub(super) config: Arc<ConfigOptions>,
+    pub(super) null_equality: NullEquality,
+    pub(super) array_map_created_count: Count,
+    pub(super) not_in: Option<NotIn>,
+}
+
+impl BuildParams {
+    /// Builds a single-stream hash table over `batches`, which `reservation`
+    /// already covers. No dynamic filter is computed: a spilled partition
+    /// reports none.
+    pub(super) fn build(
+        &self,
+        batches: &mut Vec<RecordBatch>,
+        reservation: &mut MemoryReservation,
+        probe_streams: usize,
+    ) -> Result<JoinLeftData> {
+        let num_rows = batches.iter().map(|b| b.num_rows()).sum();
+        let max_batch_rows = batches.iter().map(|b| b.num_rows()).max().unwrap_or(0);
+        let mut counter = RecordBatchMemoryCounter::new();
+        let input_bytes = batches.iter().map(|b| counter.count_batch(b)).sum();
+        let _timer = self.metrics.build_time.timer();
+        // A spilled partition builds one table after another: report the
+        // largest, not their sum. The gauge starts at the input, which the
+        // build may give back when it concatenates.
+        let mut metrics = self.metrics.clone();
+        metrics.build_mem_used = Gauge::new();
+        metrics.build_mem_used.add(input_bytes);
+        let built = build_in_memory(
+            &self.random_state,
+            &self.schema,
+            batches,
+            num_rows,
+            max_batch_rows,
+            input_bytes,
+            0,
+            &self.on_left,
+            &metrics,
+            reservation,
+            None,
+            self.with_visited_indices_bitmap,
+            probe_streams,
+            false,
+            &self.config,
+            self.null_equality,
+            self.not_in,
+            &self.array_map_created_count,
+            false,
+        );
+        self.metrics
+            .build_mem_used
+            .set_max(metrics.build_mem_used.value());
+        built
+    }
 }
 
 /// Builds the hash table (or perfect-hash [`ArrayMap`]) and the bitmaps over
 /// the collected build `batches`, the second half of [`collect_left_input`].
 ///
 /// `reservation` already covers `batches`; the structures built here grow it
-/// further. On error the reservation is dropped, releasing everything, while
-/// `batches` keeps every build row (possibly concatenated into one batch) for
-/// callers that need to recover from a failed build.
+/// further, and on success its bytes move into the returned data. On error the
+/// caller keeps the reservation, and `batches` keeps every build row (possibly
+/// concatenated into one batch) for callers that need to recover from a failed
+/// build.
 #[expect(clippy::too_many_arguments)]
 fn build_in_memory(
     random_state: &RandomState,
@@ -3236,7 +3567,7 @@ fn build_in_memory(
     copy_bytes: usize,
     on_left: &[PhysicalExprRef],
     metrics: &BuildProbeJoinMetrics,
-    mut reservation: MemoryReservation,
+    reservation: &mut MemoryReservation,
     mut bounds: Option<PartitionBounds>,
     with_visited_indices_bitmap: bool,
     probe_threads_count: usize,
@@ -3258,7 +3589,7 @@ fn build_in_memory(
     let batch = if prepared {
         concat_batches(schema, batches.iter())?
     } else {
-        concat_build_batches(schema, batches, input_bytes, &mut reservation, metrics)?
+        concat_build_batches(schema, batches, input_bytes, reservation, metrics)?
     };
     let left_values = evaluate_expressions_to_arrays(on_left, &batch)?;
 
@@ -3379,7 +3710,7 @@ fn build_in_memory(
                 &left_values,
                 &normalized_values,
                 random_state,
-                &mut reservation,
+                reservation,
                 metrics,
             )
         })
@@ -3452,7 +3783,7 @@ fn build_in_memory(
         // buffers, including through multi-key StructArray children.
         let retained = RecordBatchMemoryCounter::new().count_batch(&batch);
         prepared::reconcile_prepared_copy_reservation(
-            &reservation,
+            reservation,
             input_bytes,
             copy_bytes,
             retained,
@@ -3466,11 +3797,12 @@ fn build_in_memory(
             values: normalized_values,
             bounds,
             membership,
-            reservation,
+            reservation: reservation.take(),
         }),
         not_in,
         visited_indices_bitmap: Mutex::new(visited_indices_bitmap),
         probe_completion: ProbeCompletion::new(probe_threads_count),
+        spilled: None,
     };
 
     Ok(data)
@@ -9412,6 +9744,203 @@ mod tests {
             &batches
         );
 
+        Ok(())
+    }
+
+    /// A parent partition whose build side is empty finishes without polling
+    /// its probe side, so it drops that child partition unpolled. The child's
+    /// stream that can spill creates its join stream only once its build side
+    /// is collected; dropped before that, it must still report the partition
+    /// canceled to the dynamic filter, or the other child partitions wait for
+    /// it forever.
+    #[tokio::test]
+    async fn test_spillable_join_dropped_unpolled_cancels_dynamic_filter_partition()
+    -> Result<()> {
+        let mut session_config = SessionConfig::default();
+        session_config
+            .options_mut()
+            .execution
+            .enable_hash_join_spilling = true;
+        // Never refuses: nothing spills, but every join takes the stream that could
+        let runtime = RuntimeEnvBuilder::new()
+            .with_memory_limit(1 << 30, 1.0)
+            .build_arc()?;
+        let task_ctx = Arc::new(
+            TaskContext::default()
+                .with_session_config(session_config)
+                .with_runtime(runtime),
+        );
+
+        // The partitioned dynamic filter needs hash-partitioned inputs
+        let hashed = |batch: RecordBatch, key: &str| -> Result<Arc<dyn ExecutionPlan>> {
+            let schema = batch.schema();
+            let input =
+                TestMemoryExec::try_new_exec(&[vec![batch]], Arc::clone(&schema), None)?;
+            let key = Arc::new(Column::new_with_schema(key, &schema)?) as _;
+            Ok(Arc::new(RepartitionExec::try_new(
+                input,
+                Partitioning::Hash(vec![key], 4),
+            )?))
+        };
+        let keys = (0..8).collect::<Vec<i32>>();
+        let child_left = hashed(
+            build_table_i32(("l_a", &keys), ("l_key", &keys), ("l_c", &keys)),
+            "l_key",
+        )?;
+        let child_right = hashed(
+            build_table_i32(("r_a", &keys), ("r_key", &keys), ("r_c", &keys)),
+            "r_key",
+        )?;
+        // One row: the other parent partitions have empty build sides
+        let parent_left = hashed(
+            build_table_i32(("p_a", &vec![0]), ("p_key", &vec![0]), ("p_c", &vec![0])),
+            "p_key",
+        )?;
+
+        let child_on = vec![(
+            Arc::new(Column::new_with_schema("l_key", &child_left.schema())?) as _,
+            Arc::new(Column::new_with_schema("r_key", &child_right.schema())?) as _,
+        )];
+        let (child_join, child_dynamic_filter) = hash_join_with_dynamic_filter_and_mode(
+            child_left,
+            child_right,
+            child_on,
+            JoinType::Inner,
+            PartitionMode::Partitioned,
+        )?;
+        let child_join: Arc<dyn ExecutionPlan> = Arc::new(child_join);
+        let parent_on = vec![(
+            Arc::new(Column::new_with_schema("p_key", &parent_left.schema())?) as _,
+            Arc::new(Column::new_with_schema("l_key", &child_join.schema())?) as _,
+        )];
+        let parent_join = HashJoinExec::try_new(
+            parent_left,
+            Arc::clone(&child_join),
+            parent_on,
+            None,
+            &JoinType::RightSemi,
+            None,
+            PartitionMode::Partitioned,
+            NullEquality::NullEqualsNothing,
+            false,
+        )?;
+
+        let batches = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            crate::execution_plan::collect(Arc::new(parent_join), task_ctx),
+        )
+        .await
+        .expect("a child partition dropped unpolled must not block its siblings")?;
+
+        assert_batches_sorted_eq!(
+            [
+                "+-----+-------+-----+-----+-------+-----+",
+                "| l_a | l_key | l_c | r_a | r_key | r_c |",
+                "+-----+-------+-----+-----+-------+-----+",
+                "| 0   | 0     | 0   | 0   | 0     | 0   |",
+                "+-----+-------+-----+-----+-------+-----+",
+            ],
+            &batches
+        );
+        // The filter was really built: the partitions waited on each other
+        child_dynamic_filter.wait_complete().await;
+
+        Ok(())
+    }
+
+    /// A build side that spills still reports the bounds of its keys, once it
+    /// has read them all: the probe side stays filtered and the filter
+    /// completes, though nothing waited for the spilled build side
+    #[tokio::test]
+    async fn test_spilled_build_sides_publish_key_bounds() -> Result<()> {
+        let hashed =
+            |batches: Vec<RecordBatch>, key: &str| -> Result<Arc<dyn ExecutionPlan>> {
+                let schema = batches[0].schema();
+                let input =
+                    TestMemoryExec::try_new_exec(&[batches], Arc::clone(&schema), None)?;
+                let key = Arc::new(Column::new_with_schema(key, &schema)?) as _;
+                Ok(Arc::new(RepartitionExec::try_new(
+                    input,
+                    Partitioning::Hash(vec![key], 4),
+                )?))
+            };
+        let build_keys = (100..2_100).collect::<Vec<i32>>();
+        let probe_keys = (0..3_000).collect::<Vec<i32>>();
+        for mode in [PartitionMode::Partitioned] {
+            // Batches of rising keys: the bounds must cover the rows read
+            // after the build side overflowed, not just those before
+            let build = build_keys
+                .chunks(100)
+                .map(|keys| {
+                    let keys = keys.to_vec();
+                    build_table_i32(("l_a", &keys), ("l_key", &keys), ("l_c", &keys))
+                })
+                .collect::<Vec<_>>();
+            let left = match mode {
+                PartitionMode::Partitioned => hashed(build, "l_key")?,
+                _ => {
+                    let schema = build[0].schema();
+                    TestMemoryExec::try_new_exec(&[build], schema, None)?
+                }
+            };
+            let right = hashed(
+                vec![build_table_i32(
+                    ("r_a", &probe_keys),
+                    ("r_key", &probe_keys),
+                    ("r_c", &probe_keys),
+                )],
+                "r_key",
+            )?;
+            let on = vec![(
+                Arc::new(Column::new_with_schema("l_key", &left.schema())?) as _,
+                Arc::new(Column::new_with_schema("r_key", &right.schema())?) as _,
+            )];
+            let (join, dynamic_filter) = hash_join_with_dynamic_filter_and_mode(
+                left,
+                right,
+                on,
+                JoinType::Inner,
+                mode,
+            )?;
+            let join = Arc::new(join);
+
+            let mut session_config = SessionConfig::default();
+            session_config
+                .options_mut()
+                .execution
+                .enable_hash_join_spilling = true;
+            // Every build side overflows at once
+            let pool = crate::test::memory_pool::CappedConsumerPool::new()
+                .with_cap("HashJoinInput", 1)
+                .with_cap("HashJoinSpill", 4 * 1024);
+            let runtime = RuntimeEnvBuilder::new()
+                .with_memory_pool(Arc::new(pool))
+                .build_arc()?;
+            let task_ctx = Arc::new(
+                TaskContext::default()
+                    .with_session_config(session_config)
+                    .with_runtime(runtime),
+            );
+            let batches = tokio::time::timeout(
+                std::time::Duration::from_secs(30),
+                crate::execution_plan::collect(Arc::clone(&join) as _, task_ctx),
+            )
+            .await
+            .expect("no partition waits for a spilled build side")?;
+
+            let rows: usize = batches.iter().map(|b| b.num_rows()).sum();
+            assert_eq!(rows, build_keys.len(), "{mode:?}");
+            assert!(
+                join.metrics().unwrap().spill_count().unwrap_or(0) > 0,
+                "{mode:?}: the build sides did not spill"
+            );
+            assert!(dynamic_filter.is_complete(), "{mode:?}");
+            let filter = dynamic_filter.current()?.to_string();
+            assert!(
+                filter.contains("r_key@1 >= 100 AND r_key@1 <= 2099"),
+                "{mode:?}: expected the build keys' bounds, got: {filter}"
+            );
+        }
         Ok(())
     }
 

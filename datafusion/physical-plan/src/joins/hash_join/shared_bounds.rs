@@ -18,7 +18,7 @@ use crate::joins::hash_join::exec::HASH_JOIN_SEED;
 use crate::joins::hash_join::inlist_builder::build_struct_fields;
 use crate::joins::hash_join::not_in::NotIn;
 use crate::joins::hash_join::partitioned_hash_eval::{
-    HashTableLookupExpr, PartitionRouter, SeededRandomState,
+    HashTableLookupExpr, PartitionKeys, PartitionRouter, SeededRandomState,
 };
 use crate::joins::join_hash_map::{JoinHashMapType, JoinHashMapU32};
 use crate::joins::key_range_bitmap::{KeyRangeBitmap, KeyRangePart};
@@ -165,13 +165,15 @@ fn create_membership_predicate(
                 on_right.to_vec(),
                 random_state.clone(),
                 None,
-                vec![Some(hash_map)],
+                vec![PartitionKeys::Table(hash_map)],
                 "hash_lookup".to_string(),
                 pruning_bitmap,
             )?) as Arc<dyn PhysicalExpr>))
         }
         // Empty partition - should not create a filter for this
         PushdownStrategy::Empty => Ok(None),
+        // Only the bounds are known
+        PushdownStrategy::BoundsOnly => Ok(None),
     }
 }
 
@@ -281,6 +283,10 @@ pub(crate) struct SharedBuildAccumulator {
     /// result, then broadcasts), so late subscribers simply re-check the
     /// state under the mutex and return immediately.
     completion_notify: Notify,
+    /// Held while the filter is built and published, so that a spilled
+    /// partition's late report and the finalizer publish one after the other,
+    /// each from what was reported by then
+    publish: Mutex<()>,
     /// Dynamic filter for pushdown to probe side
     dynamic_filter: Arc<DynamicFilterPhysicalExpr>,
     /// Right side join expressions needed for creating filter expressions
@@ -316,6 +322,9 @@ pub(crate) enum PushdownStrategy {
     Map(Arc<ReservedMap>, Option<Arc<KeyRangeBitmap>>),
     /// There was no data in this partition, do not build a dynamic filter for it
     Empty,
+    /// The build side spilled to disk, so its keys are not in memory: probe
+    /// rows are filtered by its bounds alone
+    BoundsOnly,
 }
 
 /// Build-side data reported by a single partition
@@ -383,12 +392,43 @@ enum PartitionStatus {
     ///
     /// `BuildReportHandle` explains when a parent operator drops a stream.
     CanceledUnknown,
+    /// The partition's build side is spilling: the other partitions do not
+    /// wait for it, its rows pass the filter until its build data arrives
+    /// through [`SharedBuildAccumulator::report_spilled_build_data`], and the
+    /// filter is marked complete only after that
+    Spilling,
 }
 
 #[derive(Clone)]
 enum FinalizeInput {
     Partitioned(Vec<PartitionStatus>),
     CollectLeft(PartitionStatus),
+}
+
+impl FinalizeInput {
+    /// Whether a spilling partition's build data is still to come
+    fn awaits_spilled_partition(&self) -> bool {
+        match self {
+            FinalizeInput::Partitioned(partitions) => partitions
+                .iter()
+                .any(|partition| matches!(partition, PartitionStatus::Spilling)),
+            FinalizeInput::CollectLeft(_) => false,
+        }
+    }
+}
+
+impl AccumulatedBuildData {
+    /// What every partition reported so far
+    fn finalize_input(&self) -> FinalizeInput {
+        match self {
+            AccumulatedBuildData::Partitioned { partitions, .. } => {
+                FinalizeInput::Partitioned(partitions.clone())
+            }
+            AccumulatedBuildData::CollectLeft { data, .. } => {
+                FinalizeInput::CollectLeft(data.clone())
+            }
+        }
+    }
 }
 
 impl SharedBuildAccumulator {
@@ -478,6 +518,7 @@ impl SharedBuildAccumulator {
                 completion: CompletionState::Pending,
             }),
             completion_notify: Notify::new(),
+            publish: Mutex::new(()),
             dynamic_filter,
             on_right,
             repartition_random_state,
@@ -503,14 +544,14 @@ impl SharedBuildAccumulator {
     /// # Returns
     /// * `Result<()>` - Ok if successful, Err if filter update failed or mode mismatch
     pub(crate) async fn report_build_data(&self, data: PartitionBuildData) -> Result<()> {
-        let finalize_input = {
+        let finalize = {
             let mut guard = self.inner.lock();
             self.store_build_data(&mut guard, data)?;
-            self.take_finalize_input_if_ready(&mut guard)
+            self.ready_to_finalize(&mut guard)
         };
 
-        if let Some(finalize_input) = finalize_input {
-            self.finish(finalize_input);
+        if finalize {
+            self.finish();
         }
 
         self.wait_for_completion().await
@@ -520,17 +561,84 @@ impl SharedBuildAccumulator {
     /// other partitions stop waiting for it. See
     /// [`PartitionStatus::CanceledUnknown`].
     ///
-    /// The call does nothing if the partition has already reported.
+    /// The call does nothing if the partition has already reported. A
+    /// spilling partition that will not report its build data (it failed or
+    /// was dropped) reports this too.
     pub(crate) fn report_canceled_partition(&self, partition_id: usize) {
-        let finalize_input = {
+        let (finalize, republish) = {
             let mut guard = self.inner.lock();
-            self.store_canceled_partition(&mut guard, partition_id);
-            self.take_finalize_input_if_ready(&mut guard)
+            let was_spilling = self.store_canceled_partition(&mut guard, partition_id);
+            (
+                self.ready_to_finalize(&mut guard),
+                was_spilling && !matches!(guard.completion, CompletionState::Pending),
+            )
         };
 
-        if let Some(finalize_input) = finalize_input {
-            self.finish(finalize_input);
+        if finalize {
+            self.finish();
+        } else if republish {
+            // Marks the filter complete. The partition never probes, so its
+            // rows need not pass any more. Nothing is left to report a
+            // failure to.
+            let _ = self.publish();
         }
+    }
+
+    /// Reports that `partition_id` (of a `Partitioned` join) spills its build
+    /// side. Its build data comes once the whole build side is read, through
+    /// [`Self::report_spilled_build_data`]; until then the other partitions
+    /// do not wait for it and its rows pass the filter. Without this, either
+    /// they would wait while it reads and spills its build side, or it would
+    /// be reported canceled, and the filter would reject the rows it joins.
+    pub(crate) fn report_spilling(&self, partition_id: usize) {
+        let finalize = {
+            let mut guard = self.inner.lock();
+            if let AccumulatedBuildData::Partitioned {
+                partitions,
+                completed_partitions,
+            } = &mut guard.data
+                && matches!(partitions[partition_id], PartitionStatus::Pending)
+            {
+                partitions[partition_id] = PartitionStatus::Spilling;
+                *completed_partitions += 1;
+            }
+            self.ready_to_finalize(&mut guard)
+        };
+
+        if finalize {
+            self.finish();
+        }
+    }
+
+    /// The build data of a partition that reported [`Self::report_spilling`],
+    /// once its whole build side is read. Does not wait for other partitions:
+    /// if the filter was already published, it is published again with this
+    /// partition's data.
+    pub(crate) fn report_spilled_build_data(
+        &self,
+        data: PartitionBuildData,
+    ) -> Result<()> {
+        let republish = {
+            let mut guard = self.inner.lock();
+            let PartitionBuildData::Partitioned { partition_id, .. } = &data else {
+                return internal_err!(
+                    "only a Partitioned join reports a spilled partition"
+                );
+            };
+            let partition_id = *partition_id;
+            let AccumulatedBuildData::Partitioned { partitions, .. } = &guard.data else {
+                return internal_err!(
+                    "Build data mode mismatch in report_spilled_build_data"
+                );
+            };
+            assert_or_internal_err!(
+                matches!(partitions[partition_id], PartitionStatus::Spilling),
+                "partition {partition_id} reported build data without spilling"
+            );
+            self.store_build_data(&mut guard, data)?;
+            !matches!(guard.completion, CompletionState::Pending)
+        };
+        if republish { self.publish() } else { Ok(()) }
     }
 
     fn store_build_data(
@@ -590,59 +698,78 @@ impl SharedBuildAccumulator {
         Ok(())
     }
 
+    /// Returns whether the partition was spilling
     fn store_canceled_partition(
         &self,
         guard: &mut AccumulatorState,
         partition_id: usize,
-    ) {
-        if let AccumulatedBuildData::Partitioned {
+    ) -> bool {
+        let AccumulatedBuildData::Partitioned {
             partitions,
             completed_partitions,
         } = &mut guard.data
-            && matches!(partitions[partition_id], PartitionStatus::Pending)
-        {
-            partitions[partition_id] = PartitionStatus::CanceledUnknown;
-            *completed_partitions += 1;
+        else {
+            return false;
+        };
+        match partitions[partition_id] {
+            PartitionStatus::Pending => {
+                partitions[partition_id] = PartitionStatus::CanceledUnknown;
+                *completed_partitions += 1;
+                false
+            }
+            PartitionStatus::Spilling => {
+                partitions[partition_id] = PartitionStatus::CanceledUnknown;
+                true
+            }
+            _ => false,
         }
     }
 
-    fn take_finalize_input_if_ready(
-        &self,
-        guard: &mut AccumulatorState,
-    ) -> Option<FinalizeInput> {
+    /// Whether every partition has reported, in which case the caller is
+    /// elected to finalize
+    fn ready_to_finalize(&self, guard: &mut AccumulatorState) -> bool {
         if !matches!(guard.completion, CompletionState::Pending) {
-            return None;
+            return false;
         }
 
-        let finalize_input = match &guard.data {
+        let ready = match &guard.data {
             AccumulatedBuildData::Partitioned {
                 partitions,
                 completed_partitions,
-            } if *completed_partitions == partitions.len() => {
-                Some(FinalizeInput::Partitioned(partitions.clone()))
-            }
+            } => *completed_partitions == partitions.len(),
             AccumulatedBuildData::CollectLeft {
-                data,
                 reported_count,
                 expected_reports,
-            } if *reported_count == *expected_reports => {
-                Some(FinalizeInput::CollectLeft(data.clone()))
-            }
-            _ => None,
-        }?;
-
-        guard.completion = CompletionState::Finalizing;
-        Some(finalize_input)
+                ..
+            } => *reported_count == *expected_reports,
+        };
+        if ready {
+            guard.completion = CompletionState::Finalizing;
+        }
+        ready
     }
 
-    fn finish(&self, finalize_input: FinalizeInput) {
-        let result = self.build_filter(finalize_input).map_err(Arc::new);
-        self.dynamic_filter.mark_complete();
+    fn finish(&self) {
+        let result = self.publish().map_err(Arc::new);
 
         let mut guard = self.inner.lock();
         guard.completion = CompletionState::Ready(result);
         drop(guard);
         self.completion_notify.notify_waiters();
+    }
+
+    /// Builds the filter from what every partition reported so far and
+    /// publishes it, complete unless a spilling partition's build data is
+    /// still to come
+    fn publish(&self) -> Result<()> {
+        let _publish = self.publish.lock();
+        let finalize_input = self.inner.lock().data.finalize_input();
+        let complete = !finalize_input.awaits_spilled_partition();
+        let result = self.build_filter(finalize_input);
+        if complete || result.is_err() {
+            self.dynamic_filter.mark_complete();
+        }
+        result
     }
 
     async fn wait_for_completion(&self) -> Result<()> {
@@ -702,19 +829,26 @@ impl SharedBuildAccumulator {
             PartitionStatus::Pending => datafusion_common::internal_err!(
                 "attempted to finalize collect-left dynamic filter without reported build data"
             ),
-            PartitionStatus::CanceledUnknown => datafusion_common::internal_err!(
-                "collect-left dynamic filter cannot finalize with canceled build data"
-            ),
+            PartitionStatus::CanceledUnknown | PartitionStatus::Spilling => {
+                datafusion_common::internal_err!(
+                    "collect-left dynamic filter cannot finalize with canceled build data"
+                )
+            }
         }
     }
 
     /// Builds one probe-side filter from finalized partitioned build data.
-    /// Empty and canceled partitions contribute no key.
+    /// Empty and canceled partitions contribute no key. A spilled partition
+    /// contributes only its bounds, and one still spilling lets every row
+    /// routed to it pass.
     fn build_partitioned_filter(&self, partitions: Vec<PartitionStatus>) -> Result<()> {
         let num_partitions = partitions.len();
         let mut members = Vec::with_capacity(num_partitions);
         let mut merged_bounds: Option<PartitionBounds> = None;
         let mut keys_have_null = false;
+        // The filter checks one range for every partition, which cannot hold
+        // while a partition's keys may be anything
+        let mut bounds_known = true;
 
         for (partition_id, partition) in partitions.into_iter().enumerate() {
             match partition {
@@ -737,6 +871,16 @@ impl SharedBuildAccumulator {
                     });
                     members.push((partition_id, pushdown, bounds));
                 }
+                PartitionStatus::Spilling => {
+                    bounds_known = false;
+                    // Its keys are unknown, so it may hold a NULL key
+                    keys_have_null = true;
+                    members.push((
+                        partition_id,
+                        PushdownStrategy::BoundsOnly,
+                        PartitionBounds::new(vec![]),
+                    ));
+                }
                 PartitionStatus::Pending => {
                     return internal_err!(
                         "attempted to finalize dynamic filter with pending partition"
@@ -745,6 +889,7 @@ impl SharedBuildAccumulator {
             }
         }
 
+        let merged_bounds = merged_bounds.filter(|_| bounds_known);
         let filter_expr = match members.as_slice() {
             // No build row exists, so no probe row can match.
             [] => lit(false),
@@ -759,7 +904,8 @@ impl SharedBuildAccumulator {
                 )?,
                 create_bounds_predicate(&self.on_right, bounds),
             )
-            .expect("membership predicate is always present"),
+            // A spilling partition: nothing is known yet
+            .unwrap_or_else(|| lit(true)),
             _ => {
                 self.merged_membership_filter(&members, merged_bounds, num_partitions)?
             }
@@ -796,43 +942,58 @@ impl SharedBuildAccumulator {
                 .sum::<usize>();
             values <= self.in_list_max_values && bytes <= self.in_list_max_size
         };
-        let membership = if combined_in_list {
+        let membership = if members
+            .iter()
+            .all(|(_, pushdown, _)| matches!(pushdown, PushdownStrategy::BoundsOnly))
+        {
+            // No partition's keys are in memory: the bounds alone filter
+            None
+        } else if combined_in_list {
             let values = concat(&lists.iter().map(|l| l.as_ref()).collect::<Vec<_>>())?;
-            create_membership_predicate(
-                &self.on_right,
-                PushdownStrategy::InList(values),
-                &HASH_JOIN_SEED,
-                self.probe_schema.as_ref(),
-            )?
-            .expect("an IN list always has a membership predicate")
+            Some(
+                create_membership_predicate(
+                    &self.on_right,
+                    PushdownStrategy::InList(values),
+                    &HASH_JOIN_SEED,
+                    self.probe_schema.as_ref(),
+                )?
+                .expect("an IN list always has a membership predicate"),
+            )
         } else {
             // Each probe row is looked up in the table of the partition its key
             // routes to, so the partitions' tables are shared as they are: no
             // merged table to build while every probe stream waits on the filter.
-            let mut maps = vec![None; num_partitions];
+            let mut maps = vec![PartitionKeys::Empty; num_partitions];
             for (partition_id, pushdown, _) in members {
-                maps[*partition_id] = Some(match pushdown {
-                    PushdownStrategy::Map(map, _) => Arc::clone(map),
-                    PushdownStrategy::InList(values) => self.in_list_hash_map(values)?,
+                maps[*partition_id] = match pushdown {
+                    PushdownStrategy::Map(map, _) => {
+                        PartitionKeys::Table(Arc::clone(map))
+                    }
+                    PushdownStrategy::InList(values) => {
+                        PartitionKeys::Table(self.in_list_hash_map(values)?)
+                    }
+                    PushdownStrategy::BoundsOnly => PartitionKeys::Unknown,
                     PushdownStrategy::Empty => {
                         return internal_err!("empty partitions have no members");
                     }
-                });
+                };
             }
-            Arc::new(HashTableLookupExpr::new_reserved(
+            Some(Arc::new(HashTableLookupExpr::new_reserved(
                 self.on_right.clone(),
                 HASH_JOIN_SEED,
                 Some(self.partition_router(num_partitions)?),
                 maps,
                 String::from("hash_lookup"),
                 self.merged_pruning_bitmap(members, merged_bounds.as_ref()),
-            )?)
+            )?) as Arc<dyn PhysicalExpr>)
         };
 
         let bounds = merged_bounds
             .and_then(|bounds| create_bounds_predicate(&self.on_right, &bounds));
-        Ok(combine_membership_and_bounds(Some(membership), bounds)
-            .expect("membership predicate is always present"))
+        Ok(
+            combine_membership_and_bounds(membership, bounds)
+                .unwrap_or_else(|| lit(true)),
+        )
     }
 
     /// How probe rows find their build partition: as the probe side was
@@ -993,6 +1154,7 @@ pub(super) fn make_partitioned_accumulator_for_test(
             completion: CompletionState::Pending,
         }),
         completion_notify: Notify::new(),
+        publish: Mutex::new(()),
         dynamic_filter,
         on_right: vec![],
         repartition_random_state: SeededRandomState::with_seed(1),
@@ -1061,6 +1223,7 @@ mod tests {
                 completion: CompletionState::Pending,
             }),
             completion_notify: Notify::new(),
+            publish: Mutex::new(()),
             dynamic_filter,
             on_right,
             repartition_random_state: SeededRandomState::with_seed(1),
@@ -1678,6 +1841,7 @@ mod tests {
                 completion: CompletionState::Pending,
             }),
             completion_notify: Notify::new(),
+            publish: Mutex::new(()),
             dynamic_filter: Arc::new(DynamicFilterPhysicalExpr::new(vec![], lit(true))),
             on_right,
             repartition_random_state: SeededRandomState::with_seed(1),
@@ -1889,6 +2053,7 @@ mod tests {
                     completion: CompletionState::Pending,
                 }),
                 completion_notify: Notify::new(),
+                publish: Mutex::new(()),
                 dynamic_filter,
                 on_right,
                 repartition_random_state: SeededRandomState::with_seed(1),
@@ -1947,5 +2112,199 @@ mod tests {
                 .expect("expected column under IS NULL");
             out.push(column.index());
         }
+    }
+    /// The partition each of `keys` routes to, as hash repartitioning does
+    #[cfg(not(feature = "force_hash_collisions"))]
+    fn partitions_of(
+        acc: &SharedBuildAccumulator,
+        num_partitions: usize,
+        keys: &[i32],
+    ) -> Vec<usize> {
+        let array: ArrayRef = Arc::new(Int32Array::from(keys.to_vec()));
+        let mut hashes = vec![0; keys.len()];
+        create_hashes(
+            [&array],
+            acc.repartition_random_state.random_state(),
+            &mut hashes,
+        )
+        .unwrap();
+        hashes
+            .iter()
+            .map(|hash| (hash % num_partitions as u64) as usize)
+            .collect()
+    }
+
+    /// Build keys 0, 2, .., 38 over two partitions: partition 0 holds its
+    /// keys in a hash table, partition 1 spilled. Returns partition 0's
+    /// build data, partition 1's, and the bounds of partition 1's keys.
+    #[cfg(not(feature = "force_hash_collisions"))]
+    fn one_spilled_of_two(
+        acc: &SharedBuildAccumulator,
+    ) -> (PartitionBuildData, PartitionBuildData, (i32, i32)) {
+        let build: Vec<i32> = (0..40).step_by(2).collect();
+        let routes = partitions_of(acc, 2, &build);
+        let held = |partition| {
+            build
+                .iter()
+                .zip(&routes)
+                .filter(|(_, p)| **p == partition)
+                .map(|(key, _)| *key)
+                .collect::<Vec<_>>()
+        };
+        let (kept, spilled) = (held(0), held(1));
+        assert!(!kept.is_empty() && !spilled.is_empty());
+        let range =
+            |keys: &[i32]| (*keys.iter().min().unwrap(), *keys.iter().max().unwrap());
+        let (kept_min, kept_max) = range(&kept);
+        let (spilled_min, spilled_max) = range(&spilled);
+        (
+            PartitionBuildData::Partitioned {
+                partition_id: 0,
+                pushdown: hash_map_of(&kept),
+                bounds: bounds(kept_min, kept_max),
+                keys_have_null: false,
+            },
+            PartitionBuildData::Partitioned {
+                partition_id: 1,
+                pushdown: PushdownStrategy::BoundsOnly,
+                bounds: bounds(spilled_min, spilled_max),
+                keys_have_null: false,
+            },
+            (spilled_min, spilled_max),
+        )
+    }
+
+    /// What the filter passes once both partitions are known: a key routed
+    /// to partition 0 when that partition holds it, a key routed to the
+    /// spilled partition 1 when it lies within the build side's bounds. The
+    /// merged filter checks one range, the union of the partitions' bounds,
+    /// which here takes the kept partition's too.
+    #[cfg(not(feature = "force_hash_collisions"))]
+    fn assert_passes_kept_keys_and_spilled_bounds(
+        acc: &SharedBuildAccumulator,
+        (spilled_min, spilled_max): (i32, i32),
+    ) {
+        let (min, max) = (spilled_min.min(0), spilled_max.max(38));
+        let probe: Vec<i32> = (-10..60).collect();
+        let expected: Vec<bool> = probe
+            .iter()
+            .zip(partitions_of(acc, 2, &probe))
+            .map(|(key, partition)| match partition {
+                0 => (0..40).step_by(2).any(|k| k == *key),
+                _ => (min..=max).contains(key),
+            })
+            .collect();
+        assert_matches(acc, &probe, &expected);
+    }
+
+    /// A partition that spills does not hold up the others: the filter is
+    /// published without it, letting its rows through, and stays incomplete.
+    /// Once its bounds arrive the filter is the merged lookup, with the spilled
+    /// partition's rows checked against its bounds only, and complete.
+    #[tokio::test]
+    #[cfg(not(feature = "force_hash_collisions"))]
+    async fn spilled_partition_bounds_arrive_after_the_filter_is_published() {
+        let acc = make_partitioned_expr_accumulator_for_test(2);
+        let (kept, spilled, spilled_bounds) = one_spilled_of_two(&acc);
+
+        acc.report_spilling(1);
+        acc.report_build_data(kept).await.unwrap();
+        assert!(!acc.dynamic_filter.is_complete());
+        let probe: Vec<i32> = (-10..60).collect();
+        let routes = partitions_of(&acc, 2, &probe);
+        let expected: Vec<bool> = probe
+            .iter()
+            .zip(&routes)
+            .map(|(key, partition)| {
+                *partition == 1 || (0..40).step_by(2).any(|k| k == *key)
+            })
+            .collect();
+        assert_matches(&acc, &probe, &expected);
+
+        acc.report_spilled_build_data(spilled).unwrap();
+        assert!(acc.dynamic_filter.is_complete());
+        assert_passes_kept_keys_and_spilled_bounds(&acc, spilled_bounds);
+    }
+
+    /// Bounds that arrive before the other partitions report are part of the
+    /// first, and only, filter.
+    #[tokio::test]
+    #[cfg(not(feature = "force_hash_collisions"))]
+    async fn spilled_partition_bounds_arrive_before_the_filter_is_published() {
+        let acc = make_partitioned_expr_accumulator_for_test(2);
+        let (kept, spilled, spilled_bounds) = one_spilled_of_two(&acc);
+
+        acc.report_spilling(1);
+        acc.report_spilled_build_data(spilled).unwrap();
+        assert!(!acc.dynamic_filter.is_complete());
+        acc.report_build_data(kept).await.unwrap();
+
+        assert!(acc.dynamic_filter.is_complete());
+        assert_passes_kept_keys_and_spilled_bounds(&acc, spilled_bounds);
+    }
+
+    /// A spilling partition that never reports its bounds (it failed or was
+    /// dropped) completes the filter. It never probes, so its rows need not
+    /// pass any more: like any canceled partition, it holds no key.
+    #[tokio::test]
+    #[cfg(not(feature = "force_hash_collisions"))]
+    async fn spilling_partition_canceled_completes_the_filter() {
+        let acc = make_partitioned_expr_accumulator_for_test(2);
+        let (kept, _, _) = one_spilled_of_two(&acc);
+
+        acc.report_spilling(1);
+        acc.report_build_data(kept).await.unwrap();
+        assert!(!acc.dynamic_filter.is_complete());
+        acc.report_canceled_partition(1);
+
+        assert!(acc.dynamic_filter.is_complete());
+        let probe: Vec<i32> = (-10..60).collect();
+        let expected: Vec<bool> = probe
+            .iter()
+            .zip(partitions_of(&acc, 2, &probe))
+            .map(|(key, partition)| {
+                partition == 0 && (0..40).step_by(2).any(|k| k == *key)
+            })
+            .collect();
+        assert_matches(&acc, &probe, &expected);
+    }
+
+    /// With every partition spilled no keys are in memory: the filter is the
+    /// bounds of all of them, without a lookup.
+    #[tokio::test]
+    async fn every_partition_spilled_filters_by_bounds() {
+        let acc = make_partitioned_expr_accumulator_for_test(2);
+        acc.report_spilling(0);
+        acc.report_spilling(1);
+        assert!(!acc.dynamic_filter.is_complete());
+        for (partition, (min, max)) in [(0, (5, 9)), (1, (1, 7))] {
+            acc.report_spilled_build_data(PartitionBuildData::Partitioned {
+                partition_id: partition,
+                pushdown: PushdownStrategy::BoundsOnly,
+                bounds: bounds(min, max),
+                keys_have_null: false,
+            })
+            .unwrap();
+        }
+        assert!(acc.dynamic_filter.is_complete());
+        assert_eq!(
+            current_expr(&acc).to_string(),
+            "probe_key@0 >= 1 AND probe_key@0 <= 9"
+        );
+    }
+
+    /// A spilled `CollectLeft` build side filters by its bounds.
+    #[test]
+    fn collect_left_spilled_build_filters_by_bounds() {
+        let acc = make_collect_left_accumulator_for_test();
+        acc.build_filter(FinalizeInput::CollectLeft(reported(
+            PushdownStrategy::BoundsOnly,
+            bounds(3, 8),
+        )))
+        .unwrap();
+        assert_eq!(
+            current_expr(&acc).to_string(),
+            "probe_key@0 >= 3 AND probe_key@0 <= 8"
+        );
     }
 }

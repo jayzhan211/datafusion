@@ -998,6 +998,13 @@ config_namespace! {
         /// (i.e., if there's no `DiskManager` configured).
         pub sort_spill_reservation_bytes: usize, default = 10 * 1024 * 1024
 
+        /// When true, a Partitioned hash join whose build side does not fit in
+        /// the memory pool spills to disk instead of failing. A join that
+        /// shares one build side across partitions (CollectLeft), a null-aware
+        /// (NOT IN) join, and a join whose output keeps the probe side's order
+        /// still fail as before. Plans do not change.
+        pub enable_hash_join_spilling: bool, default = false
+
         /// When sorting, below what size should data be concatenated
         /// and sorted in a single RecordBatch rather than sorted in
         /// batches and merged.
