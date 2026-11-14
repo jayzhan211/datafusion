@@ -3374,6 +3374,9 @@ async fn collect_left_input_or_overflow(
                 accumulator.update_batch(&batch)?;
             }
         }
+        // Input whether or not memory is found for it
+        state.metrics.build_input_batches.add(1);
+        state.metrics.build_input_rows.add(batch.num_rows());
         let batch_size = state.memory_counter.count_batch(&batch);
         let refused = match state.reservation.try_grow(batch_size) {
             Ok(()) => false,
@@ -3389,8 +3392,6 @@ async fn collect_left_input_or_overflow(
             }));
         }
         state.metrics.build_mem_used.add(batch_size);
-        state.metrics.build_input_batches.add(1);
-        state.metrics.build_input_rows.add(batch.num_rows());
         state.num_rows += batch.num_rows();
         state.batches.push(batch);
     }

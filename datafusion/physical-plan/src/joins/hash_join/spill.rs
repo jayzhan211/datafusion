@@ -758,6 +758,8 @@ async fn split_build(
     kept.buffers.shrink(collected);
     while let Some(batch) = rest.try_next().await? {
         let _timer = ctx.build.metrics.build_time.timer();
+        ctx.build.metrics.build_input_batches.add(1);
+        ctx.build.metrics.build_input_rows.add(batch.num_rows());
         look_for_null(&batch)?;
         if let Some(keys) = &mut keys {
             keys.update(&batch)?;
@@ -2729,7 +2731,7 @@ mod tests {
             Field::new("k", DataType::Int32, true),
             Field::new("v", DataType::Int32, true),
         ]));
-        let build: Vec<RecordBatch> = (0..4)
+        let build: Vec<RecordBatch> = (0..5)
             .map(|i| {
                 let keys = i * 500..(i + 1) * 500;
                 RecordBatch::try_new(
@@ -2743,6 +2745,7 @@ mod tests {
             })
             .collect();
         // Each batch counts the same, so the fourth is refused with three held
+        // and the fifth is read after the build side overflowed
         let mut counter = RecordBatchMemoryCounter::new();
         let sizes: Vec<usize> = build.iter().map(|b| counter.count_batch(b)).collect();
         assert!(sizes.iter().all(|size| *size == sizes[0]), "{sizes:?}");
@@ -2768,6 +2771,15 @@ mod tests {
             // One partition: some of its buckets spilled, and no more than it has
             assert!(
                 (1..=BUCKETS).contains(&sum(&metrics, "spilled_buckets")),
+                "{join_type}: {metrics}"
+            );
+            // Every build row is input, also the refused batch and those after it
+            assert_eq!(
+                (
+                    sum(&metrics, "build_input_batches"),
+                    sum(&metrics, "build_input_rows")
+                ),
+                (5, 2500),
                 "{join_type}: {metrics}"
             );
         }
