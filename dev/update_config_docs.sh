@@ -231,6 +231,15 @@ SET datafusion.execution.target_partitions = 4;
 SET datafusion.execution.batch_size = 1024;
 ```
 
+Hash joins spill only when `datafusion.execution.enable_hash_join_spilling` is
+on; it is off by default. Without it, a hash join whose build side does not fit
+in the memory limit fails, and `datafusion.optimizer.prefer_hash_join = false`
+plans sort-merge joins instead. With it, the join splits its build side into
+buckets by key hash, keeps the buckets that fit in memory and joins the others
+from disk afterwards; the plan does not change. A join whose output must keep
+the probe side's order still fails. `EXPLAIN ANALYZE` shows how much each join
+spilled, see [Metrics](metrics.md#hashjoinexec).
+
 [`FairSpillPool`]: https://docs.rs/datafusion/latest/datafusion/execution/memory_pool/struct.FairSpillPool.html
 
 ## Join Queries
