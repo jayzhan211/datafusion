@@ -40,6 +40,7 @@ use datafusion_physical_expr::{
 use futures::{Future, FutureExt};
 
 pub mod exec;
+pub mod memory_pool;
 
 /// `TestMemoryExec` is a mock equivalent to [`MemorySourceConfig`] with [`ExecutionPlan`] implemented for testing.
 /// i.e. It has some but not all the functionality of [`MemorySourceConfig`].
