@@ -25,13 +25,14 @@ use datafusion_physical_plan::execution_plan::{
     Boundedness, replace_children_if_necessary,
 };
 use datafusion_physical_plan::projection::{
-    ProjectionExec, make_with_child, update_expr, update_ordering_requirement,
+    ProjectionExec, make_with_child, remove_unnecessary_projections, update_expr,
+    update_ordering_requirement,
 };
 use datafusion_physical_plan::sorts::sort::SortExec;
 use datafusion_physical_plan::sorts::sort_preserving_merge::SortPreservingMergeExec;
 use datafusion_physical_plan::{
     ChildStats, ChildrenPropertiesMode, DisplayAs, DisplayFormatType, ExecutionPlan,
-    ExecutionPlanProperties, PlanProperties, ReplaceChildrenOptions,
+    ExecutionPlanProperties, LimitBehavior, PlanProperties, ReplaceChildrenOptions,
     SendableRecordBatchStream, StatisticsArgs,
 };
 
@@ -245,12 +246,17 @@ impl ExecutionPlan for OutputRequirementExec {
         )
     }
 
+    /// The marker only carries requirements between rules. If one is left in a
+    /// plan, for example by [`EnsureRequirements`] run outside the physical
+    /// planner, it passes its input's rows through.
+    ///
+    /// [`EnsureRequirements`]: crate::ensure_requirements::EnsureRequirements
     fn execute(
         &self,
-        _partition: usize,
-        _context: Arc<TaskContext>,
+        partition: usize,
+        context: Arc<TaskContext>,
     ) -> Result<SendableRecordBatchStream> {
-        unreachable!();
+        self.input.execute(partition, context)
     }
 
     fn child_stats_requests(&self, partition: Option<usize>) -> Vec<ChildStats> {
@@ -323,8 +329,17 @@ impl ExecutionPlan for OutputRequirementExec {
         })
     }
 
+    /// `None`: the marker never executes, so it limits no rows. The fetch it
+    /// carries is a requirement for enforcement, read through
+    /// [`OutputRequirementExec::fetch`].
     fn fetch(&self) -> Option<usize> {
-        self.fetch
+        None
+    }
+
+    /// The marker outputs exactly the rows of its input, so a limit above it
+    /// can move below it, as it could if the marker were not there.
+    fn limit_behavior(&self) -> LimitBehavior {
+        LimitBehavior::MoveToInput
     }
 
     fn apply_expressions(
@@ -345,15 +360,7 @@ impl PhysicalOptimizerRule for OutputRequirements {
     ) -> Result<Arc<dyn ExecutionPlan>> {
         match self.mode {
             RuleMode::Add => require_top_ordering(plan),
-            RuleMode::Remove => plan
-                .transform_up(|plan| {
-                    if let Some(sort_req) = plan.downcast_ref::<OutputRequirementExec>() {
-                        Ok(Transformed::yes(sort_req.input()))
-                    } else {
-                        Ok(Transformed::no(plan))
-                    }
-                })
-                .data(),
+            RuleMode::Remove => remove_output_requirements(plan),
         }
     }
 
@@ -364,6 +371,34 @@ impl PhysicalOptimizerRule for OutputRequirements {
     fn schema_check(&self) -> bool {
         true
     }
+}
+
+/// Removes every `OutputRequirementExec`. A projection right above one may
+/// drop columns that only the marker's requirement needed, so it could not
+/// move below the marker; it is pushed down now, as `ProjectionPushdown` would
+/// have pushed it without the marker.
+fn remove_output_requirements(
+    plan: Arc<dyn ExecutionPlan>,
+) -> Result<Arc<dyn ExecutionPlan>> {
+    plan.transform_down(|plan| {
+        if let Some(marker) = plan.downcast_ref::<OutputRequirementExec>() {
+            return Ok(Transformed::yes(marker.input()));
+        }
+        let Some(projection) = plan.downcast_ref::<ProjectionExec>() else {
+            return Ok(Transformed::no(plan));
+        };
+        let Some(marker) = projection.input().downcast_ref::<OutputRequirementExec>()
+        else {
+            return Ok(Transformed::no(plan));
+        };
+        let unblocked = make_with_child(projection, &marker.input())?;
+        Ok(Transformed::yes(
+            unblocked
+                .transform_down(remove_unnecessary_projections)
+                .data()?,
+        ))
+    })
+    .data()
 }
 
 /// This functions adds ancillary `OutputRequirementExec` to the physical plan, so that

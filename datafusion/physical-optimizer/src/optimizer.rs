@@ -102,16 +102,19 @@ impl PhysicalOptimizerContext for ConfigOnlyContext<'_> {
 /// - A fetch selects rows. It keeps the first rows of its input as they arrive, so a
 ///   rule can't reorder that input, move a filter below the fetch, or drop it.
 /// - An order is only relied on if the plan records it as a requirement. A rule can't
-///   assume an order it sees will last unless it makes it a requirement, and a rule
-///   that rewrites an operator of a plan whose requirements are met has to keep that
-///   operator's output order, because a sort above it may be gone.
+///   assume an order it sees will last unless it makes it a requirement. A fetch
+///   records none, so a rule that rewrites an operator below a fetch has to keep
+///   that operator's output order: the fetch may keep the first rows in that order,
+///   and the sort that produced it may be gone.
 ///
 /// [`EnsureRequirements`] is the rule that makes a plan executable, by inserting
 /// the repartitioning and sorting needed to satisfy the distribution and
-/// ordering requirements. It can run at any point in the list.
-/// [`OutputRequirements`] is optional: [`EnsureRequirements`] records the output
-/// requirements itself if no rule has, and the physical planner removes a marker
-/// that no rule removed.
+/// ordering requirements. It can run at any point in the list, and more than
+/// once. It records the query's output requirements in a marker node if no rule
+/// has; the marker stays in the plan, so later rules see the requirement, and the
+/// physical planner removes it after the last rule. Once the requirements hold
+/// after [`EnsureRequirements`], the physical planner runs it again after any
+/// later rule that breaks them.
 ///
 /// "The same results" leaves open what SQL leaves open. Between orders, the rows
 /// can come back in a different order when no `ORDER BY` fixes it, including
@@ -134,8 +137,8 @@ impl PhysicalOptimizerContext for ConfigOnlyContext<'_> {
 ///
 /// A missed optimization can also change how much memory a query needs, so a query
 /// that fits in a memory limit in one order can exceed it in another. For example,
-/// [`JoinSelection`] doesn't swap the inputs of a join that has been through
-/// [`EnsureRequirements`] if the swap loses the join's output order.
+/// [`JoinSelection`] doesn't swap the inputs of a join below a fetch if the swap
+/// loses the join's output order.
 ///
 /// For example, [`CombinePartialFinalAggregate`] runs after
 /// [`EnsureRequirements`] and only merges a `Partial` aggregate that is the
@@ -186,8 +189,8 @@ impl PhysicalOptimizerContext for ConfigOnlyContext<'_> {
 /// [contract](#physical-optimizer-contract) above before reordering or
 /// extending the list.
 ///
-/// After the last rule, the physical planner checks the plan and returns an
-/// error if it is not valid.
+/// After the last rule, the physical planner removes the output requirements
+/// marker, then checks the plan and returns an error if it is not valid.
 ///
 /// Note: The rules up to and including [`EnsureRequirements`] make the plan
 /// executable rather than optimize it. This may be improved in the future.
@@ -195,7 +198,7 @@ impl PhysicalOptimizerContext for ConfigOnlyContext<'_> {
 ///
 /// | rule (name in EXPLAIN plan)    | struct name                      | summary                                                                                       |
 /// | ------------------------------ | -------------------------------- | --------------------------------------------------------------------------------------------- |
-/// | `OutputRequirements`           | [`OutputRequirements`]           | Adds helper nodes so output requirements survive later rewrites (add mode).                   |
+/// | `OutputRequirements`           | [`OutputRequirements`]           | Adds a marker so later rewrites keep the output requirements; the planner removes it.         |
 /// | `aggregate_statistics`         | [`AggregateStatistics`]          | Answers some aggregates from exact statistics without scanning data.                          |
 /// | `EliminateConstantJoin`        | [`EliminateConstantJoin`]        | Replaces inner joins against a single row of literals with a filter.                          |
 /// | `join_selection`               | [`JoinSelection`]                | Chooses the join implementation, build side, and partition mode.                              |
@@ -206,7 +209,6 @@ impl PhysicalOptimizerContext for ConfigOnlyContext<'_> {
 /// | `CombinePartialFinalAggregate` | [`CombinePartialFinalAggregate`] | Merges adjacent partial and final aggregates.                                                 |
 /// | `OptimizeAggregateOrder`       | [`OptimizeAggregateOrder`]       | Rewrites aggregate expressions to use the input ordering.                                     |
 /// | `ProjectionPushdown`           | [`ProjectionPushdown`]           | Pushes projections toward inputs (early pass).                                                |
-/// | `OutputRequirements`           | [`OutputRequirements`]           | Removes the helper nodes added by the first pass (remove mode).                               |
 /// | `LimitAggregation`             | [`TopKAggregation`]              | Passes a limit hint into aggregations so they keep fewer groups.                              |
 /// | `LimitPushPastWindows`         | [`LimitPushPastWindows`]         | Pushes limits through bounded window operators.                                               |
 /// | `HashJoinBuffering`            | [`HashJoinBuffering`]            | Buffers the probe side of hash joins so it is polled before the build side finishes.          |
@@ -295,9 +297,6 @@ impl PhysicalOptimizer {
             Arc::new(OptimizeAggregateOrder::new()),
             // TODO: `try_embed_to_hash_join` in the ProjectionPushdown rule would be block by the CoalesceBatches, so add it before CoalesceBatches. Maybe optimize it in the future.
             Arc::new(ProjectionPushdown::new()),
-            // Remove the ancillary output requirement operator since we are done with the planning
-            // phase.
-            Arc::new(OutputRequirements::new_remove_mode()),
             // The aggregation limiter will try to find situations where the accumulator count
             // is not tied to the cardinality, i.e. when the output of the aggregation is passed
             // into an `order by max(x) limit y`. In this case it will copy the limit value down

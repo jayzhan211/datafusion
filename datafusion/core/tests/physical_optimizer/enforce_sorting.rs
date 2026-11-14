@@ -315,12 +315,13 @@ async fn test_hash_join_interleaved_projection_preserves_parent_sort() -> Result
     check_plan_tree_sanity(&optimized_plan, &config.optimizer)?;
 
     assert_snapshot!(displayable(optimized_plan.as_ref()).indent(true), @r"
-    SortPreservingMergeExec: [nullable_col@1 ASC]
-      SortExec: expr=[nullable_col@1 ASC], preserve_partitioning=[true]
-        HashJoinExec: mode=CollectLeft, join_type=Right, on=[(nullable_col@0, col_a@0)], projection=[col_a@2, nullable_col@0]
-          DataSourceExec: file_groups={1 group: [[x]]}, projection=[nullable_col, non_nullable_col], file_type=parquet
-          RepartitionExec: partitioning=RoundRobinBatch(10), input_partitions=1
-            DataSourceExec: file_groups={1 group: [[x]]}, projection=[col_a, col_b], file_type=parquet
+    OutputRequirementExec: order_by=[(nullable_col@1, asc)], dist_by=SinglePartition
+      SortPreservingMergeExec: [nullable_col@1 ASC]
+        SortExec: expr=[nullable_col@1 ASC], preserve_partitioning=[true]
+          HashJoinExec: mode=CollectLeft, join_type=Right, on=[(nullable_col@0, col_a@0)], projection=[col_a@2, nullable_col@0]
+            DataSourceExec: file_groups={1 group: [[x]]}, projection=[nullable_col, non_nullable_col], file_type=parquet
+            RepartitionExec: partitioning=RoundRobinBatch(10), input_partitions=1
+              DataSourceExec: file_groups={1 group: [[x]]}, projection=[col_a, col_b], file_type=parquet
     ");
     Ok(())
 }
@@ -394,6 +395,10 @@ fn test_do_not_remove_sort_with_limit_after_projection() -> Result<()> {
             let optimized =
                 EnsureRequirements::new().optimize(Arc::clone(&plan), &config)?;
             check_plan_tree_sanity(&optimized, &config.optimizer)?;
+            // Enforcement records the order the limit relies on in a marker, which
+            // the physical planner removes after the last rule.
+            let optimized =
+                OutputRequirements::new_remove_mode().optimize(optimized, &config)?;
             assert_eq!(get_plan_string(&optimized), get_plan_string(&plan));
         }
     }
@@ -437,22 +442,24 @@ fn test_required_sort_after_projection() -> Result<()> {
             // The window needs its own sort, but OFFSET still depends on the
             // hidden sort to select rows.
             assert_snapshot!(displayable(optimized.as_ref()).indent(true), @r#"
-            BoundedWindowAggExec: wdw=[count: Field { "count": Int64 }, frame: RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW], mode=[Sorted]
-              SortExec: expr=[nullable_col@0 ASC], preserve_partitioning=[false]
-                GlobalLimitExec: skip=1, fetch=None
-                  FilterExec: nullable_col@0 IS NOT NULL
-                    ProjectionExec: expr=[nullable_col@0 as nullable_col]
-                      SortExec: expr=[non_nullable_col@1 ASC], preserve_partitioning=[false]
-                        DataSourceExec: file_groups={1 group: [[x]]}, projection=[nullable_col, non_nullable_col], file_type=parquet
+            OutputRequirementExec: order_by=[], dist_by=Unspecified
+              BoundedWindowAggExec: wdw=[count: Field { "count": Int64 }, frame: RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW], mode=[Sorted]
+                SortExec: expr=[nullable_col@0 ASC], preserve_partitioning=[false]
+                  GlobalLimitExec: skip=1, fetch=None
+                    FilterExec: nullable_col@0 IS NOT NULL
+                      ProjectionExec: expr=[nullable_col@0 as nullable_col]
+                        SortExec: expr=[non_nullable_col@1 ASC], preserve_partitioning=[false]
+                          DataSourceExec: file_groups={1 group: [[x]]}, projection=[nullable_col, non_nullable_col], file_type=parquet
             "#);
         } else {
             // Without a limit, the window's ordering supersedes the hidden sort.
             assert_snapshot!(displayable(optimized.as_ref()).indent(true), @r#"
-            BoundedWindowAggExec: wdw=[count: Field { "count": Int64 }, frame: RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW], mode=[Sorted]
-              SortExec: expr=[nullable_col@0 ASC], preserve_partitioning=[false]
-                FilterExec: nullable_col@0 IS NOT NULL
-                  ProjectionExec: expr=[nullable_col@0 as nullable_col]
-                    DataSourceExec: file_groups={1 group: [[x]]}, projection=[nullable_col, non_nullable_col], file_type=parquet
+            OutputRequirementExec: order_by=[], dist_by=Unspecified
+              BoundedWindowAggExec: wdw=[count: Field { "count": Int64 }, frame: RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW], mode=[Sorted]
+                SortExec: expr=[nullable_col@0 ASC], preserve_partitioning=[false]
+                  FilterExec: nullable_col@0 IS NOT NULL
+                    ProjectionExec: expr=[nullable_col@0 as nullable_col]
+                      DataSourceExec: file_groups={1 group: [[x]]}, projection=[nullable_col, non_nullable_col], file_type=parquet
             "#);
         }
     }

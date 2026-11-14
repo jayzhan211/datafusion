@@ -97,7 +97,7 @@ use datafusion_physical_expr::{
 use datafusion_physical_optimizer::ensure_requirements::EnsureRequirements;
 use datafusion_physical_optimizer::output_requirements::OutputRequirements;
 use datafusion_physical_optimizer::sanity_checker::{
-    check_plan_tree_sanity, input_requirements_hold,
+    check_plan_tree_sanity, input_requirements_hold, input_requirements_hold_since,
 };
 use datafusion_physical_plan::empty::EmptyExec;
 use datafusion_physical_plan::execution_plan::InvariantLevel;
@@ -3497,13 +3497,31 @@ impl DefaultPhysicalPlanner {
 
         let mut new_plan = Arc::clone(&plan);
         let optimizer_context = SessionOptimizerContext::new(session_state);
+        let enforcement = EnsureRequirements::new();
+        // Whether the requirements held after enforcement ran. Once they have, a rule
+        // that breaks them is followed by enforcement again, so no rule has to know
+        // what runs before or after it.
+        let mut enforced = false;
         for optimizer in optimizers {
             let before_schema = new_plan.schema();
+            let held = enforced.then(|| Arc::clone(&new_plan));
             new_plan = optimizer
                 .optimize_with_context(new_plan, &optimizer_context)
                 .map_err(|e| {
                     DataFusionError::Context(optimizer.name().to_string(), Box::new(e))
                 })?;
+            if optimizer.name() == enforcement.name() {
+                enforced = input_requirements_hold(&new_plan);
+            } else if let Some(held) = held
+                && !input_requirements_hold_since(&new_plan, &held)
+            {
+                // Repair only: added parallelism could split the input of a fetch.
+                let mut config = session_state.config_options().clone();
+                config.optimizer.enable_round_robin_repartition = false;
+                config.optimizer.repartition_file_scans = false;
+                new_plan = enforcement.optimize(new_plan, &config)?;
+                enforced = input_requirements_hold(&new_plan);
+            }
 
             // This only checks the schema in release build, and performs additional checks in debug mode.
             OptimizationInvariantChecker::new(optimizer)
@@ -3518,8 +3536,8 @@ impl DefaultPhysicalPlanner {
         }
 
         // `OutputRequirementExec` only carries requirements between rules and
-        // can't execute. A custom rule list may add it after the remove step, or
-        // never remove it, so drop whatever is left.
+        // can't execute. In the default list it stays until every rule has run,
+        // so each rule sees the output requirements. Remove whatever is left.
         let new_plan = OutputRequirements::new_remove_mode()
             .optimize(new_plan, session_state.config_options())?;
 

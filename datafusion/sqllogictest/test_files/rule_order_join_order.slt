@@ -15,11 +15,10 @@
 # specific language governing permissions and limitations
 # under the License.
 
-# This file runs `JoinSelection` after `EnsureRequirements` and after the output
-# marker is removed (see `rule_order.rs`). With a single partition, the join
-# keeps the order of its right input, so enforcement removes the sort. Nothing in
-# the plan then records that the query relies on that order, so swapping the
-# inputs would return rows out of order, or the wrong rows under a limit.
+# This file runs `JoinSelection` after `EnsureRequirements` and after the first
+# `ProjectionPushdown` (see `rule_order.rs`). With a single partition, the join
+# keeps the order of its right input, so enforcement removes the sort. Swapping
+# the inputs then would return rows out of order, or the wrong rows under a limit.
 
 statement ok
 set datafusion.execution.target_partitions = 1;

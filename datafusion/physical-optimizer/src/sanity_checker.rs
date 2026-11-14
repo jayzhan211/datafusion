@@ -14,6 +14,7 @@
 //! Code that drives optimizer rules directly can call
 //! [`check_plan_tree_sanity`] on the final plan.
 
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use datafusion_common::Result;
@@ -110,6 +111,37 @@ pub(crate) fn output_order_kept(
 pub fn input_requirements_hold(plan: &Arc<dyn ExecutionPlan>) -> bool {
     let mut hold = true;
     let _ = plan.apply(|node| {
+        if check_input_requirements(node).is_err() {
+            hold = false;
+            return Ok(TreeNodeRecursion::Stop);
+        }
+        Ok(TreeNodeRecursion::Continue)
+    });
+    hold
+}
+
+/// Like [`input_requirements_hold`], but only checks the nodes of `plan` that are
+/// not in `held`, a plan whose requirements are known to hold. Plan nodes are
+/// immutable, so a node shared with `held` brings its whole subtree unchanged.
+/// `held` stays alive during the call, so no node of `plan` can reuse the address
+/// of a node of `held`.
+pub fn input_requirements_hold_since(
+    plan: &Arc<dyn ExecutionPlan>,
+    held: &Arc<dyn ExecutionPlan>,
+) -> bool {
+    if Arc::ptr_eq(plan, held) {
+        return true;
+    }
+    let mut unchanged = HashSet::new();
+    let _ = held.apply(|node| {
+        unchanged.insert(Arc::as_ptr(node).cast::<()>());
+        Ok(TreeNodeRecursion::Continue)
+    });
+    let mut hold = true;
+    let _ = plan.apply(|node| {
+        if unchanged.contains(&(Arc::as_ptr(node).cast::<()>())) {
+            return Ok(TreeNodeRecursion::Jump);
+        }
         if check_input_requirements(node).is_err() {
             hold = false;
             return Ok(TreeNodeRecursion::Stop);

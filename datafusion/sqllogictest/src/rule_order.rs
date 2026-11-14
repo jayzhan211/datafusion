@@ -30,8 +30,7 @@
 //!   leaves out `FilterPushdown(Post)`).
 //!
 //! `KEY` is the rule's `name()`. A name that repeats in the default list gets
-//! `#2` on its second use, such as `OutputRequirements#2` (remove mode) and
-//! `ProjectionPushdown#2`.
+//! `#2` on its second use, such as `ProjectionPushdown#2`.
 //!
 //! A test file can also pin its own order, see [`spec_for_file`].
 
@@ -59,9 +58,7 @@ pub(crate) fn target_partitions() -> usize {
 /// The rule order a test file checks: the query results must not depend on it.
 fn spec_for_file(file_name: &str) -> Option<&'static str> {
     match file_name {
-        "rule_order_output_requirements.slt" => {
-            Some("move:OutputRequirements#2:before:OutputRequirements")
-        }
+        "rule_order_output_requirements.slt" => Some("last:OutputRequirements"),
         "rule_order_limit_first.slt" => Some("first:LimitPushdown"),
         "rule_order_rerun.slt" => Some("twice"),
         "rule_order_reenforce.slt" => Some(
@@ -88,7 +85,7 @@ fn spec_for_file(file_name: &str) -> Option<&'static str> {
             Some("move:ProjectionPushdown:before:FilterPushdown")
         }
         "rule_order_join_order.slt" => {
-            Some("move:join_selection:after:OutputRequirements#2")
+            Some("move:join_selection:after:ProjectionPushdown")
         }
         "rule_order_symmetric_join.slt" => {
             Some("move:ProjectionPushdown:before:join_selection")
@@ -102,9 +99,9 @@ fn spec_for_file(file_name: &str) -> Option<&'static str> {
         "rule_order_limit_statistics.slt" => {
             Some("move:LimitPushdown:before:aggregate_statistics")
         }
-        "rule_order_pushdown_sort.slt" => Some(
-            "move:OutputRequirements#2:before:EnsureRequirements,move:PushdownSort:before:EnsureRequirements",
-        ),
+        "rule_order_pushdown_sort.slt" => {
+            Some("move:PushdownSort:before:EnsureRequirements")
+        }
         "rule_order_offset_merge.slt" => {
             Some("move:PushdownSort:before:EnsureRequirements")
         }
@@ -114,9 +111,7 @@ fn spec_for_file(file_name: &str) -> Option<&'static str> {
         "rule_order_topk_aggregation.slt" => {
             Some("move:LimitAggregation:before:EnsureRequirements")
         }
-        "rule_order_window_topn.slt" => {
-            Some("move:WindowTopN:after:OutputRequirements#2")
-        }
+        "rule_order_window_topn.slt" => Some("move:WindowTopN:after:ProjectionPushdown"),
         "rule_order_projection_pushdown.slt" => {
             Some("move:ProjectionPushdown:before:EnsureRequirements")
         }
@@ -200,6 +195,9 @@ fn apply(rules: &mut Vec<(String, Rule)>, directive: &str) {
 
 /// Appends a copy of the list, leaving out `except`, with `@2` on each key.
 fn run_again(rules: &mut Vec<(String, Rule)>, except: Option<&str>) {
+    if let Some(key) = except {
+        position(rules, key);
+    }
     let again: Vec<(String, Rule)> = rules
         .iter()
         .filter(|(key, _)| Some(key.as_str()) != except)
@@ -208,11 +206,13 @@ fn run_again(rules: &mut Vec<(String, Rule)>, except: Option<&str>) {
     rules.extend(again);
 }
 
+/// A directive that names a rule the list doesn't have is an error: skipping it
+/// would run the default order and test nothing.
 fn position(rules: &[(String, Rule)], key: &str) -> usize {
     rules
         .iter()
         .position(|(k, _)| k == key)
-        .unwrap_or_else(|| panic!("{ENV_VAR}: unknown rule {key}"))
+        .unwrap_or_else(|| panic!("{ENV_VAR}: no rule {key} in the list"))
 }
 
 /// Fisher-Yates with SplitMix64, so a seed gives the same order on every machine.

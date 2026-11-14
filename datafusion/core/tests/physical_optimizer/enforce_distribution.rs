@@ -1058,9 +1058,10 @@ async fn aligned_hour_groups_avoid_shuffle_through_partial_aggregate() -> Result
     assert_plan!(
         optimized,
         @r"
-    AggregateExec: mode=FinalPartitioned, gby=[bucket@0 as bucket], aggr=[count]
-      AggregateExec: mode=Partial, gby=[date_trunc(hour, timestamp@0) as bucket], aggr=[count]
-        DataSourceExec: partitions=2, partition_sizes=[1, 1]
+    OutputRequirementExec: order_by=[], dist_by=Unspecified
+      AggregateExec: mode=FinalPartitioned, gby=[bucket@0 as bucket], aggr=[count]
+        AggregateExec: mode=Partial, gby=[date_trunc(hour, timestamp@0) as bucket], aggr=[count]
+          DataSourceExec: partitions=2, partition_sizes=[1, 1]
     "
     );
 
@@ -1094,10 +1095,11 @@ async fn crossing_day_groups_keep_shuffle_through_partial_aggregate() -> Result<
     assert_plan!(
         optimized,
         @r"
-    AggregateExec: mode=FinalPartitioned, gby=[bucket@0 as bucket], aggr=[count]
-      RepartitionExec: partitioning=Hash([bucket@0], 2), input_partitions=2
-        AggregateExec: mode=Partial, gby=[date_trunc(day, timestamp@0) as bucket], aggr=[count]
-          DataSourceExec: partitions=2, partition_sizes=[1, 1]
+    OutputRequirementExec: order_by=[], dist_by=Unspecified
+      AggregateExec: mode=FinalPartitioned, gby=[bucket@0 as bucket], aggr=[count]
+        RepartitionExec: partitioning=Hash([bucket@0], 2), input_partitions=2
+          AggregateExec: mode=Partial, gby=[date_trunc(day, timestamp@0) as bucket], aggr=[count]
+            DataSourceExec: partitions=2, partition_sizes=[1, 1]
     "
     );
 
@@ -1159,11 +1161,12 @@ async fn range_transform_locality_does_not_satisfy_join_distribution() -> Result
     assert_plan!(
         optimized,
         @r"
-    HashJoinExec: mode=Partitioned, join_type=Inner, on=[(date_trunc(hour, timestamp@0), date_trunc(hour, timestamp@0))]
-      RepartitionExec: partitioning=Hash([date_trunc(hour, timestamp@0)], 2), input_partitions=2
-        DataSourceExec: partitions=2, partition_sizes=[1, 1]
-      RepartitionExec: partitioning=Hash([date_trunc(hour, timestamp@0)], 2), input_partitions=2
-        DataSourceExec: partitions=2, partition_sizes=[1, 1]
+    OutputRequirementExec: order_by=[], dist_by=Unspecified
+      HashJoinExec: mode=Partitioned, join_type=Inner, on=[(date_trunc(hour, timestamp@0), date_trunc(hour, timestamp@0))]
+        RepartitionExec: partitioning=Hash([date_trunc(hour, timestamp@0)], 2), input_partitions=2
+          DataSourceExec: partitions=2, partition_sizes=[1, 1]
+        RepartitionExec: partitioning=Hash([date_trunc(hour, timestamp@0)], 2), input_partitions=2
+          DataSourceExec: partitions=2, partition_sizes=[1, 1]
     "
     );
 
@@ -4226,6 +4229,16 @@ fn existing_interleave_is_kept_when_children_stay_interleavable() -> Result<()> 
     Ok(())
 }
 
+/// Runs `EnsureRequirements`, then removes the output requirements marker it keeps,
+/// as the physical planner does after the last rule.
+fn enforce_and_unmark(
+    plan: Arc<dyn ExecutionPlan>,
+    config: &ConfigOptions,
+) -> Result<Arc<dyn ExecutionPlan>> {
+    let plan = EnsureRequirements::new().optimize(plan, config)?;
+    OutputRequirements::new_remove_mode().optimize(plan, config)
+}
+
 #[test]
 fn interleave_broken_by_later_rewrite_is_repaired_on_next_pass() -> Result<()> {
     // The chain reported in https://github.com/apache/datafusion/issues/21826:
@@ -4238,7 +4251,7 @@ fn interleave_broken_by_later_rewrite_is_repaired_on_next_pass() -> Result<()> {
         aggregate_exec_with_alias(parquet_exec(), alias),
     ]);
     let config = TestConfig::default().config;
-    let pass1 = EnsureRequirements::new().optimize(union, &config)?;
+    let pass1 = enforce_and_unmark(union, &config)?;
     assert!(pass1.is::<InterleaveExec>());
 
     // Stand-in for the later rewrite: one child loses its hash partitioning.
@@ -4258,7 +4271,7 @@ fn interleave_broken_by_later_rewrite_is_repaired_on_next_pass() -> Result<()> {
     assert!(check_plan_tree_sanity(&rewritten, &config.optimizer).is_err());
 
     // The next distribution pass restores a valid interleave.
-    let pass2 = EnsureRequirements::new().optimize(rewritten, &config)?;
+    let pass2 = enforce_and_unmark(rewritten, &config)?;
     check_plan_tree_sanity(&pass2, &config.optimizer)?;
     assert_plan!(pass2,
         @r"
@@ -4318,7 +4331,7 @@ fn issue_21826_join_selection_after_distribution_pass() -> Result<()> {
     ]);
     let config = TestConfig::default().config;
 
-    let pass1 = EnsureRequirements::new().optimize(union, &config)?;
+    let pass1 = enforce_and_unmark(union, &config)?;
     assert!(pass1.is::<InterleaveExec>());
 
     // Rebuilding the interleave over the swapped join used to fail here with
@@ -4333,7 +4346,7 @@ fn issue_21826_join_selection_after_distribution_pass() -> Result<()> {
 
     // The second distribution pass repairs it. The two joins no longer share
     // a partitioning, so the result is a plain union.
-    let pass2 = EnsureRequirements::new().optimize(reordered, &config)?;
+    let pass2 = enforce_and_unmark(reordered, &config)?;
     check_plan_tree_sanity(&pass2, &config.optimizer)?;
     assert_plan!(pass2,
         @r"
@@ -5918,11 +5931,12 @@ fn do_not_put_sort_when_input_is_invalid() -> Result<()> {
     // Since at the start of the rule ordering requirement is not satisfied
     // EnforceDistribution rule doesn't satisfy this requirement either.
     assert_plan!(dist_plan, @r"
-    SortRequiredExec: [a@0 ASC]
-      SortExec: expr=[a@0 ASC], preserve_partitioning=[true]
-        FilterExec: c@2 = 0
-          RepartitionExec: partitioning=RoundRobinBatch(10), input_partitions=1
-            DataSourceExec: file_groups={1 group: [[x]]}, projection=[a, b, c, d, e], file_type=parquet
+    OutputRequirementExec: order_by=[], dist_by=Unspecified
+      SortRequiredExec: [a@0 ASC]
+        SortExec: expr=[a@0 ASC], preserve_partitioning=[true]
+          FilterExec: c@2 = 0
+            RepartitionExec: partitioning=RoundRobinBatch(10), input_partitions=1
+              DataSourceExec: file_groups={1 group: [[x]]}, projection=[a, b, c, d, e], file_type=parquet
     ");
 
     Ok(())
@@ -5955,9 +5969,10 @@ fn put_sort_when_input_is_valid() -> Result<()> {
     // Since at the start of the rule ordering requirement is satisfied
     // EnforceDistribution rule satisfy this requirement also.
     assert_plan!(dist_plan, @r"
-    SortRequiredExec: [a@0 ASC]
-      FilterExec: c@2 = 0
-        DataSourceExec: file_groups={10 groups: [[x:0..20], [y:0..20], [x:20..40], [y:20..40], [x:40..60], [y:40..60], [x:60..80], [y:60..80], [x:80..100], [y:80..100]]}, projection=[a, b, c, d, e], output_ordering=[a@0 ASC], file_type=parquet
+    OutputRequirementExec: order_by=[], dist_by=Unspecified
+      SortRequiredExec: [a@0 ASC]
+        FilterExec: c@2 = 0
+          DataSourceExec: file_groups={10 groups: [[x:0..20], [y:0..20], [x:20..40], [y:20..40], [x:40..60], [y:40..60], [x:60..80], [y:60..80], [x:80..100], [y:80..100]]}, projection=[a, b, c, d, e], output_ordering=[a@0 ASC], file_type=parquet
     ");
 
     Ok(())
@@ -6246,8 +6261,7 @@ fn preserve_fetch_when_reoptimizing_coalesce_partitions() -> Result<()> {
     let plan: Arc<dyn ExecutionPlan> =
         Arc::new(CoalescePartitionsExec::new(input).with_fetch(Some(5)));
 
-    let optimized =
-        EnsureRequirements::new().optimize(plan, &test_suite_default_config_options())?;
+    let optimized = enforce_and_unmark(plan, &test_suite_default_config_options())?;
 
     assert_eq!(optimized.fetch(), Some(5));
     optimized
@@ -6511,7 +6525,7 @@ async fn check_fetch_below_filter(
                 })?
                 .data;
             check_integrity(distribution)?;
-            plan = EnsureRequirements::new().optimize(plan, &config)?;
+            plan = enforce_and_unmark(plan, &config)?;
         }
         let input = Arc::clone(plan.children()[0]);
         let batches = collect(input, Arc::clone(&task_context)).await?;

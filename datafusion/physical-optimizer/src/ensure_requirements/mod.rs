@@ -145,15 +145,13 @@ use crate::PhysicalOptimizerRule;
 use crate::optimizer::{
     ConfigOnlyContext, PhysicalOptimizerContext, with_statistics_context,
 };
-use crate::output_requirements::{OutputRequirementExec, OutputRequirements};
+use crate::output_requirements::OutputRequirements;
 
 use datafusion_common::Result;
 use datafusion_common::config::ConfigOptions;
 use datafusion_common::tree_node::{Transformed, TransformedResult, TreeNode};
-use datafusion_physical_expr::Distribution;
-use datafusion_physical_expr_common::sort_expr::OrderingRequirements;
+use datafusion_physical_plan::ExecutionPlan;
 use datafusion_physical_plan::limit::GlobalLimitExec;
-use datafusion_physical_plan::{ExecutionPlan, ExecutionPlanProperties};
 
 /// Optimizer rule that enforces both distribution and sorting requirements.
 ///
@@ -173,38 +171,6 @@ impl EnsureRequirements {
     }
 }
 
-/// Adds the marker for a plan that has none. The sort that would have told the
-/// marker about the query's order may be gone already, so require the order the plan
-/// provides now: nothing shows whether the query relies on it. That can cost a sort
-/// the query didn't need, in a list that runs this rule before adding the marker.
-fn require_output_order(
-    plan: Arc<dyn ExecutionPlan>,
-    config: &ConfigOptions,
-) -> Result<Arc<dyn ExecutionPlan>> {
-    let marked =
-        OutputRequirements::new_add_mode().optimize(Arc::clone(&plan), config)?;
-    let has_requirement = !marked.is::<OutputRequirementExec>()
-        || marked.required_input_ordering().swap_remove(0).is_some();
-    Ok(match plan.output_ordering() {
-        Some(ordering) if !has_requirement => {
-            let requirement = OrderingRequirements::from(ordering.clone());
-            // With one partition the order is global, so it has to stay merged.
-            let distribution = if plan.output_partitioning().partition_count() == 1 {
-                Distribution::SinglePartition
-            } else {
-                Distribution::UnspecifiedDistribution
-            };
-            Arc::new(OutputRequirementExec::new(
-                plan,
-                Some(requirement),
-                distribution,
-                None,
-            ))
-        }
-        _ => marked,
-    })
-}
-
 impl PhysicalOptimizerRule for EnsureRequirements {
     fn optimize(
         &self,
@@ -222,15 +188,10 @@ impl PhysicalOptimizerRule for EnsureRequirements {
         let config = context.config_options();
 
         // Enforcement treats a sort or merge that nothing requires as removable,
-        // so the query's output ordering must be visible as a requirement. It can
-        // run before the marker is added or after it is removed; use its own then.
-        let has_marker = plan
-            .exists(|node| Ok(node.downcast_ref::<OutputRequirementExec>().is_some()))?;
-        let plan = if has_marker {
-            plan
-        } else {
-            require_output_order(plan, config)?
-        };
+        // so the query's output ordering must be visible as a requirement. If this
+        // runs before the marker is added, add it. The marker stays until the
+        // physical planner's final pass, so later rules see the requirement too.
+        let plan = OutputRequirements::new_add_mode().optimize(plan, config)?;
 
         // Phase 0: Normalize `InterleaveExec` back to `UnionExec` (top-down).
         // Interleaves are distribution artifacts of Phase 2, which re-derives
@@ -342,11 +303,7 @@ impl PhysicalOptimizerRule for EnsureRequirements {
             .transform_up(|p| Ok(Transformed::yes(replace_with_partial_sort(p)?)))
             .data()?;
 
-        if has_marker {
-            Ok(plan)
-        } else {
-            OutputRequirements::new_remove_mode().optimize(plan, config)
-        }
+        Ok(plan)
     }
 
     fn name(&self) -> &str {

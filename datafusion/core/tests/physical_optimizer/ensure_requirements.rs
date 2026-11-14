@@ -270,12 +270,13 @@ fn test_union_mixed_partitions_sort_limit() {
 
     assert_ensure_requirements_plan!(limit, @r"
     GlobalLimitExec: skip=0, fetch=21
-      SortPreservingMergeExec: [a@0 DESC]
-        UnionExec
-          SortExec: expr=[a@0 DESC], preserve_partitioning=[true]
-            MockMultiPartitionExec
-          SortExec: expr=[a@0 DESC], preserve_partitioning=[false]
-            MockMultiPartitionExec
+      OutputRequirementExec: order_by=[(a@0, desc)], dist_by=SinglePartition
+        SortPreservingMergeExec: [a@0 DESC]
+          UnionExec
+            SortExec: expr=[a@0 DESC], preserve_partitioning=[true]
+              MockMultiPartitionExec
+            SortExec: expr=[a@0 DESC], preserve_partitioning=[false]
+              MockMultiPartitionExec
     ");
 }
 
@@ -318,10 +319,11 @@ fn test_projection_over_multi_partition_sort_limit() {
 
     assert_ensure_requirements_plan!(limit, @r"
     GlobalLimitExec: skip=0, fetch=21
-      SortPreservingMergeExec: [a@0 DESC]
-        ProjectionExec: expr=[a@0 as a, b@1 as b]
-          SortExec: expr=[a@0 DESC], preserve_partitioning=[true]
-            MockMultiPartitionExec
+      OutputRequirementExec: order_by=[(a@0, desc)], dist_by=SinglePartition
+        SortPreservingMergeExec: [a@0 DESC]
+          ProjectionExec: expr=[a@0 as a, b@1 as b]
+            SortExec: expr=[a@0 DESC], preserve_partitioning=[true]
+              MockMultiPartitionExec
     ");
 }
 
@@ -343,8 +345,9 @@ fn test_single_partition_no_unnecessary_spm() {
     // is added on a single-partition source.
     assert_ensure_requirements_plan!(limit, @r"
     GlobalLimitExec: skip=0, fetch=10
-      SortExec: expr=[a@0 DESC], preserve_partitioning=[false]
-        MockMultiPartitionExec
+      OutputRequirementExec: order_by=[(a@0, desc)], dist_by=SinglePartition
+        SortExec: expr=[a@0 DESC], preserve_partitioning=[false]
+          MockMultiPartitionExec
     ");
 }
 
@@ -363,7 +366,8 @@ fn test_sort_already_satisfied_no_extra_sort() {
     // when the source already satisfies the ordering.
     assert_ensure_requirements_plan!(limit, @r"
     GlobalLimitExec: skip=0, fetch=10
-      MockMultiPartitionExec
+      OutputRequirementExec: order_by=[(a@0, asc)], dist_by=SinglePartition
+        MockMultiPartitionExec
     ");
 }
 
@@ -409,9 +413,10 @@ fn test_coalesce_then_sort_limit() {
 
     assert_ensure_requirements_plan!(limit, @r"
     GlobalLimitExec: skip=0, fetch=10
-      SortPreservingMergeExec: [a@0 DESC]
-        SortExec: expr=[a@0 DESC], preserve_partitioning=[true]
-          MockMultiPartitionExec
+      OutputRequirementExec: order_by=[(a@0, desc)], dist_by=SinglePartition
+        SortPreservingMergeExec: [a@0 DESC]
+          SortExec: expr=[a@0 DESC], preserve_partitioning=[true]
+            MockMultiPartitionExec
     ");
 }
 
@@ -439,10 +444,11 @@ fn test_filter_over_multi_partition_sort_limit() {
 
     assert_ensure_requirements_plan!(limit, @r"
     GlobalLimitExec: skip=0, fetch=21
-      SortPreservingMergeExec: [a@0 DESC]
-        SortExec: expr=[a@0 DESC], preserve_partitioning=[true]
-          FilterExec: true
-            MockMultiPartitionExec
+      OutputRequirementExec: order_by=[(a@0, desc)], dist_by=SinglePartition
+        SortPreservingMergeExec: [a@0 DESC]
+          SortExec: expr=[a@0 DESC], preserve_partitioning=[true]
+            FilterExec: true
+              MockMultiPartitionExec
     ");
 }
 
@@ -465,8 +471,9 @@ fn test_repartition_sort_limit_idempotent() {
 
     assert_ensure_requirements_plan!(limit, @r"
     GlobalLimitExec: skip=0, fetch=10
-      SortExec: expr=[a@0 DESC], preserve_partitioning=[false]
-        MockMultiPartitionExec
+      OutputRequirementExec: order_by=[(a@0, desc)], dist_by=SinglePartition
+        SortExec: expr=[a@0 DESC], preserve_partitioning=[false]
+          MockMultiPartitionExec
     ");
 }
 
@@ -487,9 +494,10 @@ fn test_skip_and_fetch_multi_partition() {
 
     assert_ensure_requirements_plan!(limit, @r"
     GlobalLimitExec: skip=5, fetch=10
-      SortPreservingMergeExec: [a@0 DESC]
-        SortExec: expr=[a@0 DESC], preserve_partitioning=[true]
-          MockMultiPartitionExec
+      OutputRequirementExec: order_by=[(a@0, desc)], dist_by=SinglePartition
+        SortPreservingMergeExec: [a@0 DESC]
+          SortExec: expr=[a@0 DESC], preserve_partitioning=[true]
+            MockMultiPartitionExec
     ");
 }
 
@@ -515,10 +523,11 @@ fn test_fetched_merge_keeps_stricter_topk_above() {
         Arc::new(SortExec::new(a_b, merge).with_fetch(Some(2)));
 
     assert_ensure_requirements_plan!(topk, @r"
-    SortExec: TopK(fetch=2), expr=[a@0 ASC NULLS LAST, b@1 ASC NULLS LAST], preserve_partitioning=[false], sort_prefix=[a@0 ASC NULLS LAST]
-      SortPreservingMergeExec: [a@0 ASC NULLS LAST], fetch=5
-        LocalLimitExec: fetch=5
-          MockMultiPartitionExec
+    OutputRequirementExec: order_by=[(a@0, asc), (b@1, asc)], dist_by=SinglePartition
+      SortExec: TopK(fetch=2), expr=[a@0 ASC NULLS LAST, b@1 ASC NULLS LAST], preserve_partitioning=[false], sort_prefix=[a@0 ASC NULLS LAST]
+        SortPreservingMergeExec: [a@0 ASC NULLS LAST], fetch=5
+          LocalLimitExec: fetch=5
+            MockMultiPartitionExec
     ");
 }
 
@@ -580,9 +589,10 @@ fn test_multi_column_sort_multi_partition() {
 
     assert_ensure_requirements_plan!(limit, @r"
     GlobalLimitExec: skip=0, fetch=21
-      SortPreservingMergeExec: [a@0 DESC, b@1 ASC NULLS LAST]
-        SortExec: expr=[a@0 DESC, b@1 ASC NULLS LAST], preserve_partitioning=[true]
-          MockMultiPartitionExec
+      OutputRequirementExec: order_by=[(a@0, desc), (b@1, asc)], dist_by=SinglePartition
+        SortPreservingMergeExec: [a@0 DESC, b@1 ASC NULLS LAST]
+          SortExec: expr=[a@0 DESC, b@1 ASC NULLS LAST], preserve_partitioning=[true]
+            MockMultiPartitionExec
     ");
 }
 
@@ -1598,10 +1608,11 @@ fn test_keep_sort_above_unordered_limit_with_skip() -> Result<()> {
 
     let optimized = optimize_and_sanity_check(sort)?;
     assert_snapshot!(plan_string(&optimized), @r"
-    SortExec: expr=[a@0 DESC], preserve_partitioning=[false]
-      GlobalLimitExec: skip=5, fetch=10
-        SortPreservingMergeExec: [a@0 ASC NULLS LAST]
-          MockMultiPartitionExec
+    OutputRequirementExec: order_by=[(a@0, desc)], dist_by=SinglePartition
+      SortExec: expr=[a@0 DESC], preserve_partitioning=[false]
+        GlobalLimitExec: skip=5, fetch=10
+          SortPreservingMergeExec: [a@0 ASC NULLS LAST]
+            MockMultiPartitionExec
     ");
     Ok(())
 }
@@ -1617,10 +1628,11 @@ fn test_keep_sort_above_limit_with_skip_only() -> Result<()> {
 
     let optimized = optimize_and_sanity_check(sort)?;
     assert_snapshot!(plan_string(&optimized), @r"
-    SortExec: expr=[a@0 DESC], preserve_partitioning=[false]
-      GlobalLimitExec: skip=5, fetch=None
-        SortPreservingMergeExec: [a@0 ASC NULLS LAST]
-          MockMultiPartitionExec
+    OutputRequirementExec: order_by=[(a@0, desc)], dist_by=SinglePartition
+      SortExec: expr=[a@0 DESC], preserve_partitioning=[false]
+        GlobalLimitExec: skip=5, fetch=None
+          SortPreservingMergeExec: [a@0 ASC NULLS LAST]
+            MockMultiPartitionExec
     ");
     Ok(())
 }
@@ -1642,11 +1654,12 @@ fn test_keep_sort_above_ordered_limit_with_skip() -> Result<()> {
 
     let optimized = optimize_and_sanity_check(sort)?;
     assert_snapshot!(plan_string(&optimized), @r"
-    SortExec: expr=[a@0 ASC NULLS LAST, b@1 ASC NULLS LAST], preserve_partitioning=[false]
-      GlobalLimitExec: skip=5, fetch=10
-        MockReqExec
-          SortPreservingMergeExec: [a@0 ASC NULLS LAST]
-            MockMultiPartitionExec
+    OutputRequirementExec: order_by=[(a@0, asc), (b@1, asc)], dist_by=SinglePartition
+      SortExec: expr=[a@0 ASC NULLS LAST, b@1 ASC NULLS LAST], preserve_partitioning=[false]
+        GlobalLimitExec: skip=5, fetch=10
+          MockReqExec
+            SortPreservingMergeExec: [a@0 ASC NULLS LAST]
+              MockMultiPartitionExec
     ");
     Ok(())
 }
@@ -1665,9 +1678,10 @@ fn test_sort_pushed_into_sort_below_limit_with_skip() -> Result<()> {
 
     let optimized = optimize_and_sanity_check(sort)?;
     assert_snapshot!(plan_string(&optimized), @r"
-    GlobalLimitExec: skip=5, fetch=10
-      SortExec: TopK(fetch=15), expr=[b@1 ASC NULLS LAST, a@0 ASC NULLS LAST], preserve_partitioning=[false]
-        MockMultiPartitionExec
+    OutputRequirementExec: order_by=[(b@1, asc), (a@0, asc)], dist_by=SinglePartition
+      GlobalLimitExec: skip=5, fetch=10
+        SortExec: TopK(fetch=15), expr=[b@1 ASC NULLS LAST, a@0 ASC NULLS LAST], preserve_partitioning=[false]
+          MockMultiPartitionExec
     ");
     Ok(())
 }
@@ -1687,11 +1701,12 @@ fn test_keep_sort_above_limit_over_merged_sort() -> Result<()> {
 
     let optimized = optimize_and_sanity_check(sort)?;
     assert_snapshot!(plan_string(&optimized), @r"
-    SortExec: expr=[b@1 ASC NULLS LAST, a@0 ASC NULLS LAST], preserve_partitioning=[false]
-      GlobalLimitExec: skip=5, fetch=10
-        SortPreservingMergeExec: [b@1 ASC NULLS LAST]
-          SortExec: expr=[b@1 ASC NULLS LAST], preserve_partitioning=[true]
-            MockMultiPartitionExec
+    OutputRequirementExec: order_by=[(b@1, asc), (a@0, asc)], dist_by=SinglePartition
+      SortExec: expr=[b@1 ASC NULLS LAST, a@0 ASC NULLS LAST], preserve_partitioning=[false]
+        GlobalLimitExec: skip=5, fetch=10
+          SortPreservingMergeExec: [b@1 ASC NULLS LAST]
+            SortExec: expr=[b@1 ASC NULLS LAST], preserve_partitioning=[true]
+              MockMultiPartitionExec
     ");
     Ok(())
 }
@@ -1709,10 +1724,11 @@ fn test_keep_sort_above_local_limit() -> Result<()> {
 
     let optimized = optimize_and_sanity_check(sort)?;
     assert_snapshot!(plan_string(&optimized), @r"
-    SortPreservingMergeExec: [a@0 ASC NULLS LAST, b@1 ASC NULLS LAST]
-      SortExec: expr=[a@0 ASC NULLS LAST, b@1 ASC NULLS LAST], preserve_partitioning=[true]
-        LocalLimitExec: fetch=10
-          MockMultiPartitionExec
+    OutputRequirementExec: order_by=[(a@0, asc), (b@1, asc)], dist_by=SinglePartition
+      SortPreservingMergeExec: [a@0 ASC NULLS LAST, b@1 ASC NULLS LAST]
+        SortExec: expr=[a@0 ASC NULLS LAST, b@1 ASC NULLS LAST], preserve_partitioning=[true]
+          LocalLimitExec: fetch=10
+            MockMultiPartitionExec
     ");
     Ok(())
 }

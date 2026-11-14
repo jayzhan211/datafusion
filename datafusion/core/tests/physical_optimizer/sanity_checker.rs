@@ -1047,24 +1047,19 @@ async fn plan_window_query(state: SessionState) -> Result<Arc<dyn ExecutionPlan>
         .await
 }
 
-/// A rule appended after the default rules is checked, and the error names it.
+/// A rule appended after the default rules that breaks a requirement is followed
+/// by `EnsureRequirements`, which restores it.
 #[tokio::test]
-async fn test_final_check_names_appended_rule() -> Result<()> {
+async fn test_appended_rule_that_breaks_requirements_is_repaired() -> Result<()> {
     let state = SessionStateBuilder::new()
         .with_default_features()
         .with_physical_optimizer_rule(Arc::new(RemoveSorts))
         .build();
-    let error = plan_window_query(state).await.unwrap_err().to_string();
+    let plan = plan_window_query(state).await?;
     assert!(
-        error.starts_with(
-            "SanityCheckPlan: order and distribution requirements stopped holding \
-             after physical optimizer rule 'remove_sorts'"
-        ),
-        "{error}"
-    );
-    assert!(
-        error.contains("does not satisfy order requirements"),
-        "{error}"
+        plan.exists(|node| Ok(node.is::<SortExec>()))?,
+        "{}",
+        displayable(plan.as_ref()).indent(true)
     );
     Ok(())
 }

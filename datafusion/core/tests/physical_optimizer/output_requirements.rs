@@ -194,3 +194,35 @@ async fn scalar_subquery_root_preserves_global_ordering_end_to_end() {
         .collect();
     assert_eq!(values, vec![1, 2, 3, 4, 5, 6, 7, 8]);
 }
+
+/// Enforcement run on its own, outside the physical planner, keeps the marker it
+/// adds. Executing that plan returns the input's rows.
+#[tokio::test]
+async fn marker_left_by_enforcement_executes() -> datafusion_common::Result<()> {
+    use datafusion_common::tree_node::TreeNode;
+    use datafusion_physical_optimizer::ensure_requirements::EnsureRequirements;
+    use datafusion_physical_optimizer::output_requirements::OutputRequirementExec;
+    use datafusion_physical_plan::sorts::sort::SortExec;
+
+    let batch = record_batch!(("a", Int32, [3, 1, 2])).unwrap();
+    let schema = batch.schema();
+    let source = MemorySourceConfig::try_new_exec(&[vec![batch]], schema, None)?;
+    let ordering: LexOrdering = [sort_expr("a", &source.schema())].into();
+    let plan: Arc<dyn ExecutionPlan> = Arc::new(SortExec::new(ordering, source));
+    let plan = EnsureRequirements::new().optimize(plan, &ConfigOptions::new())?;
+    assert!(plan.exists(|node| Ok(node.is::<OutputRequirementExec>()))?);
+
+    let batches = collect(plan, SessionContext::new().task_ctx()).await?;
+    let values: Vec<i32> = batches
+        .iter()
+        .flat_map(|batch| {
+            batch
+                .column(0)
+                .as_primitive::<Int32Type>()
+                .values()
+                .to_vec()
+        })
+        .collect();
+    assert_eq!(values, vec![1, 2, 3]);
+    Ok(())
+}

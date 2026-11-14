@@ -15,8 +15,7 @@
 # specific language governing permissions and limitations
 # under the License.
 
-# This file runs `PushdownSort` and the `OutputRequirements` remove step before
-# `EnsureRequirements` (see `rule_order.rs`). A sort over several partitions also
+# This file runs `PushdownSort` before `EnsureRequirements` (see `rule_order.rs`). A sort over several partitions also
 # merges them, so `PushdownSort` must keep a merge when it removes the sort.
 
 statement ok

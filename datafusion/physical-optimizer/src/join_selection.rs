@@ -11,10 +11,9 @@
 //! `PartitionMode` and the build side using the available statistics for hash joins.
 
 use crate::PhysicalOptimizerRule;
-use crate::ensure_requirements::EnsureRequirements;
 use crate::optimizer::{ConfigOnlyContext, PhysicalOptimizerContext};
-use crate::output_requirements::OutputRequirementExec;
-use crate::sanity_checker::{input_requirements_hold, output_order_kept};
+use crate::sanity_checker::output_order_kept;
+use crate::utils::is_limit;
 use datafusion_common::Statistics;
 use datafusion_common::config::ConfigOptions;
 use datafusion_common::error::Result;
@@ -33,7 +32,9 @@ use datafusion_physical_plan::joins::{
 use datafusion_physical_plan::limit::{GlobalLimitExec, LocalLimitExec};
 use datafusion_physical_plan::projection::ProjectionExec;
 use datafusion_physical_plan::statistics::StatisticsArgs;
-use datafusion_physical_plan::{ExecutionPlan, ExecutionPlanProperties};
+use datafusion_physical_plan::{
+    ExecutionPlan, ExecutionPlanProperties, replace_children_if_necessary,
+};
 use std::sync::Arc;
 
 /// The [`JoinSelection`] rule tries to modify a given plan so that it can
@@ -145,43 +146,23 @@ impl PhysicalOptimizerRule for JoinSelection {
             Box::new(hash_join_swap_subrule),
         ];
         let config = context.config_options();
-        // These rewrites make a join on unbounded input runnable, so they aren't
-        // optional. A marker records any order the query relies on, and without one
-        // the rewrite has to keep the order.
-        let has_marker = plan
-            .exists(|node| Ok(node.downcast_ref::<OutputRequirementExec>().is_some()))?;
-        let new_plan = Arc::clone(&plan)
-            .transform_up(|p| {
-                let rewritten = apply_subrules(Arc::clone(&p), &subrules, config)?;
-                if has_marker {
-                    Ok(rewritten)
-                } else {
-                    keep_relied_order(p, rewritten)
-                }
-            })
+        // A rewrite that breaks a requirement the plan declares is repaired by the
+        // physical planner, which runs enforcement again.
+        let new_plan = plan
+            .transform_up(|p| apply_subrules(p, &subrules, config))
             .data()?;
-        let new_plan = new_plan
-            .transform_up(|p| {
-                let rewritten =
-                    statistical_join_selection_subrule(Arc::clone(&p), context)?;
-                keep_relied_order(p, rewritten)
-            })
-            .data()?;
-
-        // A new mode or new inputs can break the requirements of a plan that met
-        // them. A rule that comes later can't be counted on to repair that.
-        if !Arc::ptr_eq(&plan, &new_plan)
-            && is_enforced(&plan)
-            && !input_requirements_hold(&new_plan)
-        {
-            // Repair only. Added parallelism could lose an order that a limit below
-            // this point relies on, which nothing in the plan records.
-            let mut config = config.clone();
-            config.optimizer.enable_round_robin_repartition = false;
-            config.optimizer.repartition_file_scans = false;
-            return EnsureRequirements::new().optimize(new_plan, &config);
-        }
-        Ok(new_plan)
+        transform_up_with_fetch_above(new_plan, false, &mut |p, fetch_above| {
+            let rewritten = statistical_join_selection_subrule(Arc::clone(&p), context)?;
+            // A fetch picks rows by this join's output order, so the rewrite has to
+            // keep that order.
+            if fetch_above
+                && rewritten.transformed
+                && !output_order_kept(&p, &rewritten.data)?
+            {
+                return Ok(Transformed::no(p));
+            }
+            Ok(rewritten)
+        })
     }
 
     fn name(&self) -> &str {
@@ -193,6 +174,36 @@ impl PhysicalOptimizerRule for JoinSelection {
     }
 }
 
+/// A rewrite that is also told whether a fetch above relies on the node's output
+/// order, see [`transform_up_with_fetch_above`].
+type RewriteWithFetchAbove<'a> = dyn FnMut(Arc<dyn ExecutionPlan>, bool) -> Result<Transformed<Arc<dyn ExecutionPlan>>>
+    + 'a;
+
+/// Rewrites `plan` bottom up, like `transform_up`. `f` is also told whether a fetch
+/// picks rows by the node's output order: the node has a fetch, or a node above it
+/// has a fetch or is a limit and every node in between keeps its input order.
+fn transform_up_with_fetch_above(
+    plan: Arc<dyn ExecutionPlan>,
+    fetch_above: bool,
+    f: &mut RewriteWithFetchAbove<'_>,
+) -> Result<Arc<dyn ExecutionPlan>> {
+    let selects_rows = fetch_above || plan.fetch().is_some() || is_limit(&plan);
+    let keeps_order = plan.maintains_input_order();
+    let children = plan
+        .children()
+        .into_iter()
+        .enumerate()
+        .map(|(idx, child)| {
+            let child_fetch_above =
+                selects_rows && keeps_order.get(idx).copied().unwrap_or(false);
+            transform_up_with_fetch_above(Arc::clone(child), child_fetch_above, f)
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let plan = replace_children_if_necessary(plan, children)?;
+    let fetch_here = fetch_above || plan.fetch().is_some();
+    Ok(f(plan, fetch_here)?.data)
+}
+
 /// Whether a hash join in [`PartitionMode::Auto`] may repartition its inputs. A
 /// null-aware join can't, because it needs global state for NULLs.
 pub(crate) fn can_repartition_join(
@@ -202,39 +213,6 @@ pub(crate) fn can_repartition_join(
     config.execution.target_partitions > 1
         && config.optimizer.repartition_joins
         && !hash_join.null_aware
-}
-
-/// Keeps a join as it was if `rewritten` loses an output order that may be relied
-/// on. Only a join in `Auto` mode is known to come before enforcement, because
-/// [`EnsureRequirements`] resolves that mode.
-fn keep_relied_order(
-    join: Arc<dyn ExecutionPlan>,
-    rewritten: Transformed<Arc<dyn ExecutionPlan>>,
-) -> Result<Transformed<Arc<dyn ExecutionPlan>>> {
-    let is_auto = join
-        .downcast_ref::<HashJoinExec>()
-        .is_some_and(|join| *join.partition_mode() == PartitionMode::Auto);
-    if !rewritten.transformed || is_auto || output_order_kept(&join, &rewritten.data)? {
-        return Ok(rewritten);
-    }
-    Ok(Transformed::no(join))
-}
-
-/// Whether `plan` already meets its requirements. A join in `Auto` mode declares
-/// none, but enforcement has not seen it yet.
-fn is_enforced(plan: &Arc<dyn ExecutionPlan>) -> bool {
-    !has_auto_join(plan) && input_requirements_hold(plan)
-}
-
-/// Whether `plan` has a join that enforcement hasn't seen, because
-/// [`EnsureRequirements`] resolves [`PartitionMode::Auto`].
-fn has_auto_join(plan: &Arc<dyn ExecutionPlan>) -> bool {
-    plan.exists(|node| {
-        Ok(node
-            .downcast_ref::<HashJoinExec>()
-            .is_some_and(|join| *join.partition_mode() == PartitionMode::Auto))
-    })
-    .unwrap_or(true)
 }
 
 /// Determines whether it is possible to swap inputs of a hash join. Of the

@@ -22,6 +22,7 @@ use datafusion_physical_expr_common::physical_expr::PhysicalExpr;
 use datafusion_physical_expr_common::sort_expr::LexOrdering;
 use datafusion_physical_optimizer::PhysicalOptimizerRule;
 use datafusion_physical_optimizer::ensure_requirements::EnsureRequirements;
+use datafusion_physical_optimizer::output_requirements::OutputRequirements;
 use datafusion_physical_optimizer::pushdown_sort::PushdownSort;
 use datafusion_physical_plan::sorts::sort::SortExec;
 use datafusion_physical_plan::{ExecutionPlan, collect};
@@ -1140,6 +1141,9 @@ fn test_custom_plan_with_fetch_keeps_outer_sort() -> Result<()> {
     let mut config = ConfigOptions::new();
     config.execution.target_partitions = 1;
     let optimized = EnsureRequirements::new().optimize(plan, &config)?;
+    // Enforcement keeps the output requirements marker; the physical planner
+    // removes it after the last rule.
+    let optimized = OutputRequirements::new_remove_mode().optimize(optimized, &config)?;
     let sort = optimized
         .downcast_ref::<SortExec>()
         .expect("a fetched custom plan must retain the requested outer sort");

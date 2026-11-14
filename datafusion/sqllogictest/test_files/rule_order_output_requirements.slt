@@ -15,8 +15,8 @@
 # specific language governing permissions and limitations
 # under the License.
 
-# This file runs with the `OutputRequirements` remove step before its add step
-# (see `rule_order.rs`), so the marker is still in the plan after the last rule.
+# This file runs the `OutputRequirements` add step after every other rule (see
+# `rule_order.rs`), so the marker is still in the plan after the last rule.
 # The planner must drop it: the marker can't execute.
 
 statement ok
