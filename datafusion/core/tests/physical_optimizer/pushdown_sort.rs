@@ -1181,6 +1181,37 @@ fn test_sort_pushdown_exact_preserves_fetch_with_global_limit() {
     );
 }
 
+/// A sort that keeps its partitions applies its fetch to each of them. When the
+/// source already provides the order, the fetch stays per partition: a global limit
+/// over several partitions is not a valid plan.
+#[test]
+fn test_sort_pushdown_exact_partitioned_fetch_stays_per_partition() {
+    let schema = schema();
+    let a = sort_expr("a", &schema);
+    let source = Arc::new(
+        TestScan::new(schema.clone(), vec![])
+            .with_exact_pushdown(true)
+            .with_partition_count(4),
+    );
+
+    let ordering = LexOrdering::new(vec![a]).unwrap();
+    let plan = sort_exec_with_fetch_and_preserve_partitioning(ordering, Some(10), source);
+
+    insta::assert_snapshot!(
+        OptimizationTest::new(plan, PushdownSort::new(), true),
+        @r"
+    OptimizationTest:
+      input:
+        - SortExec: TopK(fetch=10), expr=[a@0 ASC], preserve_partitioning=[true]
+        -   TestScan
+      output:
+        Ok:
+          - LocalLimitExec: fetch=10
+          -   TestScan: requested_ordering=[a@0 ASC]
+    "
+    );
+}
+
 #[test]
 fn test_sort_pushdown_exact_preserves_fetch_with_source_support() {
     // When a source returns Exact AND supports with_fetch(),

@@ -183,8 +183,13 @@ impl PhysicalOptimizerRule for PushdownSort {
                     // If the source doesn't support `with_fetch`, fall back to
                     // wrapping with GlobalLimitExec.
                     if let Some(fetch) = sort_exec.fetch() {
+                        // A sort that keeps its partitions applies the fetch to each one.
                         let inner = inner.with_fetch(Some(fetch)).unwrap_or_else(|| {
-                            Arc::new(GlobalLimitExec::new(inner, 0, Some(fetch)))
+                            if sort_exec.preserve_partitioning() {
+                                Arc::new(LocalLimitExec::new(inner, fetch))
+                            } else {
+                                Arc::new(GlobalLimitExec::new(inner, 0, Some(fetch)))
+                            }
                         });
                         Ok(Transformed::yes(inner))
                     } else {
