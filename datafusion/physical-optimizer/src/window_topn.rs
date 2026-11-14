@@ -40,10 +40,11 @@
 use std::sync::Arc;
 
 use crate::PhysicalOptimizerRule;
-use crate::sanity_checker::{input_requirements_hold, output_order_kept};
+use crate::sanity_checker::output_order_kept;
+use crate::utils::transform_up_with_fetch_above;
 use arrow::datatypes::DataType;
 use datafusion_common::config::ConfigOptions;
-use datafusion_common::tree_node::{Transformed, TransformedResult, TreeNode};
+use datafusion_common::tree_node::Transformed;
 use datafusion_common::{Result, ScalarValue};
 use datafusion_expr::Operator;
 use datafusion_functions_window::rank::{dense_rank_udwf, rank_udwf};
@@ -319,18 +320,17 @@ impl PhysicalOptimizerRule for WindowTopN {
         }
 
         // `PartitionedTopKExec` orders by the partition keys with default options,
-        // whatever order its input had. That only matters if the plan has been
-        // enforced, because something may rely on the order it replaces.
-        let enforced = input_requirements_hold(&plan);
-        plan.transform_down(|node| {
+        // whatever order its input had. A fetch above picks rows by that order and
+        // records no requirement, so keep the order there. A declared requirement
+        // the rewrite breaks is repaired by the physical planner.
+        transform_up_with_fetch_above(plan, false, &mut |node, fetch_above| {
             if let Some(transformed) = WindowTopN::try_transform(&node)
-                && (!enforced || output_order_kept(&node, &transformed)?)
+                && (!fetch_above || output_order_kept(&node, &transformed)?)
             {
                 return Ok(Transformed::yes(transformed));
             }
             Ok(Transformed::no(node))
         })
-        .data()
     }
 
     fn name(&self) -> &str {

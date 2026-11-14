@@ -5,10 +5,12 @@
 use std::sync::Arc;
 
 use datafusion_common::Result;
+use datafusion_common::tree_node::Transformed;
 use datafusion_physical_expr::{
     AcrossPartitions, Distribution, LexOrdering, LexRequirement,
 };
 use datafusion_physical_plan::coalesce_partitions::CoalescePartitionsExec;
+use datafusion_physical_plan::execution_plan::replace_children_if_necessary;
 use datafusion_physical_plan::limit::{GlobalLimitExec, LocalLimitExec};
 use datafusion_physical_plan::repartition::RepartitionExec;
 use datafusion_physical_plan::sorts::sort::SortExec;
@@ -181,6 +183,36 @@ pub fn is_repartition(plan: &Arc<dyn ExecutionPlan>) -> bool {
 /// i.e. either a [`LocalLimitExec`] or a [`GlobalLimitExec`].
 pub fn is_limit(plan: &Arc<dyn ExecutionPlan>) -> bool {
     plan.is::<GlobalLimitExec>() || plan.is::<LocalLimitExec>()
+}
+
+/// A rewrite that is also told whether a fetch above relies on the node's output
+/// order, see [`transform_up_with_fetch_above`].
+pub(crate) type RewriteWithFetchAbove<'a> = dyn FnMut(Arc<dyn ExecutionPlan>, bool) -> Result<Transformed<Arc<dyn ExecutionPlan>>>
+    + 'a;
+
+/// Rewrites `plan` bottom up, like `transform_up`. `f` is also told whether a fetch
+/// picks rows by the node's output order: the node has a fetch, or a node above it
+/// has a fetch or is a limit and every node in between keeps its input order.
+pub(crate) fn transform_up_with_fetch_above(
+    plan: Arc<dyn ExecutionPlan>,
+    fetch_above: bool,
+    f: &mut RewriteWithFetchAbove<'_>,
+) -> Result<Arc<dyn ExecutionPlan>> {
+    let selects_rows = fetch_above || plan.fetch().is_some() || is_limit(&plan);
+    let keeps_order = plan.maintains_input_order();
+    let children = plan
+        .children()
+        .into_iter()
+        .enumerate()
+        .map(|(idx, child)| {
+            let child_fetch_above =
+                selects_rows && keeps_order.get(idx).copied().unwrap_or(false);
+            transform_up_with_fetch_above(Arc::clone(child), child_fetch_above, f)
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let plan = replace_children_if_necessary(plan, children)?;
+    let fetch_here = fetch_above || plan.fetch().is_some();
+    Ok(f(plan, fetch_here)?.data)
 }
 
 #[cfg(test)]
