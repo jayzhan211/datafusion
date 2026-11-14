@@ -3936,6 +3936,54 @@ fn smj_join_key_ordering() -> Result<()> {
     Ok(())
 }
 
+/// Reordering a sort-merge join's keys to match its inputs keeps the projection
+/// embedded in the join, so the join's output columns don't change.
+#[test]
+fn smj_key_reorder_keeps_embedded_projection() -> Result<()> {
+    let schema = schema();
+    let hash_ab = |input: Arc<dyn ExecutionPlan>| -> Result<Arc<dyn ExecutionPlan>> {
+        let keys = vec![col("a", &schema)?, col("b", &schema)?];
+        Ok(Arc::new(RepartitionExec::try_new(
+            input,
+            Partitioning::Hash(keys, 10),
+        )?))
+    };
+    let left = hash_ab(parquet_exec())?;
+    let right = hash_ab(parquet_exec())?;
+    // Join on (b, a) while both inputs are partitioned by (a, b); output only
+    // the left side's a and b.
+    let join_on: JoinOn = vec![
+        (col("b", &schema)?, col("b", &schema)?),
+        (col("a", &schema)?, col("a", &schema)?),
+    ];
+    let join: Arc<dyn ExecutionPlan> = Arc::new(
+        SortMergeJoinExec::try_new(
+            left,
+            right,
+            join_on,
+            None,
+            JoinType::Inner,
+            vec![SortOptions::default(); 2],
+            NullEquality::NullEqualsNothing,
+        )?
+        .with_projection(Some(vec![0, 1]))?,
+    );
+    let expected_schema = join.schema();
+
+    for top_down in [true, false] {
+        let mut config = TestConfig::default();
+        config.config.optimizer.top_down_join_key_reordering = top_down;
+        let optimized = config.try_to_plan(Arc::clone(&join), &[Run::Distribution])?;
+        assert_eq!(
+            optimized.schema(),
+            expected_schema,
+            "top_down={top_down}\n{}",
+            displayable(optimized.as_ref()).indent(true)
+        );
+    }
+    Ok(())
+}
+
 #[test]
 fn merge_does_not_need_sort() -> Result<()> {
     // see https://github.com/apache/datafusion/issues/4331

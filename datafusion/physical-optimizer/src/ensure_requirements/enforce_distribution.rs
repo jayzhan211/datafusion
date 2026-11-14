@@ -194,12 +194,14 @@ pub fn adjust_input_keys_ordering(
             join_type,
             sort_options,
             null_equality,
+            projection,
             ..
         } = origin_exec;
         let join_constructor = |new_conditions: (
             Vec<(PhysicalExprRef, PhysicalExprRef)>,
             Vec<SortOptions>,
         )| {
+            // `try_new` resets `projection`; restore it so the output schema is unchanged.
             SortMergeJoinExec::try_new(
                 Arc::clone(left),
                 Arc::clone(right),
@@ -210,6 +212,7 @@ pub fn adjust_input_keys_ordering(
                 *null_equality,
             )
             .and_then(|join| join.with_null_aware(origin_exec.null_aware()))
+            .and_then(|join| join.with_projection(projection.clone()))
             .map(|e| Arc::new(e) as _)
         };
         return reorder_partitioned_join_keys(
@@ -500,6 +503,7 @@ pub fn reorder_join_keys_to_inputs(
             let new_sort_options = (0..sort_options.len())
                 .map(|idx| sort_options[positions[idx]])
                 .collect();
+            // `try_new` resets `projection`; restore it so the output schema is unchanged.
             return SortMergeJoinExec::try_new(
                 Arc::clone(left),
                 Arc::clone(right),
@@ -510,6 +514,7 @@ pub fn reorder_join_keys_to_inputs(
                 *null_equality,
             )
             .and_then(|join| join.with_null_aware(origin_exec.null_aware()))
+            .and_then(|join| join.with_projection(origin_exec.projection.clone()))
             .map(|smj| Arc::new(smj) as _);
         }
     }
