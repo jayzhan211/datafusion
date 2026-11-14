@@ -67,3 +67,18 @@ SELECT g, max(v) m FROM (SELECT x AS v, max(w) AS g FROM f2 GROUP BY x) GROUP BY
 
 statement ok
 DROP TABLE f2;
+
+# A computed group key that reuses the name of the column below it is a different key:
+# the limit can't go into the inner aggregate. 10, 20 and 30 give the group 0.
+statement ok
+CREATE TABLE f3 AS SELECT value AS y FROM generate_series(1, 30);
+
+query I
+SELECT y FROM (SELECT y % 10 AS y FROM (SELECT y FROM f3 GROUP BY y) s) s2 GROUP BY y ORDER BY y LIMIT 3;
+----
+0
+1
+2
+
+statement ok
+DROP TABLE f3;
