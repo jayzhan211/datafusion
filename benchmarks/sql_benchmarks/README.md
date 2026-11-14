@@ -22,6 +22,7 @@ in the community:
 | `clickbench_sorted`   | ClickBench benchmark using a pre-sorted hits file.                 |
 | `h2o`                 | The `h2o` benchmark                                                |
 | `hj`                  | Hash join benchmark                                                |
+| `hj_spill`            | Hash joins whose build side does not fit in the memory limit ([#24768](https://github.com/apache/datafusion/issues/24768)): two 20M-row Parquet tables joined on a unique key with `target_partitions = 4`, under the memory limit the harness sets (`--memory-limit 512M`; `bench.sh` passes `HJ_SPILL_LIMIT`). The pool is fair, the harness default: under a greedy pool, which `SET datafusion.runtime.memory_limit` makes, the sort-merge baseline runs out of memory, and at the issue's 300M it fails Q02 about half the time ([#14143](https://github.com/apache/datafusion/issues/14143)). Q01-Q03 still spill at 512M. `--mode` picks `spill` (hash join with `enable_hash_join_spilling`), `sort-merge` (`prefer_hash_join = false`, the workaround without spilling) or `hash` (neither: Q01-Q03 run out of memory at 512M). Q01 and Q02 are inner joins (key only, and with a build-side payload), Q03 is a left join that emits unmatched build rows, Q04 has a build side that fits, so it shows what the sort-merge workaround costs when no spilling is needed. Each query first checks that a memory limit is set and its answer under the same limit and mode. Size with `HJ_SPILL_ROWS`. |
 | `imdb`                | IMDb benchmark                                                     |
 | `nlj`                 | Nested‑loop join benchmark                                         |
 | `null_aware_join`     | Null-aware (`NOT IN`) hash join micro-benchmarks. Q01-Q03 are uncorrelated `NOT IN` across NULL fractions and are linear in the table size (`NAJ_LARGE_ROWS`, default `1000000`). Q04-Q08 are correlated, so the correlation predicate stays behind as a join filter that the join applies per candidate (build row × probe row) pair while deciding which outer rows are UNKNOWN; without an equality correlation there are no scope keys to narrow those pairs, so their cost grows with the square of `NAJ_ROWS` (default `10000`). Q08 adds an equality correlation, which turns those pairs into a hash lookup. All tables are built inline from `range()`, so there is no data step. |
@@ -192,6 +193,9 @@ Some benchmarks use custom environment variables as outlined below:
 | PSQ_ROWS                     | Used in the projection_subquery benchmark to size the two inline tables.                                                 | `30000`       |
 | SPILL_VIEWS_LIMIT_REPEATED   | Used in the spill_views benchmark as the memory limit of the `repeated` subgroup.                                        | `40M`         |
 | SPILL_VIEWS_LIMIT_DISTINCT   | Used in the spill_views benchmark as the memory limit of the `distinct` subgroup.                                        | `96M`         |
+| HJ_SPILL_MODE                | Used in the hj_spill benchmark: `spill`, `sort-merge` or `hash`.                                                         | `spill`       |
+| HJ_SPILL_ROWS                | Used in the hj_spill benchmark as the number of rows in each table.                                                      | `20000000`    |
+| HJ_SPILL_LIMIT               | Used by `bench.sh run hj_spill` as `MEMORY_LIMIT`, with the fair pool unless `MEM_POOL_TYPE` says otherwise.             | `512M`        |
 
 ## How it works
 

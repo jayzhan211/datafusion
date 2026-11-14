@@ -1,0 +1,30 @@
+description = "Hash joins whose build side does not fit in the memory limit (https://github.com/apache/datafusion/issues/24768). Two Parquet tables of HJ_SPILL_ROWS rows (default 20M, the issue's reproducer) are joined on a unique key with target_partitions = 4, under the memory limit the harness sets: pass --memory-limit 512M (bench.sh passes HJ_SPILL_LIMIT, default 512M). The pool is fair, the harness default: SET datafusion.runtime.memory_limit would make a greedy pool, under which the sort-merge baseline runs out of memory. 512M is above the issue's 300M because the sort-merge baseline fails Q02 about half the time at 300M: its merge holds memory it cannot spill (https://github.com/apache/datafusion/issues/14143). Q01-Q03 still spill at 512M. The mode option picks how the join runs: spill (hash join with enable_hash_join_spilling), sort-merge (prefer_hash_join = false, the workaround available without spilling) or hash (neither, which runs out of memory on Q01-Q03 at 512M). Compare two modes with compare.py."
+
+query_pattern = "q{QUERY_ID_PADDED}.benchmark"
+
+[[options]]
+name = "mode"
+env = "HJ_SPILL_MODE"
+default = "spill"
+values = ["spill", "sort-merge", "hash"]
+help = "How the joins run: spill = hash join with datafusion.execution.enable_hash_join_spilling = true; sort-merge = datafusion.optimizer.prefer_hash_join = false; hash = hash join that does not spill, which fails when the build side does not fit."
+
+[[options]]
+name = "rows"
+short = "r"
+env = "HJ_SPILL_ROWS"
+default = "20000000"
+values = ["20000000", "..."]
+help = "Rows in each table. The build side of Q01-Q03 is the whole table."
+
+[[examples]]
+command = "cargo run --release --bin benchmark_runner -- hj_spill --memory-limit 512M -o spill.json"
+description = "Run every query with the hash join spilling."
+
+[[examples]]
+command = "cargo run --release --bin benchmark_runner -- hj_spill --memory-limit 512M --mode sort-merge -o sort-merge.json"
+description = "Run the same queries as sort-merge joins, then compare: python3 compare.py sort-merge.json spill.json"
+
+[[examples]]
+command = "cargo run --release --bin benchmark_runner -- hj_spill --memory-limit 300M"
+description = "The limit of the issue: more spilling, but the sort-merge baseline fails Q02 about half the time."

@@ -1,0 +1,38 @@
+name Q04
+group hj_spill
+
+load sql_benchmarks/hj_spill/init/load.sql
+
+init sql_benchmarks/hj_spill/init/settings.sql
+
+init sql_benchmarks/hj_spill/init/mode_${HJ_SPILL_MODE:-spill}.sql
+
+# The settings must reach the session, or the suite measures nothing.
+assert I
+SELECT value FROM information_schema.df_settings WHERE name = 'datafusion.execution.target_partitions';
+----
+4
+
+# The memory limit comes from the harness: --memory-limit or MEMORY_LIMIT
+# (bench.sh passes HJ_SPILL_LIMIT), with the fair pool unless --mem-pool-type
+# says otherwise. Without a limit this fails, instead of timing joins that
+# never spill.
+assert I
+SELECT value <> 'unlimited' FROM information_schema.df_settings WHERE name = 'datafusion.runtime.memory_limit';
+----
+true
+
+# The join runs under the same limit and mode as the measured query, so a
+# wrong answer fails the run.
+assert I
+SELECT (SELECT count(*) FROM t_probe p JOIN (SELECT k FROM t_build WHERE k % 4 = 0) b ON p.k = b.k) = (SELECT count(*) FROM t_build WHERE k % 4 = 0);
+----
+true
+
+run
+-- Q04: a quarter of the keys on the build side, which fits in 512M, so the
+-- hash join does not spill. It shows what the sort-merge workaround costs on a
+-- join that fits.
+SELECT count(*) FROM t_probe p JOIN (SELECT k FROM t_build WHERE k % 4 = 0) b ON p.k = b.k;
+
+cleanup sql_benchmarks/hj_spill/init/cleanup.sql

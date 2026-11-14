@@ -1,0 +1,38 @@
+name Q03
+group hj_spill
+
+load sql_benchmarks/hj_spill/init/load.sql
+
+init sql_benchmarks/hj_spill/init/settings.sql
+
+init sql_benchmarks/hj_spill/init/mode_${HJ_SPILL_MODE:-spill}.sql
+
+# The settings must reach the session, or the suite measures nothing.
+assert I
+SELECT value FROM information_schema.df_settings WHERE name = 'datafusion.execution.target_partitions';
+----
+4
+
+# The memory limit comes from the harness: --memory-limit or MEMORY_LIMIT
+# (bench.sh passes HJ_SPILL_LIMIT), with the fair pool unless --mem-pool-type
+# says otherwise. Without a limit this fails, instead of timing joins that
+# never spill.
+assert I
+SELECT value <> 'unlimited' FROM information_schema.df_settings WHERE name = 'datafusion.runtime.memory_limit';
+----
+true
+
+# Every build row is in the output once and only the even keys match, so a
+# lost or repeated row fails the run.
+assert I
+SELECT count(*) = (SELECT count(*) FROM t_build) AND count(p.k2) = (SELECT count(*) FROM t_build WHERE k % 2 = 0) FROM t_build b LEFT JOIN (SELECT k - 4294967296 * (k % 2) AS k2 FROM t_probe) p ON b.k = p.k2;
+----
+true
+
+run
+-- Q03: a left join whose build side is the preserved side, so unmatched build
+-- rows are emitted after the probe side ends. Odd probe keys are moved below
+-- zero, where no build key is, so half the build rows (the even keys) match.
+SELECT count(*), count(p.k2) FROM t_build b LEFT JOIN (SELECT k - 4294967296 * (k % 2) AS k2 FROM t_probe) p ON b.k = p.k2;
+
+cleanup sql_benchmarks/hj_spill/init/cleanup.sql
