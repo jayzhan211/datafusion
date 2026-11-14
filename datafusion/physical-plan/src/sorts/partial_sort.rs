@@ -65,6 +65,9 @@ use datafusion_common::tree_node::TreeNodeRecursion;
 use datafusion_common::utils::evaluate_partition_ranges;
 use datafusion_execution::{RecordBatchStream, TaskContext};
 use datafusion_physical_expr::{LexOrdering, PhysicalExpr};
+use datafusion_physical_expr_common::sort_expr::{
+    LexRequirement, OrderingRequirements, PhysicalSortRequirement,
+};
 
 use futures::{Stream, StreamExt, ready};
 use log::trace;
@@ -360,6 +363,18 @@ impl ExecutionPlan for PartialSortExec {
 
     fn benefits_from_input_partitioning(&self) -> Vec<bool> {
         vec![false]
+    }
+
+    /// Sorts each run of rows that share the prefix, so it relies on its input
+    /// being sorted by the prefix.
+    fn required_input_ordering(&self) -> Vec<Option<OrderingRequirements>> {
+        let prefix = self
+            .expr
+            .iter()
+            .take(self.common_prefix_length)
+            .cloned()
+            .map(PhysicalSortRequirement::from);
+        vec![LexRequirement::new(prefix).map(OrderingRequirements::new)]
     }
 
     fn children(&self) -> Vec<&Arc<dyn ExecutionPlan>> {

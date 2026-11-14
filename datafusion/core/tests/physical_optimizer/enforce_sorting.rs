@@ -3772,3 +3772,61 @@ async fn test_keep_sort_above_repartitioned_partial_aggregate() -> Result<()> {
 
     Ok(())
 }
+
+/// `PartialSortExec` sorts each run of rows that share the prefix, so it relies
+/// on its input being sorted by the prefix. Enforcement must keep the
+/// order-preserving repartition below it.
+#[test]
+fn test_partial_sort_keeps_input_sorted_by_prefix() -> Result<()> {
+    let schema = create_test_schema3()?;
+    let ordering_a: LexOrdering = [sort_expr("a", &schema)].into();
+    let partitions = (0..2)
+        .map(|_| {
+            Arc::new(crate::physical_optimizer::test_utils::TestStreamPartition {
+                schema: Arc::clone(&schema),
+            }) as _
+        })
+        .collect();
+    let source: Arc<dyn ExecutionPlan> = Arc::new(
+        datafusion_physical_plan::streaming::StreamingTableExec::try_new(
+            Arc::clone(&schema),
+            partitions,
+            None,
+            vec![ordering_a],
+            true,
+            None,
+        )?,
+    );
+    let repartition: Arc<dyn ExecutionPlan> = Arc::new(
+        RepartitionExec::try_new(source, Partitioning::RoundRobinBatch(4))?
+            .with_preserve_order(),
+    );
+    // The filter benefits from the repartition, so enforcement keeps it.
+    let predicate = Arc::new(BinaryExpr::new(
+        col("b", &schema)?,
+        Operator::Gt,
+        datafusion_physical_expr::expressions::lit(0i32),
+    ));
+    let filter = filter_exec(predicate, repartition);
+    let partial: Arc<dyn ExecutionPlan> = Arc::new(
+        datafusion_physical_plan::sorts::partial_sort::PartialSortExec::new(
+            [sort_expr("a", &schema), sort_expr("c", &schema)].into(),
+            filter,
+            1,
+        )
+        .with_preserve_partitioning(true),
+    );
+
+    let mut config = ConfigOptions::new();
+    config.execution.target_partitions = 4;
+    let optimized = EnsureRequirements::new().optimize(partial, &config)?;
+    let actual = displayable(optimized.as_ref()).indent(true).to_string();
+    assert_snapshot!(actual.trim(), @r"
+    OutputRequirementExec: order_by=[], dist_by=Unspecified
+      PartialSortExec: expr=[a@0 ASC, c@2 ASC], common_prefix_length=[1]
+        FilterExec: b@1 > 0
+          RepartitionExec: partitioning=RoundRobinBatch(4), input_partitions=2, preserve_order=true, sort_exprs=a@0 ASC
+            StreamingTableExec: partition_sizes=2, projection=[a, b, c, d, e], infinite_source=true, output_ordering=[a@0 ASC]
+    ");
+    Ok(())
+}
