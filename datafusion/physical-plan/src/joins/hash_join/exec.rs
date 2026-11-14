@@ -1401,8 +1401,9 @@ impl HashJoinExec {
     ) -> Result<Arc<dyn ExecutionPlan>> {
         assert_or_internal_err!(
             self.dynamic_filter.is_none(),
-            "Cannot swap HashJoinExec inputs after dynamic filters have been constructed. \
-             Optimizer rules that reorder join inputs must run before optimizer rules `FilterPushdown::new_post_optimization()`"
+            "Cannot swap HashJoinExec inputs after dynamic filters have been constructed: \
+             the filter is wired into the probe side. A rule that swaps join inputs must leave \
+             a join with a dynamic filter alone"
         );
 
         let left = self.left();

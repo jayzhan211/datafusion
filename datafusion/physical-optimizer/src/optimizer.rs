@@ -89,8 +89,10 @@ impl PhysicalOptimizerContext for ConfigOnlyContext<'_> {
 ///    query's results. A plan can reach a rule before [`EnsureRequirements`]
 ///    has run, when it can't be executed yet. The results of such a plan are the
 ///    ones it produces after [`EnsureRequirements`] runs. A rule that receives a
-///    plan whose requirements are satisfied must return one whose requirements
-///    are satisfied.
+///    plan whose requirements are satisfied should return one whose requirements
+///    are satisfied. If it doesn't, the physical planner runs
+///    [`EnsureRequirements`] again, which restores them at the cost of a sort or
+///    a merge.
 ///
 /// 2. **Reorderable.** Because each rule preserves correctness, running the
 ///    rules in any order yields a valid plan that produces the same results, as
@@ -122,7 +124,8 @@ impl PhysicalOptimizerContext for ConfigOnlyContext<'_> {
 /// aggregate such as `approx_percentile_cont` can return a different estimate.
 ///
 /// After the last rule, including rules added by the user, the physical
-/// planner rejects the plan if its requirements are not satisfied (see
+/// planner removes the output requirements marker and returns an error if the
+/// plan's requirements are still not satisfied (see
 /// [`check_plan_tree_sanity`](crate::sanity_checker::check_plan_tree_sanity)).
 ///
 /// ## Optimization Coverage Is Not Guaranteed
@@ -248,11 +251,11 @@ impl PhysicalOptimizer {
             // row of literals, and before EnsureRequirements, so that the filter
             // replacing a join against such a row keeps the other input's ordering.
             Arc::new(EliminateConstantJoin::new()),
-            // Statistics-based join selection will change the Auto mode to a real join implementation,
-            // like collect left, or hash join, or future sort merge join, which will influence the
-            // EnsureRequirements rule as it decides whether to add additional repartitioning and
-            // local sorting steps to meet distribution and ordering requirements. Therefore, it
-            // should run before EnsureRequirements.
+            // Statistics-based join selection changes the Auto mode to a real join implementation,
+            // like collect left, or hash join, or future sort merge join, which influences how
+            // EnsureRequirements repartitions and sorts. It runs before EnsureRequirements so
+            // enforcement uses its choices; EnsureRequirements resolves a join still in Auto mode
+            // and makes joins over unbounded inputs runnable when this rule runs later or not at all.
             Arc::new(JoinSelection::new()),
             // The LimitedDistinctAggregation rule should be applied before EnsureRequirements,
             // as that rule may inject other operations in between the different AggregateExecs.
@@ -268,9 +271,10 @@ impl PhysicalOptimizer {
             // PartitionedTopKExec(fetch=K), which emits `rn` itself; the
             // window node is kept above it only when it has other window
             // expressions to compute.
-            // Must run before EnsureRequirements (so it can rewrite against the
+            // It runs before EnsureRequirements (so it can rewrite against the
             // window's declared ordering without pattern-matching a SortExec)
-            // and before ProjectionPushdown (which embeds projections into FilterExec).
+            // and before ProjectionPushdown (which embeds projections into FilterExec),
+            // because it only matches the shapes found there.
             Arc::new(WindowTopN::new()),
             // Ensures each input plan satisfies the distribution and ordering
             // requirements declared by `ExecutionPlan::required_input_distribution`
@@ -330,7 +334,9 @@ impl PhysicalOptimizer {
             Arc::new(PushdownSort::new()),
             Arc::new(EnsureCooperative::new()),
             // This FilterPushdown handles dynamic filters that may have references to the source ExecutionPlan.
-            // Therefore, it should be run at the end of the optimization process since any changes to the plan may break the dynamic filter's references.
+            // It runs last so it creates dynamic filters for the final plan. A rule that runs after it
+            // must keep a dynamic filter's producer and consumer in step: JoinSelection leaves a join
+            // with a dynamic filter alone, and such a join takes a projection into its output.
             // See `FilterPushdownPhase` for more details.
             Arc::new(FilterPushdown::new_post_optimization()),
             // There is no `SanityCheckPlan` rule at the end of this list. The
