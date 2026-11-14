@@ -999,9 +999,8 @@ config_namespace! {
         pub sort_spill_reservation_bytes: usize, default = 10 * 1024 * 1024
 
         /// When true, a hash join whose build side does not fit in the memory
-        /// pool spills to disk instead of failing. A null-aware (NOT IN) join,
-        /// and a join whose output keeps the probe side's order, still fail as
-        /// before. Plans do not change.
+        /// pool spills to disk instead of failing. A join whose output keeps
+        /// the probe side's order still fails as before. Plans do not change.
         pub enable_hash_join_spilling: bool, default = false
 
         /// When sorting, below what size should data be concatenated

@@ -1330,8 +1330,9 @@ impl HashJoinExec {
         };
         let on_right: Vec<PhysicalExprRef> =
             self.on.iter().map(|(_, r)| Arc::clone(r)).collect();
-        let build_routing = on_left.clone();
-        let probe_routing = on_right.clone();
+        let first_routing_key = not_in.map_or(0, NotIn::first_routing_key);
+        let build_routing = on_left[first_routing_key..].to_vec();
+        let probe_routing = on_right[first_routing_key..].to_vec();
         let env = context.runtime_env();
         let compression = context.session_config().spill_compression();
         let spill_metrics = SpillMetrics::new(&self.metrics, partition);
@@ -1865,9 +1866,7 @@ impl ExecutionPlan for HashJoinExec {
             .flatten()
             .flatten();
 
-        // A null-aware (`NOT IN`) join decides a row from whole sides, which a
-        // spilled pair sees only in part: it fails as before instead
-        if not_in.is_none() && self.can_spill(&context) {
+        if self.can_spill(&context) {
             let spill_context = || {
                 let mut ctx = self.spill_context(
                     partition,
