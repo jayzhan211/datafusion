@@ -1,0 +1,2 @@
+DROP TABLE IF EXISTS t_build;
+DROP TABLE IF EXISTS t_probe;

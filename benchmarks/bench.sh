@@ -102,6 +102,9 @@ spill_views:            Sort and GROUP BY queries that spill StringView/BinaryVi
                           (https://github.com/apache/datafusion/issues/23564); each query sets its own memory limit
                           (subgroups via BENCH_SUBGROUP: repeated = low-cardinality payload, distinct = all-distinct strings)
                           (data generated inline by the suite's load SQL)
+hj_spill:               Hash joins whose build side does not fit in the memory limit (https://github.com/apache/datafusion/issues/24768);
+                          20M x 20M rows under a 512M fair pool by default (HJ_SPILL_MODE=spill|sort-merge|hash, HJ_SPILL_ROWS, HJ_SPILL_LIMIT)
+                          (data generated inline by the suite's load SQL)
 null_aware_join:        Null-aware (NOT IN) hash join micro-benchmarks: uncorrelated, non-equality-correlated and equality-correlated
                           NOT IN across NULL fractions, to measure the per-pair join-filter work the correlated cases do
                           (data generated inline by the suite's load SQL from range(); knobs: NAJ_ROWS, NAJ_LARGE_ROWS)
@@ -276,6 +279,10 @@ main() {
                 null_aware_join)
                     # Data is generated inline by the suite's load SQL from range().
                     echo "null_aware_join: no external data to generate"
+                    ;;
+                hj_spill)
+                    # Data is generated inline by the suite's load SQL (COPY).
+                    echo "hj_spill: no external data to generate"
                     ;;
                 projection_subquery)
                     # Data is generated inline by the suite's load SQL.
@@ -536,6 +543,9 @@ main() {
                     ;;
                 null_aware_join)
                     run_null_aware_join
+                    ;;
+                hj_spill)
+                    run_hj_spill
                     ;;
                 projection_subquery)
                     run_projection_subquery
@@ -995,6 +1005,27 @@ run_null_aware_join() {
       BENCH_RESULTS_FILE="$(sql_results_file null_aware_join)" \
       NAJ_ROWS="${NAJ_ROWS:-10000}" \
       NAJ_LARGE_ROWS="${NAJ_LARGE_ROWS:-1000000}" \
+      ${QUERY:+BENCH_QUERY="${QUERY}"}  \
+      bash -c "$SQL_CARGO_COMMAND"
+}
+
+# Runs the hj_spill suite: hash joins whose build side does not fit in the
+# memory limit (https://github.com/apache/datafusion/issues/24768). The load SQL
+# COPYs the 20M-row Parquet file inline, so there is no data step.
+#   HJ_SPILL_MODE   spill (default), sort-merge or hash
+#   HJ_SPILL_ROWS   rows per table (default 20000000)
+#   HJ_SPILL_LIMIT  memory limit (default 512M), passed as MEMORY_LIMIT
+# The pool is fair unless MEM_POOL_TYPE says otherwise: a greedy pool runs the
+# sort-merge baseline out of memory, and so does the fair pool on Q02 about half
+# the time at the issue's 300M.
+run_hj_spill() {
+    echo "Running hj_spill benchmark (mode=${HJ_SPILL_MODE:-spill}, rows=${HJ_SPILL_ROWS:-20000000}, limit=${HJ_SPILL_LIMIT:-512M}, pool=${MEM_POOL_TYPE:-fair})..."
+    debug_run env BENCH_NAME=hj_spill \
+      BENCH_RESULTS_FILE="$(sql_results_file hj_spill)" \
+      HJ_SPILL_MODE="${HJ_SPILL_MODE:-spill}" \
+      HJ_SPILL_ROWS="${HJ_SPILL_ROWS:-20000000}" \
+      MEMORY_LIMIT="${HJ_SPILL_LIMIT:-512M}" \
+      MEM_POOL_TYPE="${MEM_POOL_TYPE:-fair}" \
       ${QUERY:+BENCH_QUERY="${QUERY}"}  \
       bash -c "$SQL_CARGO_COMMAND"
 }
