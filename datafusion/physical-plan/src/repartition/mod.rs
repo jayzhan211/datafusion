@@ -2006,10 +2006,11 @@ impl ExecutionPlan for RepartitionExec {
             others => others.clone(),
         };
 
-        Ok(Some(Arc::new(RepartitionExec::try_new(
-            new_projection,
-            new_partitioning,
-        )?)))
+        let mut repartition = RepartitionExec::try_new(new_projection, new_partitioning)?;
+        if self.preserve_order {
+            repartition = repartition.with_preserve_order();
+        }
+        Ok(Some(Arc::new(repartition)))
     }
 
     fn gather_filters_for_pushdown(

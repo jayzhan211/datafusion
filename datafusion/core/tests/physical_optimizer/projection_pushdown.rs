@@ -30,7 +30,7 @@ use datafusion_physical_expr::expressions::{
 use datafusion_physical_expr::{Distribution, Partitioning, ScalarFunctionExpr};
 use datafusion_physical_expr_common::physical_expr::PhysicalExpr;
 use datafusion_physical_expr_common::sort_expr::{
-    OrderingRequirements, PhysicalSortExpr, PhysicalSortRequirement,
+    LexOrdering, OrderingRequirements, PhysicalSortExpr, PhysicalSortRequirement,
 };
 use datafusion_physical_optimizer::PhysicalOptimizerRule;
 use datafusion_physical_optimizer::output_requirements::OutputRequirementExec;
@@ -2033,5 +2033,138 @@ async fn split_declines_hash_repartition() -> Result<()> {
         DataSourceExec: file_groups={1 group: [[x]]}, projection=[id, s], file_type=parquet
     "
     );
+    Ok(())
+}
+
+/// The outer projection's columns index the filter's output. When the filter has an
+/// embedded projection that reorders or skips input columns, the swap maps them to
+/// the filter's input instead of reading the input columns at the same positions.
+#[test]
+fn test_filter_with_skipping_embedded_projection_after_projection() -> Result<()> {
+    // DataSourceExec: [a, b, c, d, e]
+    let csv = create_simple_csv_exec();
+
+    // FilterExec: a > 0, projection=[0, 2, 3] → output: [a, c, d]
+    let predicate = Arc::new(BinaryExpr::new(
+        Arc::new(Column::new("a", 0)),
+        Operator::Gt,
+        Arc::new(Literal::new(ScalarValue::Int32(Some(0)))),
+    ));
+    let filter: Arc<dyn ExecutionPlan> = Arc::new(
+        FilterExecBuilder::new(predicate, csv)
+            .apply_projection(Some(vec![0, 2, 3]))?
+            .build()?,
+    );
+
+    // ProjectionExec: [a, d] of the filter's output [a, c, d]
+    let projection: Arc<dyn ExecutionPlan> = Arc::new(ProjectionExec::try_new(
+        vec![
+            ProjectionExpr::new(Arc::new(Column::new("a", 0)), "a"),
+            ProjectionExpr::new(Arc::new(Column::new("d", 2)), "d"),
+        ],
+        filter,
+    )?);
+
+    let after_optimize =
+        ProjectionPushdown::new().optimize(projection, &ConfigOptions::new())?;
+    let after_optimize_string = displayable(after_optimize.as_ref())
+        .indent(true)
+        .to_string();
+    let actual = after_optimize_string.trim();
+    assert_snapshot!(
+        actual,
+        @r"
+    FilterExec: a@0 > 0
+      DataSourceExec: file_groups={1 group: [[x]]}, projection=[a, d], file_type=csv, has_header=false
+    "
+    );
+
+    Ok(())
+}
+
+/// A node that passes rows through hands its parent projection to its input. When
+/// that input is a projection, the two collapse below the node, once.
+#[test]
+fn test_projection_over_cooperative_over_projection() -> Result<()> {
+    let csv = create_simple_csv_exec();
+    let inner: Arc<dyn ExecutionPlan> = Arc::new(ProjectionExec::try_new(
+        vec![
+            ProjectionExpr::new(Arc::new(Column::new("a", 0)), "a"),
+            ProjectionExpr::new(Arc::new(Column::new("b", 1)), "b"),
+            ProjectionExpr::new(Arc::new(Column::new("c", 2)), "c"),
+        ],
+        csv,
+    )?);
+    let cooperative: Arc<dyn ExecutionPlan> = Arc::new(CooperativeExec::new(inner));
+    let outer: Arc<dyn ExecutionPlan> = Arc::new(ProjectionExec::try_new(
+        vec![ProjectionExpr::new(Arc::new(Column::new("b", 1)), "b")],
+        cooperative,
+    )?);
+
+    let after_optimize =
+        ProjectionPushdown::new().optimize(outer, &ConfigOptions::new())?;
+    let after_optimize_string = displayable(after_optimize.as_ref())
+        .indent(true)
+        .to_string();
+    let actual = after_optimize_string.trim();
+    assert_snapshot!(
+        actual,
+        @r"
+    CooperativeExec
+      DataSourceExec: file_groups={1 group: [[x]]}, projection=[b], file_type=csv, has_header=false
+    "
+    );
+
+    Ok(())
+}
+
+/// Moving a projection below an order-preserving repartition keeps it
+/// order-preserving: the merge above relies on each output partition being sorted.
+#[test]
+fn test_projection_below_order_preserving_repartition() -> Result<()> {
+    let schema = crate::physical_optimizer::test_utils::schema();
+    let a = crate::physical_optimizer::test_utils::sort_expr("a", &schema);
+    let ordering = LexOrdering::new(vec![a.clone()]).unwrap();
+    let source: Arc<dyn ExecutionPlan> = Arc::new(
+        crate::physical_optimizer::test_utils::TestScan::new(
+            Arc::clone(&schema),
+            vec![ordering.clone()],
+        )
+        .with_partition_count(2),
+    );
+    let repartition: Arc<dyn ExecutionPlan> = Arc::new(
+        RepartitionExec::try_new(source, Partitioning::RoundRobinBatch(4))?
+            .with_preserve_order(),
+    );
+    let projection: Arc<dyn ExecutionPlan> = Arc::new(ProjectionExec::try_new(
+        vec![
+            ProjectionExpr::new(Arc::new(Column::new("a", 0)), "a"),
+            ProjectionExpr::new(Arc::new(Column::new("b", 1)), "b"),
+        ],
+        repartition,
+    )?);
+    let merge_ordering = LexOrdering::new(vec![PhysicalSortExpr::new_default(Arc::new(
+        Column::new("a", 0),
+    ))])
+    .unwrap();
+    let plan: Arc<dyn ExecutionPlan> =
+        Arc::new(SortPreservingMergeExec::new(merge_ordering, projection));
+
+    let after_optimize =
+        ProjectionPushdown::new().optimize(plan, &ConfigOptions::new())?;
+    let after_optimize_string = displayable(after_optimize.as_ref())
+        .indent(true)
+        .to_string();
+    let actual = after_optimize_string.trim();
+    assert_snapshot!(
+        actual,
+        @r"
+    SortPreservingMergeExec: [a@0 ASC]
+      RepartitionExec: partitioning=RoundRobinBatch(4), input_partitions=2, preserve_order=true, sort_exprs=a@0 ASC
+        ProjectionExec: expr=[a@0 as a, b@1 as b]
+          TestScan: output_ordering=[a@0 ASC]
+    "
+    );
+
     Ok(())
 }

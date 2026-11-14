@@ -506,10 +506,14 @@ impl ExecutionPlan for ProjectionExec {
         &self,
         projection: &ProjectionExec,
     ) -> Result<Option<Arc<dyn ExecutionPlan>>> {
-        match try_collapse_projection_chain(projection)? {
-            Some(plan) => Ok(Some(plan)),
-            None => Ok(Some(Arc::new(projection.clone()))),
-        }
+        // A node that passes its input's rows through (such as `BufferExec`) hands
+        // its parent projection to this node, so `projection` may not be directly
+        // above `self`. Collapse it with `self`, not with its own input.
+        let over_self = make_with_child(projection, &(Arc::new(self.clone()) as _))?;
+        let Some(over_self) = over_self.downcast_ref::<ProjectionExec>() else {
+            return internal_err!("make_with_child returned a non-projection");
+        };
+        try_collapse_projection_chain(over_self)
     }
 
     fn gather_filters_for_pushdown(

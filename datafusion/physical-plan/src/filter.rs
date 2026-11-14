@@ -25,8 +25,7 @@ use crate::filter_pushdown::{
 use crate::limit::LocalLimitExec;
 use crate::metrics::{MetricBuilder, MetricType};
 use crate::projection::{
-    EmbeddedProjection, ProjectionExec, ProjectionExpr, make_with_child,
-    try_embed_projection, update_expr,
+    EmbeddedProjection, ProjectionExec, ProjectionExpr, try_embed_projection, update_expr,
 };
 use crate::statistics::{ChildStats, StatisticsArgs, StatisticsContext};
 use crate::stream::EmptyRecordBatchStream;
@@ -794,14 +793,47 @@ impl ExecutionPlan for FilterExec {
         &self,
         projection: &ProjectionExec,
     ) -> Result<Option<Arc<dyn ExecutionPlan>>> {
+        // The projection's columns index this filter's output. With an embedded
+        // projection that output is not the input, so map them to the input first.
+        let below_filter = match self.projection() {
+            None => projection.expr().to_vec(),
+            Some(embedded) => {
+                let input_schema = self.input.schema();
+                let embedded = embedded
+                    .iter()
+                    .map(|&index| {
+                        let name = input_schema.field(index).name();
+                        ProjectionExpr::new(Arc::new(Column::new(name, index)), name)
+                    })
+                    .collect::<Vec<_>>();
+                projection
+                    .expr()
+                    .iter()
+                    .map(|proj_expr| {
+                        let expr = update_expr(&proj_expr.expr, &embedded, true)?
+                            .ok_or_else(|| {
+                                internal_datafusion_err!(
+                                    "a column of the filter's output is not in its input"
+                                )
+                            })?;
+                        Ok(ProjectionExpr::new(expr, proj_expr.alias.clone()))
+                    })
+                    .collect::<Result<Vec<_>>>()?
+            }
+        };
         // If the projection does not narrow the schema, we should not try to push it down:
-        if projection.expr().len() < projection.input().schema().fields().len() {
+        if below_filter.len() < self.input.schema().fields().len() {
             // Each column in the predicate expression must exist after the projection.
             if let Some(new_predicate) =
-                update_expr(self.predicate(), projection.expr(), false)?
+                update_expr(self.predicate(), &below_filter, false)?
             {
+                let new_input = ProjectionExec::try_new_with_schema_metadata(
+                    below_filter,
+                    Arc::clone(&self.input),
+                    projection.schema().as_ref(),
+                )?;
                 return FilterExecBuilder::from(self)
-                    .with_input(make_with_child(projection, self.input())?)
+                    .with_input(Arc::new(new_input))
                     .with_predicate(new_predicate)
                     // The original FilterExec projection referenced columns from its old
                     // input. After the swap the new input is the ProjectionExec which
