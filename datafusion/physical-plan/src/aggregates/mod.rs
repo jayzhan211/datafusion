@@ -1007,7 +1007,11 @@ impl AggregateExec {
         new_requirements.extend(req);
 
         let required_input_ordering =
-            LexRequirement::new(new_requirements).map(OrderingRequirements::new_soft);
+            pre_ordered_requirement(&aggr_expr, &group_by, &mode, input_eq_properties)
+                .or_else(|| {
+                    LexRequirement::new(new_requirements)
+                        .map(OrderingRequirements::new_soft)
+                });
 
         // Constant expressions never change, so they cannot mark a completed group.
         // If our aggregation has grouping sets then our base grouping exprs will
@@ -2939,6 +2943,49 @@ fn get_aggregate_expr_req(
         });
     }
     LexOrdering::new(sort_exprs)
+}
+
+/// The input order a flagged expression relies on (see
+/// [`AggregateFunctionExpr::is_input_pre_ordered`]): the group-by keys the input
+/// is sorted by, followed by the expression's ORDER BY. That keeps each group's
+/// rows in ORDER BY order. This is a hard requirement, because the expression
+/// gives wrong results without it.
+///
+/// `None` if no expression is flagged, or if an expression has a hard order
+/// requirement of its own (the requirement built for it is kept). An unflagged
+/// expression with a soft requirement sorts its own rows, so it needs nothing here.
+pub(crate) fn pre_ordered_requirement(
+    aggr_expr: &[Arc<AggregateFunctionExpr>],
+    group_by: &PhysicalGroupBy,
+    mode: &AggregateMode,
+    input_eq_properties: &EquivalenceProperties,
+) -> Option<OrderingRequirements> {
+    if mode.input_mode() == AggregateInputMode::Partial
+        || aggr_expr
+            .iter()
+            .any(|expr| expr.order_sensitivity().hard_requires())
+    {
+        return None;
+    }
+    let order_bys = aggr_expr
+        .iter()
+        .filter(|expr| expr.is_input_pre_ordered())
+        .map(|expr| expr.order_bys())
+        .max_by_key(|order_bys| order_bys.len())?;
+    let groupby_exprs = group_by.input_exprs();
+    let prefix = if group_by.is_single() {
+        input_eq_properties
+            .find_longest_permutation(&groupby_exprs)
+            .map(|(_, indices)| indices)
+            .unwrap_or_default()
+    } else {
+        vec![]
+    };
+    let requirement = prefix
+        .iter()
+        .map(|&idx| PhysicalSortRequirement::new(Arc::clone(&groupby_exprs[idx]), None))
+        .chain(order_bys.iter().map(|sort_expr| sort_expr.clone().into()));
+    LexRequirement::new(requirement).map(OrderingRequirements::new)
 }
 
 /// Concatenates the given slices.

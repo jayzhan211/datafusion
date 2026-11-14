@@ -146,7 +146,6 @@ use crate::optimizer::{
     ConfigOnlyContext, PhysicalOptimizerContext, with_statistics_context,
 };
 use crate::output_requirements::{OutputRequirementExec, OutputRequirements};
-use crate::update_aggr_exprs::clear_unmet_aggregate_orders;
 
 use datafusion_common::Result;
 use datafusion_common::config::ConfigOptions;
@@ -342,10 +341,6 @@ impl PhysicalOptimizerRule for EnsureRequirements {
             .plan
             .transform_up(|p| Ok(Transformed::yes(replace_with_partial_sort(p)?)))
             .data()?;
-
-        // This rule can lose an order an aggregate was told about, if it adds partitions
-        // below it.
-        let plan = clear_unmet_aggregate_orders(plan)?;
 
         if has_marker {
             Ok(plan)

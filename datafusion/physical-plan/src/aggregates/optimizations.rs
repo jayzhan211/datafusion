@@ -367,6 +367,17 @@ impl AggregateExec {
                 };
             }
         }
+        // A flagged expression relies on its input order: declare it.
+        if let AggregateKind::General { aggr_expr, .. } = &new.kind
+            && let Some(requirement) = super::pre_ordered_requirement(
+                aggr_expr,
+                new.group_expr(),
+                new.mode(),
+                new.input().equivalence_properties(),
+            )
+        {
+            new.required_input_ordering = Some(requirement);
+        }
         new.metrics = ExecutionPlanMetricsSet::new();
         new
     }

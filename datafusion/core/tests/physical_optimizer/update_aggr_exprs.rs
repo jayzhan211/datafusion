@@ -129,3 +129,59 @@ fn grouping_sets_do_not_get_the_group_by_prefix() -> Result<()> {
     );
     Ok(())
 }
+
+/// `ARRAY_AGG(d ORDER BY c)` marked pre-ordered appends its rows as one sorted run,
+/// so it relies on the input order as much as `FIRST_VALUE` does: the aggregate
+/// declares that order as a hard requirement.
+#[test]
+fn pre_ordered_array_agg_declares_its_order() -> Result<()> {
+    let schema = abc_schema();
+    let group_by = PhysicalGroupBy::new_single(vec![
+        (col("a", &schema)?, "a".to_string()),
+        (col("b", &schema)?, "b".to_string()),
+    ]);
+    let order = PhysicalSortExpr::new_default(col("c", &schema)?);
+    let array_agg = AggregateExprBuilder::new(
+        datafusion_functions_aggregate::array_agg::array_agg_udaf(),
+        vec![col("d", &schema)?],
+    )
+    .schema(Arc::clone(&schema))
+    .alias("array_agg(d)")
+    .order_by(vec![order])
+    .build()
+    .map(Arc::new)?;
+    let agg = AggregateExec::try_new(
+        AggregateMode::Single,
+        group_by,
+        vec![array_agg],
+        vec![None],
+        ordered_input(&schema)?,
+        Arc::clone(&schema),
+    )?;
+    let optimized = OptimizeAggregateOrder::new()
+        .optimize(Arc::new(agg), &ConfigOptions::default())?;
+    let flag = format!(
+        "{:?}",
+        optimized
+            .downcast_ref::<AggregateExec>()
+            .expect("optimizer keeps the AggregateExec at the root")
+            .aggr_expr()[0]
+            .fun()
+            .inner()
+    );
+    assert!(
+        flag.contains("is_input_pre_ordered: true"),
+        "expected the rule to mark array_agg pre-ordered, got: {flag}"
+    );
+    let requirement = optimized.required_input_ordering().swap_remove(0);
+    assert!(
+        matches!(
+            requirement,
+            Some(
+                datafusion_physical_expr_common::sort_expr::OrderingRequirements::Hard(_)
+            )
+        ),
+        "expected a hard requirement, got: {requirement:?}"
+    );
+    Ok(())
+}

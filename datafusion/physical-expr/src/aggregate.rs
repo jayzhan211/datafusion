@@ -126,6 +126,8 @@ pub struct AggregateExprBuilder {
     is_distinct: bool,
     /// Whether the expression is reversed
     is_reversed: bool,
+    /// Whether the expression was told its input is ordered by its ORDER BY
+    input_pre_ordered: bool,
 }
 
 impl AggregateExprBuilder {
@@ -142,6 +144,7 @@ impl AggregateExprBuilder {
             ignore_nulls: false,
             is_distinct: false,
             is_reversed: false,
+            input_pre_ordered: false,
         }
     }
 
@@ -248,6 +251,7 @@ impl AggregateExprBuilder {
             ignore_nulls,
             is_distinct,
             is_reversed,
+            input_pre_ordered,
         } = self;
         assert_or_internal_err!(!args.is_empty(), "args should not be empty");
 
@@ -316,6 +320,7 @@ impl AggregateExprBuilder {
             is_distinct,
             input_fields: input_exprs_fields,
             is_reversed,
+            input_pre_ordered,
         })
     }
 
@@ -367,6 +372,12 @@ impl AggregateExprBuilder {
 
     pub fn with_reversed(mut self, is_reversed: bool) -> Self {
         self.is_reversed = is_reversed;
+        self
+    }
+
+    /// Records that the expression was told its input is ordered by its ORDER BY.
+    pub fn with_input_pre_ordered(mut self, input_pre_ordered: bool) -> Self {
+        self.input_pre_ordered = input_pre_ordered;
         self
     }
 
@@ -665,6 +676,9 @@ pub struct AggregateFunctionExpr {
     is_distinct: bool,
     is_reversed: bool,
     input_fields: Vec<FieldRef>,
+    /// The input is ordered by `order_bys` within each group, and the function
+    /// relies on that. Set through [`Self::with_beneficial_ordering`].
+    input_pre_ordered: bool,
 }
 
 impl AggregateFunctionExpr {
@@ -827,7 +841,8 @@ impl AggregateFunctionExpr {
                 .output_metadata(self.return_field_metadata())
                 .with_ignore_nulls(self.ignore_nulls)
                 .with_distinct(self.is_distinct)
-                .with_reversed(self.is_reversed);
+                .with_reversed(self.is_reversed)
+                .with_input_pre_ordered(beneficial_ordering);
         if let Some(human_display) = self.human_display() {
             builder = builder.human_display(human_display);
         }
@@ -835,6 +850,12 @@ impl AggregateFunctionExpr {
             builder = builder.human_display_alias(alias);
         }
         builder.build().map(Some)
+    }
+
+    /// Whether the function relies on its input being ordered by its ORDER BY
+    /// within each group. The aggregate declares that order as a requirement.
+    pub fn is_input_pre_ordered(&self) -> bool {
+        self.input_pre_ordered
     }
 
     /// Creates accumulator implementation that supports retract
@@ -1088,6 +1109,7 @@ impl AggregateFunctionExpr {
             is_distinct: self.is_distinct,
             is_reversed: false,
             input_fields: self.input_fields.clone(),
+            input_pre_ordered: self.input_pre_ordered,
         })
     }
 

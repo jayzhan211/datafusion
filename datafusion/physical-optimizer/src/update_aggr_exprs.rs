@@ -64,7 +64,7 @@ impl PhysicalOptimizerRule for OptimizeAggregateOrder {
         plan: Arc<dyn ExecutionPlan>,
         _config: &ConfigOptions,
     ) -> Result<Arc<dyn ExecutionPlan>> {
-        update_aggregate_orders(plan, true)
+        update_aggregate_orders(plan)
     }
 
     fn name(&self) -> &str {
@@ -77,11 +77,10 @@ impl PhysicalOptimizerRule for OptimizeAggregateOrder {
 }
 
 /// Tells aggregates whether their input provides the order they would benefit from.
-/// With `set_flags` false, this only takes that back from aggregates whose input no
-/// longer provides it.
+/// An aggregate told so declares that order as a requirement, so a later rule that
+/// loses it breaks a requirement every check can see.
 fn update_aggregate_orders(
     plan: Arc<dyn ExecutionPlan>,
-    set_flags: bool,
 ) -> Result<Arc<dyn ExecutionPlan>> {
     plan.transform_up(|plan| {
         if let Some(aggr_exec) = plan.downcast_ref::<AggregateExec>() {
@@ -134,7 +133,6 @@ fn update_aggregate_orders(
                 aggr_exprs,
                 &requirement,
                 input.equivalence_properties(),
-                set_flags,
             )?;
 
             let aggr_exec = aggr_exec.with_new_aggr_exprs(aggr_exprs);
@@ -145,14 +143,6 @@ fn update_aggregate_orders(
         }
     })
     .data()
-}
-
-/// Takes back what [`OptimizeAggregateOrder`] told an aggregate about its input, if a
-/// rule that ran after it lost that order. The aggregate then handles unordered input.
-pub(crate) fn clear_unmet_aggregate_orders(
-    plan: Arc<dyn ExecutionPlan>,
-) -> Result<Arc<dyn ExecutionPlan>> {
-    update_aggregate_orders(plan, false)
 }
 
 /// Tries to convert each aggregate expression to a potentially more efficient
@@ -176,7 +166,6 @@ fn try_convert_aggregate_if_better(
     aggr_exprs: Vec<Arc<AggregateFunctionExpr>>,
     prefix_requirement: &[PhysicalSortRequirement],
     eq_properties: &EquivalenceProperties,
-    set_flags: bool,
 ) -> Result<Vec<Arc<AggregateFunctionExpr>>> {
     aggr_exprs
         .into_iter()
@@ -189,20 +178,18 @@ fn try_convert_aggregate_if_better(
             if !aggr_expr.order_sensitivity().is_beneficial() {
                 Ok(aggr_expr)
             } else if !order_bys.is_empty() {
-                let satisfied = eq_properties.ordering_satisfy_requirement(concat_slices(
-                    prefix_requirement,
-                    &order_bys
-                        .iter()
-                        .map(|e| e.clone().into())
-                        .collect::<Vec<_>>(),
-                ))?;
-                if satisfied && !set_flags {
-                    return Ok(aggr_expr);
-                }
+                let satisfied =
+                    eq_properties.ordering_satisfy_requirement(concat_slices(
+                        prefix_requirement,
+                        &order_bys
+                            .iter()
+                            .map(|e| e.clone().into())
+                            .collect::<Vec<_>>(),
+                    ))?;
                 if satisfied {
                     // Existing ordering satisfies the aggregator requirements:
                     aggr_expr.with_beneficial_ordering(true)?.map(Arc::new)
-                } else if set_flags && eq_properties.ordering_satisfy_requirement(concat_slices(
+                } else if eq_properties.ordering_satisfy_requirement(concat_slices(
                     prefix_requirement,
                     &order_bys
                         .iter()
