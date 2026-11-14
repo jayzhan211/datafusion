@@ -51,7 +51,9 @@ use datafusion_common::hash_utils::{RandomState, create_hashes};
 use datafusion_common::utils::memory::{
     RecordBatchMemoryCounter, get_record_batch_memory_size,
 };
-use datafusion_common::{JoinSide, JoinType, NullEquality, Result, internal_err};
+use datafusion_common::{
+    JoinSide, JoinType, NullEquality, Result, internal_datafusion_err, internal_err,
+};
 use datafusion_execution::SpillFile;
 use datafusion_execution::memory_pool::{
     MemoryConsumer, MemoryPool, MemoryReservation, MergeMemoryPool,
@@ -61,6 +63,7 @@ use datafusion_physical_expr_common::utils::evaluate_expressions_to_arrays;
 use futures::future::BoxFuture;
 use futures::{FutureExt, Stream, StreamExt, TryStreamExt, ready, stream};
 use parking_lot::Mutex;
+use tokio::sync::{Notify, Semaphore};
 
 use super::exec::{
     BuildOutcome, BuildOverflow, BuildParams, CollectLeftAccumulator, JoinLeftData,
@@ -278,10 +281,12 @@ pub(super) fn spillable_stream(
                 // The other partitions need not wait while this one reads and
                 // spills the rest of its build side
                 let report = report.spilling();
-                let left = split_build(&ctx, overflow, 1).await?;
+                let streams = ProbeStreams::new(1);
+                let turn = ProbeTurn::new(&streams);
+                let left = split_build(&ctx, overflow, streams).await?;
                 report.spilled(&left)?;
                 let fetch = ctx.fetch;
-                limit(probe_spilled(ctx, Arc::new(left), right)?, fetch)
+                limit(probe_spilled(ctx, Arc::new(left), right, turn)?, fetch)
             }
         };
         Ok::<_, datafusion_common::DataFusionError>(stream)
@@ -347,12 +352,12 @@ impl Drop for PendingReport {
 pub(super) async fn collect_left_build(
     ctx: SpillContext,
     build: BoxFuture<'static, Result<BuildOutcome>>,
-    probe_streams: usize,
+    streams: Arc<ProbeStreams>,
 ) -> Result<JoinLeftData> {
     match build.await? {
         BuildOutcome::InMemory(left_data) => Ok(left_data),
         BuildOutcome::Overflow(overflow) => {
-            split_build(&Arc::new(ctx), overflow, probe_streams).await
+            split_build(&Arc::new(ctx), overflow, streams).await
         }
     }
 }
@@ -363,6 +368,7 @@ pub(super) fn collect_left_stream(
     mut build: OnceFut<JoinLeftData>,
     right: SendableRecordBatchStream,
     accumulator: Option<Arc<SharedBuildAccumulator>>,
+    turn: ProbeTurn,
 ) -> SendableRecordBatchStream {
     let schema = Arc::clone(&ctx.stream.schema);
     let ctx = Arc::new(ctx);
@@ -378,8 +384,9 @@ pub(super) fn collect_left_stream(
                     )
                     .await?;
             }
-            limit(probe_spilled(ctx, left, right)?, fetch)
+            limit(probe_spilled(ctx, left, right, turn)?, fetch)
         } else {
+            turn.finish();
             Box::pin(ctx.stream.stream(
                 OnceFut::ready(left),
                 right,
@@ -394,14 +401,93 @@ pub(super) fn collect_left_stream(
     Box::pin(RecordBatchStreamAdapter::new(schema, output))
 }
 
+/// The probe streams of one execution of a join that can spill, shared from
+/// its first `execute` call, before any build side exists. Each stream counts
+/// itself out once, see [`ProbeTurn`].
+pub(super) struct ProbeStreams {
+    /// How many there are
+    count: usize,
+    /// Streams not counted out yet
+    remaining: AtomicUsize,
+    /// Wakes the streams waiting for the last one to be counted out
+    all_out: Notify,
+    /// Whether a stream was dropped before routing all its probe rows
+    abandoned: AtomicBool,
+    /// Lets one spilled pair at a time join: the kept memory holds one
+    pairs: Arc<Semaphore>,
+}
+
+impl ProbeStreams {
+    pub(super) fn new(count: usize) -> Arc<Self> {
+        Arc::new(Self {
+            count,
+            remaining: AtomicUsize::new(count),
+            all_out: Notify::new(),
+            abandoned: AtomicBool::new(false),
+            pairs: Arc::new(Semaphore::new(1)),
+        })
+    }
+
+    /// Returns whether this was the last stream
+    fn count_out(&self) -> bool {
+        let last = self.remaining.fetch_sub(1, Ordering::AcqRel) == 1;
+        if last {
+            self.all_out.notify_waiters();
+        }
+        last
+    }
+
+    /// Waits until every stream is counted out
+    async fn wait_all_out(&self) {
+        loop {
+            let notified = self.all_out.notified();
+            let mut notified = std::pin::pin!(notified);
+            // Registered before the check, so a wake between the two is kept
+            notified.as_mut().enable();
+            if self.remaining.load(Ordering::Acquire) == 0 {
+                return;
+            }
+            notified.await;
+        }
+    }
+}
+
+/// One probe stream's place among its [`ProbeStreams`], held from `execute`
+/// on: counted out when the stream has routed all its probe rows, or when it
+/// is dropped first (canceled, or stopped by a limit), so that no other
+/// stream waits for it forever
+pub(super) struct ProbeTurn(Option<Arc<ProbeStreams>>);
+
+impl ProbeTurn {
+    pub(super) fn new(streams: &Arc<ProbeStreams>) -> Self {
+        Self(Some(Arc::clone(streams)))
+    }
+
+    /// The stream has routed all its probe rows, or needs none: returns
+    /// whether it was the last one
+    fn finish(mut self) -> bool {
+        self.0.take().is_some_and(|streams| streams.count_out())
+    }
+}
+
+impl Drop for ProbeTurn {
+    fn drop(&mut self) {
+        if let Some(streams) = self.0.take() {
+            streams.abandoned.store(true, Ordering::Release);
+            streams.count_out();
+        }
+    }
+}
+
 /// The spilled part of a build side, shared by the probe streams that join
 /// its kept part: each routes its probe rows of spilled buckets to its own
-/// files and joins them with every spilled build side, so that each output
+/// files. Once every stream has, the kept buckets' table is gone and the
+/// memory it held joins the spilled pairs, one pair at a time. Each stream
+/// joins its own probe rows with every spilled build side, so that each output
 /// row stays in its probe row's partition. A join that emits build rows at
 /// the end needs all probe rows instead: the last stream to finish routing
 /// joins every spilled bucket with all of them (as the last stream of a
-/// `CollectLeft` join emits its unmatched build rows). No stream waits for
-/// another.
+/// `CollectLeft` join emits its unmatched build rows), and no stream waits.
 pub(super) struct SpilledBuild {
     /// The kept buckets' table and the kept memory: each probe stream takes
     /// them when it starts, and the last one to finish routing empties these
@@ -418,8 +504,8 @@ pub(super) struct SpilledBuild {
     /// For a join that emits build rows at the end, the probe rows of each
     /// spilled bucket from every probe stream
     probe: Mutex<Vec<SpilledSide>>,
-    /// Probe streams still routing
-    routing: AtomicUsize,
+    /// The probe streams, counted out as they finish routing
+    streams: Arc<ProbeStreams>,
     /// An uncorrelated `probe.key NOT IN (build.key)` whose build side has a
     /// NULL key: no probe row's `NOT IN` is TRUE, so nothing is emitted
     no_rows: bool,
@@ -529,12 +615,13 @@ impl SpilledKeys {
 }
 
 /// Splits an overflowed build side into buckets, spills the largest until the
-/// rest fits, and builds the kept buckets' table for `probe_streams` streams
+/// rest fits, and builds the kept buckets' table for `streams`
 async fn split_build(
     ctx: &Arc<SpillContext>,
     overflow: BuildOverflow,
-    probe_streams: usize,
+    streams: Arc<ProbeStreams>,
 ) -> Result<JoinLeftData> {
+    let probe_streams = streams.count;
     let BuildOverflow {
         batches,
         mut rest,
@@ -657,7 +744,7 @@ async fn split_build(
         buckets,
         build: Mutex::new(spilled),
         probe: Mutex::new((0..BUCKETS).map(|_| SpilledSide::default()).collect()),
-        routing: AtomicUsize::new(probe_streams),
+        streams,
         no_rows: build_has_null,
         drop_null_probe_keys: build_has_row,
         probe_facts: ctx.build_rows_not_in().then(Default::default),
@@ -666,19 +753,20 @@ async fn split_build(
 }
 
 /// One probe stream of a spilled build side: joins the kept buckets, routes
-/// the probe rows of spilled buckets to files, then joins them with the
-/// spilled build sides, or, for a join that emits build rows at the end,
-/// leaves them to the last stream to finish routing
+/// the probe rows of spilled buckets to files, then, once every stream has,
+/// joins them with the spilled build sides; for a join that emits build rows
+/// at the end, it leaves them to the last stream to finish routing
 fn probe_spilled(
     ctx: Arc<SpillContext>,
     handle: Arc<JoinLeftData>,
     right: SendableRecordBatchStream,
+    turn: ProbeTurn,
 ) -> Result<SendableRecordBatchStream> {
     let spilled = Arc::clone(handle.spilled().expect("a spilled build side"));
     drop(handle);
     if spilled.no_rows {
         drop(right);
-        if spilled.routing.fetch_sub(1, Ordering::AcqRel) == 1 {
+        if turn.finish() {
             spilled.resident.lock().take();
             spilled.kept.lock().take();
             spilled.build.lock().clear();
@@ -749,7 +837,7 @@ fn probe_spilled(
         router.drain().await?;
         let mut routed = std::mem::take(&mut *routed.lock());
         // Taken before this stream counts itself out, so before the last one
-        // empties the shared list
+        // empties the shared lists
         let own: Vec<_> = if all_probe_rows {
             let mut probe = spilled.probe.lock();
             for (bucket, side) in routed.iter_mut().enumerate() {
@@ -769,14 +857,20 @@ fn probe_spilled(
                 })
                 .collect()
         };
-        let last = spilled.routing.fetch_sub(1, Ordering::AcqRel) == 1;
-        let pairs = if last {
-            // Every stream has joined the kept buckets: free their table
+        let last = turn.finish();
+        if !all_probe_rows {
+            // Every stream has joined the kept buckets once all are out
+            spilled.streams.wait_all_out().await;
+        }
+        let pairs = if last || !all_probe_rows {
+            // Free the kept buckets' table and the files no stream needs
             spilled.resident.lock().take();
             spilled.kept.lock().take();
             let build = std::mem::take(&mut *spilled.build.lock());
-            if all_probe_rows {
-                let mut probe = std::mem::take(&mut *spilled.probe.lock());
+            let mut probe = std::mem::take(&mut *spilled.probe.lock());
+            // A stream dropped first left some probe rows unrouted: no build
+            // row can be judged, as main emits no unmatched build rows then
+            if all_probe_rows && !spilled.streams.abandoned.load(Ordering::Acquire) {
                 build
                     .into_iter()
                     .map(|(bucket, build)| (build, std::mem::take(&mut probe[bucket])))
@@ -785,19 +879,29 @@ fn probe_spilled(
                 own
             }
         } else {
-            own
+            vec![]
         };
         let facts = spilled.probe_facts.clone();
+        let one_at_a_time = Arc::clone(&spilled.streams.pairs);
         let joins = stream::iter(pairs)
             .then(move |(build, probe)| {
-                join_pair(
-                    Arc::clone(&ctx),
-                    Arc::clone(&kept),
-                    build,
-                    probe,
-                    0,
-                    facts.clone(),
-                )
+                let (ctx, kept, facts) =
+                    (Arc::clone(&ctx), Arc::clone(&kept), facts.clone());
+                let one_at_a_time = Arc::clone(&one_at_a_time);
+                async move {
+                    let permit = one_at_a_time
+                        .acquire_owned()
+                        .await
+                        .map_err(|e| internal_datafusion_err!("{e}"))?;
+                    let joined = join_pair(ctx, kept, build, probe, 0, facts).await?;
+                    // Held until the pair's rows are all out or dropped
+                    Ok::<_, datafusion_common::DataFusionError>(joined.map(
+                        move |batch| {
+                            let _permit = &permit;
+                            batch
+                        },
+                    ))
+                }
             })
             .try_flatten();
         Ok::<_, datafusion_common::DataFusionError>(joins)
@@ -2844,6 +2948,97 @@ mod tests {
                 );
                 assert_eq!(actual, expected, "{join_type}: {output}");
             }
+        }
+    }
+
+    /// A probe stream dropped before it has routed all its probe rows, as a
+    /// limit drops it, still counts itself out: a stream that joins its own
+    /// spilled probe rows once every stream has routed does not wait forever
+    #[tokio::test]
+    async fn collect_left_stream_dropped_early_does_not_block_the_others() {
+        let join = || -> Arc<dyn ExecutionPlan> {
+            let (left, right) = (
+                keyed(0..2000, "v", 1, false),
+                keyed(1000..4000, "rv", 2, false),
+            );
+            let on = vec![(
+                Arc::new(Column::new_with_schema("k", &left.schema()).unwrap())
+                    as PhysicalExprRef,
+                Arc::new(Column::new_with_schema("k", &right.schema()).unwrap())
+                    as PhysicalExprRef,
+            )];
+            Arc::new(
+                HashJoinExecBuilder::new(left, right, on, JoinType::Inner)
+                    .with_partition_mode(PartitionMode::CollectLeft)
+                    .build()
+                    .unwrap(),
+            )
+        };
+        let task = |spill: bool| {
+            let mut config = SessionConfig::new().with_batch_size(64);
+            config.options_mut().execution.enable_hash_join_spilling = spill;
+            let pool = CappedConsumerPool::new()
+                .with_cap("HashJoinInput", 1)
+                .with_cap("HashJoinSpill", 16 * 1024);
+            let runtime = RuntimeEnvBuilder::new()
+                .with_memory_pool(Arc::new(pool))
+                .build_arc()
+                .unwrap();
+            Arc::new(
+                TaskContext::default()
+                    .with_session_config(config)
+                    .with_runtime(runtime),
+            )
+        };
+        let rows = |batches: &[RecordBatch]| {
+            let text = pretty_format_batches(batches).unwrap().to_string();
+            let mut rows: Vec<String> = text
+                .lines()
+                .filter(|line| line.starts_with('|'))
+                .skip(1)
+                .map(str::to_string)
+                .collect();
+            rows.sort();
+            rows
+        };
+        let expected = rows(
+            &crate::common::collect(join().execute(0, task(false)).unwrap())
+                .await
+                .unwrap(),
+        );
+        for polled in [0, 1, 3] {
+            let (join, ctx) = (join(), task(true));
+            let mut dropped = join.execute(1, Arc::clone(&ctx)).unwrap();
+            let other = join.execute(0, ctx).unwrap();
+            // Alone, it stops once it has routed all its rows: it waits for
+            // the other stream, so it is dropped there at the latest
+            for _ in 0..polled {
+                let next = tokio::time::timeout(
+                    std::time::Duration::from_millis(200),
+                    dropped.next(),
+                );
+                match next.await {
+                    Ok(Some(batch)) => {
+                        batch.unwrap();
+                    }
+                    Ok(None) | Err(_) => break,
+                }
+            }
+            drop(dropped);
+            let batches = tokio::time::timeout(
+                std::time::Duration::from_secs(10),
+                crate::common::collect(other),
+            )
+            .await
+            .unwrap_or_else(|_| {
+                panic!("dropped after {polled} batches: the other stream waits")
+            })
+            .unwrap();
+            assert_eq!(rows(&batches), expected, "dropped after {polled} batches");
+            assert!(
+                join.metrics().and_then(|m| m.spill_count()).unwrap_or(0) > 0,
+                "dropped after {polled} batches: did not spill"
+            );
         }
     }
 

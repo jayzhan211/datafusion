@@ -94,8 +94,8 @@ use parking_lot::Mutex;
 
 use super::partitioned_hash_eval::SeededRandomState;
 use super::spill::{
-    SpillContext, SpilledBuild, SpilledPairMetrics, StreamParams, collect_left_build,
-    collect_left_stream, spillable_stream,
+    ProbeStreams, ProbeTurn, SpillContext, SpilledBuild, SpilledPairMetrics,
+    StreamParams, collect_left_build, collect_left_stream, spillable_stream,
 };
 use crate::metrics::SpillMetrics;
 use crate::spill::spill_manager::SpillManager;
@@ -359,6 +359,7 @@ impl HashJoinExecBuilder {
                 filter: None,
                 join_type,
                 left_fut: Default::default(),
+                probe_streams: Default::default(),
                 prepared_build: None,
                 random_state: HASH_JOIN_SEED,
                 mode: PartitionMode::Auto,
@@ -475,6 +476,7 @@ impl HashJoinExecBuilder {
     /// Reset task-local runtime state while retaining the immutable prepared build.
     pub fn reset_state(mut self) -> Self {
         self.exec.left_fut = Default::default();
+        self.exec.probe_streams = Default::default();
 
         if let Some(dynamic_filter) = &mut self.exec.dynamic_filter {
             dynamic_filter.filter.reset();
@@ -501,6 +503,7 @@ impl HashJoinExecBuilder {
         if let Some(prepared) = &exec.prepared_build {
             prepared.validate(&exec)?;
             exec.left_fut = Default::default();
+            exec.probe_streams = Default::default();
             exec.metrics = ExecutionPlanMetricsSet::new();
             if let Some(filter) = &mut exec.dynamic_filter {
                 filter.build_accumulator = OnceLock::new();
@@ -524,6 +527,7 @@ impl HashJoinExecBuilder {
             filter,
             join_type,
             left_fut,
+            probe_streams,
             prepared_build,
             random_state,
             mode,
@@ -570,6 +574,7 @@ impl HashJoinExecBuilder {
             join_type,
             join_schema,
             left_fut,
+            probe_streams,
             prepared_build,
             random_state,
             mode,
@@ -602,6 +607,7 @@ impl From<&HashJoinExec> for HashJoinExecBuilder {
                 join_type: exec.join_type,
                 join_schema: Arc::clone(&exec.join_schema),
                 left_fut: Arc::clone(&exec.left_fut),
+                probe_streams: Arc::clone(&exec.probe_streams),
                 prepared_build: exec.prepared_build.clone(),
                 random_state: exec.random_state.clone(),
                 mode: exec.mode,
@@ -834,6 +840,10 @@ pub struct HashJoinExec {
     /// Each output stream waits on the `OnceAsync` to signal the completion of
     /// the hash table creation.
     left_fut: Arc<OnceAsync<JoinLeftData>>,
+    /// For a `CollectLeft` join that can spill, its probe streams, shared like
+    /// `left_fut`: a stream counts itself out even when dropped before the
+    /// build side is collected
+    probe_streams: Arc<OnceLock<Arc<ProbeStreams>>>,
     /// Immutable build attached by an embedding executor.
     prepared_build: Option<Arc<PreparedHashJoinBuild>>,
     /// Shared the `SeededRandomState` for the hashing algorithm (seeds preserved for serialization)
@@ -1844,8 +1854,13 @@ impl ExecutionPlan for HashJoinExec {
                 )
             };
             if self.mode == PartitionMode::CollectLeft {
-                // One build side for every probe stream; the last stream to
-                // finish joins whatever spilled
+                // One build side for every probe stream, which join what
+                // spilled once all have routed their probe rows
+                let streams = Arc::clone(
+                    self.probe_streams
+                        .get_or_init(|| ProbeStreams::new(right_partitions)),
+                );
+                let turn = ProbeTurn::new(&streams);
                 let build = self.left_fut.try_once(|| {
                     let left_stream = self.left.execute(0, Arc::clone(&context))?;
                     let reservation = MemoryConsumer::new("HashJoinInput")
@@ -1855,7 +1870,7 @@ impl ExecutionPlan for HashJoinExec {
                     Ok(collect_left_build(
                         spill_context(),
                         Box::pin(build),
-                        right_partitions,
+                        streams,
                     ))
                 })?;
                 let right = self.right.execute(partition, Arc::clone(&context))?;
@@ -1864,6 +1879,7 @@ impl ExecutionPlan for HashJoinExec {
                     build,
                     right,
                     build_accumulator,
+                    turn,
                 ));
             }
             let left_stream = self.left.execute(partition, Arc::clone(&context))?;
@@ -2275,6 +2291,7 @@ impl ExecutionPlan for HashJoinExec {
             join_schema: _,
             // runtime build-side state, not part of the plan
             left_fut: _,
+            probe_streams: _,
             prepared_build,
             // the fixed `HASH_JOIN_SEED` constant, set identically by the
             // builder on decode
