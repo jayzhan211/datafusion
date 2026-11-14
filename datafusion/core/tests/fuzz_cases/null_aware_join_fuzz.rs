@@ -22,7 +22,9 @@ use arrow::datatypes::{DataType, Field, Schema};
 use arrow::util::pretty::pretty_format_batches;
 use datafusion::common::JoinType;
 use datafusion::datasource::MemTable;
+use datafusion::execution::runtime_env::RuntimeEnvBuilder;
 use datafusion::physical_plan::joins::HashJoinExec;
+use datafusion::physical_plan::test::memory_pool::CappedConsumerPool;
 use datafusion::physical_plan::{ExecutionPlan, collect};
 use datafusion::prelude::{SessionConfig, SessionContext};
 use rand::rngs::StdRng;
@@ -120,6 +122,121 @@ impl NullAwarePlans {
                     }
                 }
                 _ => {}
+            }
+        }
+        for child in plan.children() {
+            self.record(child.as_ref());
+        }
+    }
+}
+
+/// The same cases with every null-aware join's build side spilled. The
+/// tables are larger than above so that the spilled pieces do not all fit
+/// back in memory: a row here holds about 1 KB (every column buffer is 64-byte
+/// aligned), and with values in `0..3` many pieces share one key, which
+/// splitting cannot shrink.
+#[tokio::test(flavor = "multi_thread")]
+async fn null_aware_join_spilled_matches_reference() {
+    let mut spills = NotInSpills::default();
+    let cases = cases();
+    for seed in 0..4 {
+        let mut rng = StdRng::seed_from_u64(seed);
+        let outer = random_table(&mut rng, &["id", "k", "a", "b", "c"], &["n", "m"], 200);
+        let inner_rows = if seed % 2 == 0 { 200 } else { 20 };
+        let inner =
+            random_table(&mut rng, &["k", "x", "y", "z"], &["v", "w"], inner_rows);
+        let reference_ctx = SessionContext::new_with_config(
+            SessionConfig::new().with_target_partitions(1),
+        );
+        reference_ctx
+            .register_table("o", Arc::clone(&outer) as _)
+            .unwrap();
+        reference_ctx
+            .register_table("i", Arc::clone(&inner) as _)
+            .unwrap();
+        let mut expected_rows = Vec::with_capacity(cases.len());
+        for (_, reference) in &cases {
+            let (expected, _) = run(&reference_ctx, reference).await;
+            expected_rows.push(expected);
+        }
+        for target_partitions in [1, 4] {
+            for batch_size in [7, 8192] {
+                for spill_budget in [4 * 1024, 16 * 1024] {
+                    let config = SessionConfig::new()
+                        .with_target_partitions(target_partitions)
+                        .with_batch_size(batch_size);
+                    let ctx = spilling_ctx(config, spill_budget);
+                    ctx.register_table("o", Arc::clone(&outer) as _).unwrap();
+                    ctx.register_table("i", Arc::clone(&inner) as _).unwrap();
+                    for ((query, reference), expected) in cases.iter().zip(&expected_rows)
+                    {
+                        let (actual, plan) = run(&ctx, query).await;
+                        spills.record(plan.as_ref());
+                        assert_eq!(
+                            actual, *expected,
+                            "seed={seed} target_partitions={target_partitions} \
+                             batch_size={batch_size} spill_budget={spill_budget}\n\
+                             query: {query}\nreference: {reference}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+    // Every NOT IN form must have joined spilled pieces, or the run proves
+    // nothing about it
+    assert!(spills.build_rows_uncorrelated > 0, "{spills:?}");
+    assert!(spills.probe_rows_uncorrelated > 0, "{spills:?}");
+    assert!(spills.build_rows_correlated > 0, "{spills:?}");
+    assert!(spills.probe_rows_correlated > 0, "{spills:?}");
+}
+
+/// A context in which every hash join build side overflows its reservation,
+/// so the join spills, and joins its spilled pieces within `spill_budget`
+fn spilling_ctx(mut config: SessionConfig, spill_budget: usize) -> SessionContext {
+    let pool = CappedConsumerPool::new()
+        .with_cap("HashJoinInput", 1)
+        .with_cap("HashJoinSpill", spill_budget);
+    let runtime = RuntimeEnvBuilder::new()
+        .with_memory_pool(Arc::new(pool))
+        .build_arc()
+        .unwrap();
+    config.options_mut().execution.enable_hash_join_spilling = true;
+    SessionContext::new_with_config_rt(config, runtime)
+}
+
+/// Null-aware joins that joined spilled pieces, per `NOT IN` form: whether
+/// build or probe rows are judged, and whether only one key decides
+#[derive(Debug, Default)]
+struct NotInSpills {
+    build_rows_uncorrelated: usize,
+    probe_rows_uncorrelated: usize,
+    build_rows_correlated: usize,
+    probe_rows_correlated: usize,
+}
+
+impl NotInSpills {
+    fn record(&mut self, plan: &dyn ExecutionPlan) {
+        if let Some(join) = plan.downcast_ref::<HashJoinExec>()
+            && join.null_aware
+            && let Some(metrics) = join.metrics()
+        {
+            let pieces = ["spilled_pairs_resplit", "spilled_pairs_chunked", "spilled_pairs_reversed"]
+                .iter()
+                .filter_map(|name| metrics.sum_by_name(name))
+                .map(|count| count.as_usize())
+                .sum::<usize>()
+                // a pair joined in memory at the first level counts as a spill file
+                + metrics.spill_count().unwrap_or(0);
+            if pieces > 0 {
+                let uncorrelated = join.on().len() == 1 && join.filter().is_none();
+                let probe_rows = join.join_type() == &JoinType::RightAnti;
+                *match (probe_rows, uncorrelated) {
+                    (false, true) => &mut self.build_rows_uncorrelated,
+                    (true, true) => &mut self.probe_rows_uncorrelated,
+                    (false, false) => &mut self.build_rows_correlated,
+                    (true, false) => &mut self.probe_rows_correlated,
+                } += 1;
             }
         }
         for child in plan.children() {
