@@ -1922,7 +1922,10 @@ impl ExecutionPlan for HashJoinExec {
         if self.contains_projection() {
             return Ok(None);
         }
-        if self.prepared_build.is_some() {
+        // A dynamic filter was built from the probe keys at their current positions
+        // and pushed into the probe side, which a projection pushed into the inputs
+        // would move. Apply the projection to the join's output instead.
+        if self.prepared_build.is_some() || self.dynamic_filter.is_some() {
             return try_embed_projection(projection, self);
         }
 

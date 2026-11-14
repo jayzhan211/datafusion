@@ -5139,3 +5139,92 @@ fn post_phase_is_idempotent_on_hash_join() {
         "second invocation of FilterPushdown::new_post_optimization mutated the plan",
     );
 }
+
+/// A hash join's dynamic filter is built from the probe keys at their positions when
+/// `FilterPushdown(Post)` runs, and pushed into the probe scan. A projection that
+/// moves later must not move the probe keys: the filter would test another column.
+#[tokio::test]
+async fn test_hashjoin_dynamic_filter_keeps_keys_when_projection_moves_later() {
+    let build_schema =
+        Arc::new(Schema::new(vec![Field::new("k", DataType::Utf8, false)]));
+    let build_scan = TestScanBuilder::new(Arc::clone(&build_schema))
+        .with_support(true)
+        .with_batches(vec![record_batch!(("k", Utf8, ["aa", "ab"])).unwrap()])
+        .build();
+    // The probe key is the second column; `p` holds values the filter would keep.
+    let probe_schema = Arc::new(Schema::new(vec![
+        Field::new("p", DataType::Utf8, false),
+        Field::new("k", DataType::Utf8, false),
+    ]));
+    let probe_scan = TestScanBuilder::new(Arc::clone(&probe_schema))
+        .with_support(true)
+        .with_batches(vec![
+            record_batch!(("p", Utf8, ["zz", "aa"]), ("k", Utf8, ["aa", "zz"])).unwrap(),
+        ])
+        .build();
+    let on = vec![(
+        col("k", &build_schema).unwrap(),
+        col("k", &probe_schema).unwrap(),
+    )];
+    let join: Arc<dyn ExecutionPlan> = Arc::new(
+        HashJoinExec::try_new(
+            build_scan,
+            probe_scan,
+            on,
+            None,
+            &JoinType::Inner,
+            None,
+            PartitionMode::CollectLeft,
+            datafusion_common::NullEquality::NullEqualsNothing,
+            false,
+        )
+        .unwrap(),
+    );
+    // Keep both keys and drop `p`: [k(build), p, k(probe)] -> [k, k].
+    let plan: Arc<dyn ExecutionPlan> = Arc::new(
+        ProjectionExec::try_new(
+            vec![
+                datafusion_physical_plan::projection::ProjectionExpr::new(
+                    Arc::new(Column::new("k", 0)),
+                    "build_k",
+                ),
+                datafusion_physical_plan::projection::ProjectionExpr::new(
+                    Arc::new(Column::new("k", 2)),
+                    "probe_k",
+                ),
+            ],
+            join,
+        )
+        .unwrap(),
+    );
+
+    let mut config = ConfigOptions::default();
+    config.execution.parquet.pushdown_filters = true;
+    config.optimizer.enable_dynamic_filter_pushdown = true;
+    // The dynamic filter exists first, then the projection moves.
+    let plan = FilterPushdown::new_post_optimization()
+        .optimize(plan, &config)
+        .unwrap();
+    let plan =
+        datafusion_physical_optimizer::projection_pushdown::ProjectionPushdown::new()
+            .optimize(plan, &config)
+            .unwrap();
+
+    let session_ctx =
+        SessionContext::new_with_config(SessionConfig::from(config).with_batch_size(10));
+    session_ctx.register_object_store(
+        ObjectStoreUrl::parse("test://").unwrap().as_ref(),
+        Arc::new(InMemory::new()),
+    );
+    let batches = collect(plan, session_ctx.state().task_ctx()).await.unwrap();
+    assert_batches_eq!(
+        [
+            "+---------+---------+",
+            "| build_k | probe_k |",
+            "+---------+---------+",
+            "| aa      | aa      |",
+            "+---------+---------+",
+        ],
+        &batches
+    );
+}
