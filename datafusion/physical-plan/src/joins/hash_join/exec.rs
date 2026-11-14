@@ -2385,6 +2385,14 @@ impl ExecutionPlan for HashJoinExec {
     }
 }
 
+#[cfg(test)]
+impl HashJoinExec {
+    /// The probe streams of the last execution that could spill, if any
+    pub(super) fn probe_streams(&self) -> Option<&Arc<ProbeStreams>> {
+        self.probe_streams.get()
+    }
+}
+
 #[cfg(feature = "proto")]
 impl HashJoinExec {
     /// Reconstruct a [`HashJoinExec`] from its protobuf representation.
