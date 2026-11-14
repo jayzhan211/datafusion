@@ -22,6 +22,7 @@
 //! - `default`: no change.
 //! - `first:KEY` / `last:KEY`: move rule `KEY` to the start or end of the list.
 //! - `move:KEY:before:OTHER` / `move:KEY:after:OTHER`: move `KEY` next to `OTHER`.
+//! - `drop:KEY`: leave rule `KEY` out of the list.
 //! - `reverse`: reverse the list.
 //! - `shuffle:SEED`: shuffle the list with a seeded generator.
 //! - `twice`: run the list again after itself, as a re-planning step does
@@ -175,6 +176,9 @@ fn apply(rules: &mut Vec<(String, Rule)>, directive: &str) {
         ["first", key] => {
             let rule = rules.remove(position(rules, key));
             rules.insert(0, rule);
+        }
+        ["drop", key] => {
+            rules.remove(position(rules, key));
         }
         ["last", key] => {
             let rule = rules.remove(position(rules, key));
