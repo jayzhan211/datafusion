@@ -48,6 +48,21 @@ subsequent join processing time.
 | avg_fanout              | Average number of build-side join-key matches per matched probe-side row before applying any join filter. |
 | array_map_created_count | Number of times `HashJoinExec` created an `ArrayMap` for perfect hash join lookup execution.              |
 
+With `datafusion.execution.enable_hash_join_spilling` on, a join that can
+spill also reports how much it spilled and how it joined the spilled rows. A
+build side that does not fit is split into buckets by key hash; each spilled
+bucket is later joined with the probe rows spilled for it.
+
+| Metric                 | Description                                                                                                         |
+| ---------------------- | ------------------------------------------------------------------------------------------------------------------- |
+| spill_count            | Number of spill files written, for build and probe rows.                                                            |
+| spilled_bytes          | Total number of bytes written to spill files.                                                                       |
+| spilled_rows           | Total number of rows written to spill files.                                                                        |
+| spilled_buckets        | Build-side buckets spilled when the build side was first split (at most 16 per build side).                         |
+| spilled_pairs_resplit  | Spilled buckets split again because they did not fit the memory the join holds.                                     |
+| spilled_pairs_reversed | Spilled buckets that splitting cannot shrink (for example one hot key), joined by hashing their probe rows instead. |
+| spilled_pairs_chunked  | Spilled buckets that splitting cannot shrink and that cannot be reversed, joined a build chunk at a time.           |
+
 ### AggregateExec
 
 `AggregateExec` exposes the common `BaselineMetrics`, the operator-level
