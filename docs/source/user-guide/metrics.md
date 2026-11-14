@@ -58,6 +58,7 @@ bucket is later joined with the probe rows spilled for it.
 | spill_count            | Number of spill files written, for build and probe rows.                                                            |
 | spilled_bytes          | Total number of bytes written to spill files.                                                                       |
 | spilled_rows           | Total number of rows written to spill files.                                                                        |
+| spilled_buckets        | Build-side buckets spilled when the build side was first split (at most 16 per build side).                         |
 | spilled_pairs_resplit  | Spilled buckets split again because they did not fit the memory the join holds.                                     |
 | spilled_pairs_reversed | Spilled buckets that splitting cannot shrink (for example one hot key), joined by hashing their probe rows instead. |
 | spilled_pairs_chunked  | Spilled buckets that splitting cannot shrink and that cannot be reversed, joined a build chunk at a time.           |

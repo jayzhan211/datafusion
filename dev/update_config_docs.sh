@@ -240,6 +240,15 @@ from disk afterwards; the plan does not change. A join whose output must keep
 the probe side's order still fails. `EXPLAIN ANALYZE` shows how much each join
 spilled, see [Metrics](metrics.md#hashjoinexec).
 
+A join whose build side is shared by every partition (`mode=CollectLeft` in
+`EXPLAIN`) spills more slowly than a partitioned one: each spilled bucket is
+hashed by one thread while the partitions wait for it. The physical planner
+picks this mode for build sides estimated smaller than
+`datafusion.optimizer.hash_join_single_partition_threshold` (or
+`hash_join_single_partition_threshold_rows` when the size is unknown), for
+null-aware `NOT IN` joins, and for every hash join when
+`datafusion.optimizer.repartition_joins` is off.
+
 [`FairSpillPool`]: https://docs.rs/datafusion/latest/datafusion/execution/memory_pool/struct.FairSpillPool.html
 
 ## Join Queries

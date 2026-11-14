@@ -166,9 +166,12 @@ pub(super) struct SpillContext {
     pub(super) right_side_ordered: bool,
 }
 
-/// How the spilled pairs of a partition were joined, beyond the spill counts
+/// How much of a partition's build side spilled, and how the spilled pairs
+/// were joined, beyond the spill counts
 #[derive(Clone, Debug)]
 pub(super) struct SpilledPairMetrics {
+    /// Buckets the build side spilled when it was first split, of [`BUCKETS`]
+    buckets: Count,
     /// Pairs split again because they did not fit the kept memory
     resplit: Count,
     /// Pairs that splitting cannot shrink, joined with their probe rows hashed
@@ -181,6 +184,7 @@ impl SpilledPairMetrics {
     pub(super) fn new(metrics: &ExecutionPlanMetricsSet, partition: usize) -> Self {
         let counter = |name| MetricBuilder::new(metrics).counter(name, partition);
         Self {
+            buckets: counter("spilled_buckets"),
             resplit: counter("spilled_pairs_resplit"),
             reversed: counter("spilled_pairs_reversed"),
             chunked: counter("spilled_pairs_chunked"),
@@ -816,6 +820,7 @@ async fn split_build(
             .map(|(_, side)| join_bytes(side.rows, side.bytes)),
     );
 
+    ctx.pairs.buckets.add(spilled.len());
     let mut buckets = [false; BUCKETS];
     for (bucket, build) in spilled {
         buckets[bucket] = true;
@@ -956,7 +961,9 @@ fn probe_spilled(
 /// Joins this stream's probe rows of one spilled bucket, `own`, once every
 /// stream is done with the buckets before it. The bucket's build side is
 /// hashed once, by the first stream to need it, and every stream probes that
-/// table; one larger than the kept memory is joined apart instead.
+/// table; one larger than the kept memory is joined apart instead. Joined
+/// apart, each stream splits the bucket's build side again for its own probe
+/// rows: correct, but slow for a build side many times the memory limit.
 async fn join_bucket(
     ctx: &Arc<SpillContext>,
     kept: &Arc<KeptMemory>,
@@ -2756,6 +2763,11 @@ mod tests {
             assert_eq!(actual, expected, "{join_type}");
             assert!(
                 metrics.spill_count().unwrap_or(0) > 0,
+                "{join_type}: {metrics}"
+            );
+            // One partition: some of its buckets spilled, and no more than it has
+            assert!(
+                (1..=BUCKETS).contains(&sum(&metrics, "spilled_buckets")),
                 "{join_type}: {metrics}"
             );
         }
